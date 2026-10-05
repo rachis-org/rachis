@@ -15,6 +15,21 @@ from .base import FormatBase, ValidationError, _check_validation_level
 
 class _FileFormat(FormatBase, metaclass=abc.ABCMeta):
 
+    # Valid levels are 0 through 9. _ZipArchive.save passes 1 through 9 to
+    # ZipFile.write as `compresslevel`; 1 is fastest and 9 makes the
+    # smallest archive. 0 selects `ZIP_STORED`, leaving the file uncompressed.
+    COMPRESSION = None
+
+    @classmethod
+    def _validate_compression(cls):
+        level = cls.COMPRESSION
+        if level is not None and (
+                isinstance(level, bool) or not isinstance(level, int)
+                or not 0 <= level <= 9):
+            raise ValueError(
+                f'{cls.__name__}.COMPRESSION must be an integer from 0 to 9, '
+                f'not {level!r}.')
+
     def validate(self, level='max'):
         _check_validation_level(level)
 
