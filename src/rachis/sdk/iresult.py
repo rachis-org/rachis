@@ -25,6 +25,13 @@ class IResult(metaclass=abc.ABCMeta):
 
     @property
     @abc.abstractmethod
+    def record_provenance(self):
+        """
+        Whether this Result recorded provenance or not
+        """
+
+    @property
+    @abc.abstractmethod
     def type(self):
         """
         The semantic type of this result

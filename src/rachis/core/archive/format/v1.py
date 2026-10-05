@@ -8,6 +8,8 @@
 
 import rachis.core.archive.format.v0 as v0
 
+from rachis.core.archive.provenance import NoOpProvenanceCapture
+
 
 class ArchiveFormat(v0.ArchiveFormat):
     PROVENANCE_DIR = 'provenance'
@@ -23,10 +25,12 @@ class ArchiveFormat(v0.ArchiveFormat):
 
         # now we write the contents of provenance
         prov_dir = root / cls.PROVENANCE_DIR
-        prov_dir.mkdir()
+        if not isinstance(provenance_capture, NoOpProvenanceCapture):
+            prov_dir.mkdir()
 
-        provenance_capture.finalize(
-            prov_dir, [root / cls.METADATA_FILE, archive_record.version_fp])
+            provenance_capture.finalize(
+                prov_dir, [root / cls.METADATA_FILE, archive_record.version_fp]
+            )
 
     def __init__(self, archive_record, *args, replay=False):
         super().__init__(archive_record, *args, replay=replay)

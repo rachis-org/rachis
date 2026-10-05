@@ -273,8 +273,11 @@ class Action(metaclass=abc.ABCMeta):
         """
         def bound_callable(*args, **kwargs):
             ctx = context_factory()
-            provenance = self._ProvCaptureCls(
-                self.type, self.plugin_id, self.id, execution_ctx)
+            if ctx._record_provenance:
+                provenance = self._ProvCaptureCls(
+                    self.type, self.plugin_id, self.id, execution_ctx)
+            else:
+                provenance = archive.NoOpProvenanceCapture()
 
             if self.deprecated:
                 with rachis.core.util.warning() as warn:
@@ -312,6 +315,9 @@ class Action(metaclass=abc.ABCMeta):
                     "Number of callable outputs must match number of "
                     "outputs defined in signature: %d != %d" %
                     (len(outputs), len(self.signature.outputs)))
+
+            for output in outputs:
+                output._record_provenance = ctx._record_provenance
 
             # Wrap in a Results object mapping output name to value so
             # users have access to outputs by name or position.
