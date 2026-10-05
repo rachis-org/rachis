@@ -591,7 +591,7 @@ def build_usage_examples(
 
         if node.action.action_type == 'import':
             build_import_usage(node, ns, cfg)
-        else:
+        elif node.format != 'report':
             build_action_usage(node, ns, std_actions, action_id, cfg)
 
 
