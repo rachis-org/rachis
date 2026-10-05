@@ -6,6 +6,13 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+import pandas as pd
+import numpy as np
+
+
+CATEGORICAL_DTYPE = pd.StringDtype(na_value=np.nan)
+
+
 SUPPORTED_COLUMN_TYPES = {'categorical', 'numeric'}
 
 SUPPORTED_ID_HEADERS = {

@@ -16,6 +16,7 @@ import pandas as pd
 
 from rachis.metadata import (Metadata, CategoricalMetadataColumn,
                              NumericMetadataColumn, MetadataFileError)
+from rachis.metadata.base import CATEGORICAL_DTYPE
 import rachis.util
 
 
@@ -655,9 +656,12 @@ class TestLoadSuccess(unittest.TestCase):
 
         exp_index = pd.Index(['id1', 'id2', 'id3', 'id4'],
                              name='id')
-        exp_df = pd.DataFrame({'col1': ['collected', 'not collected',
-                                        'not collected', 'collected']},
-                              index=exp_index)
+        exp_df = pd.DataFrame({
+            'col1': pd.array(
+                ['collected', 'not collected',
+                 'not collected', 'collected'],
+                dtype=CATEGORICAL_DTYPE)},
+            index=exp_index)
 
         pd.testing.assert_frame_equal(obs_md.to_dataframe(), exp_df)
 

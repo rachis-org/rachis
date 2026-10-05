@@ -9,96 +9,60 @@
 import pandas as pd
 import numpy as np
 
-from .enan import make_nan_with_payload as _make_nan_with_payload
-from .enan import get_payload_from_nan as _get_payload_from_nan
 
-
-def _encode_terms(namespace):
-    enum = _MISSING_ENUMS[namespace]
-    namespace = _NAMESPACE_LOOKUP.index(namespace)
-
-    def encode(x):
-        if type(x) is not str:
-            return x
-        try:
-            code = enum.index(x)
-        except ValueError:
-            return x
-        return _make_nan_with_payload(code, namespace=namespace)
-
-    return encode
-
-
-def _handle_insdc_missing(series):
-    return series.apply(_encode_terms('INSDC:missing'))
-
-
-def _handle_blank(series):
-    return series
-
-
-def _handle_no_missing(series):
+def _validate_no_missing(series: pd.Series):
     if series.isna().any():
-        raise ValueError("Missing values are not allowed in series/column"
-                         " (name=%r) when using scheme 'no-missing'."
-                         % series.name)
-    return series
+        msg = (
+            "Missing values are not allowed in series/column "
+            f"(name={series.name}) when using scheme 'no-missing'."
+        )
+        raise ValueError(msg)
 
 
-BUILTIN_MISSING = {
-    'INSDC:missing': _handle_insdc_missing,
-    'blank': _handle_blank,
-    'no-missing': _handle_no_missing
-}
 _MISSING_ENUMS = {
     'INSDC:missing': (
         'not applicable', 'missing', 'not collected', 'not provided',
-        'restricted access')
+        'restricted access'
+    ),
+    'blank': (),
+    'no-missing': (),
 }
-
-# list index reflects the nan namespace, the "blank"/"no-missing" enums don't
-# apply here, since they aren't actually encoded in the NaNs
-_NAMESPACE_LOOKUP = ['INSDC:missing']
+_MISSING_VALIDATORS = {
+    'no-missing': _validate_no_missing
+}
 DEFAULT_MISSING = 'blank'
 
 
-def series_encode_missing(series: pd.Series, enumeration: str) -> pd.Series:
+def encode_and_get_missing_mask(
+    series: pd.Series, enumeration: str
+) -> tuple[pd.Series, pd.Series]:
     if type(enumeration) is not str:
         TypeError("Wrong type for `enumeration`, expected string")
-    try:
-        encoder = BUILTIN_MISSING[enumeration]
-    except KeyError:
-        raise ValueError("Unknown enumeration: %r, (available: %r)"
-                         % (enumeration, list(BUILTIN_MISSING.keys())))
 
-    new = encoder(series)
-    if series.dtype == object and new.isna().all():
-        # return to categorical of all missing values
-        return new.astype(object)
-    return new
+    if enumeration not in _MISSING_ENUMS:
+        raise ValueError(
+            f"Unknown enumeration: {enumeration}, "
+            f"(available: {list(_MISSING_ENUMS.keys())})."
+        )
+
+    if enumeration in _MISSING_VALIDATORS:
+        validator = _MISSING_VALIDATORS[enumeration]
+        validator(series)
+
+    to_encode = _MISSING_ENUMS[enumeration]
+    encoded = series.where(~series.isin(to_encode), np.nan)
+    missing_mask = series.where(series.isin(to_encode), np.nan)
+
+    if pd.api.types.is_object_dtype(series.dtype) and encoded.isna().all():
+        # float64 by default, return to categorical
+        encoded = encoded.astype(object)
+    else:
+        encoded = encoded.infer_objects()
+
+    return encoded, missing_mask
 
 
-def series_extract_missing(series: pd.Series) -> pd.Series:
-    def _decode(x):
-        if np.issubdtype(type(x), np.floating) and np.isnan(x):
-            code, namespace = _get_payload_from_nan(x)
-            if namespace is None:
-                return x
-            elif namespace == 255:
-                raise ValueError("Custom enumerations are not yet supported")
-            else:
-                try:
-                    enum = _MISSING_ENUMS[_NAMESPACE_LOOKUP[namespace]]
-                except (IndexError, KeyError):
-                    return x
-
-            try:
-                return enum[code]
-            except IndexError:
-                return x
-
-        return x
-
-    missing = series[series.isna()]
-    missing = missing.apply(_decode)
-    return missing.astype(object)
+def decode_from_missing_mask(
+    series: pd.Series, missing_mask: pd.Series
+) -> pd.Series:
+    return series.where(missing_mask.isna(), missing_mask)
