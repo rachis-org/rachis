@@ -273,15 +273,19 @@ class ArchiveCheck(_Archive):
 
     # TODO: make this part of the archiver API at some point
     def open(self, relpath):
-        abspath = os.path.join(str(self.path), relpath)
-        return open(abspath, 'r')
+        path = (self.path if hasattr(self.path, 'open')
+                else pathlib.Path(self.path))
+        return (path / relpath).open()
 
     def relative_iterdir(self, relpath='.'):
-        for p in pathlib.Path(self.path).iterdir():
-            yield str(p.relative_to(self.path))
+        path = (self.path if hasattr(self.path, 'iterdir')
+                else pathlib.Path(self.path))
+        for p in path.iterdir():
+            yield str(p.relative_to(path))
 
     def _get_uuid(self):
-        return os.path.basename(self.path)
+        return (self.path.name if hasattr(self.path, 'name')
+                else os.path.basename(self.path))
 
 
 class Archiver:
@@ -390,6 +394,10 @@ class Archiver:
 
     @classmethod
     def load(cls, filepath, *args, replay=False):
+        from rachis.core.cache import get_cache
+        cache = get_cache()
+        if cache.CURRENT_FORMAT_VERSION == 'v2':
+            return cache.import_archive(filepath, replay=replay)
         archive = cls.get_archive(filepath)
         path, cache = cls._make_temp_path(archive.uuid)
 
@@ -433,6 +441,37 @@ class Archiver:
 
     @classmethod
     def from_data(cls, type, format, data_initializer, provenance_capture):
+        from rachis.core.cache import get_cache
+        cache = get_cache()
+        if cache.CURRENT_FORMAT_VERSION == 'v2':
+            from .archiver_v2 import seal_tree
+            workspace = cache.reserve_result()
+            dependencies = getattr(
+                provenance_capture, '_cache_dependencies', {})
+            if dependencies:
+                owner = (cache.object_path('ref', workspace.ref_id)
+                         / 'dependencies')
+                owner.mkdir()
+                for ref_id, source_cache in dependencies.items():
+                    if source_cache is cache:
+                        cache.retain(owner, 'ref', ref_id)
+            import json
+            reserved = json.loads((cache.object_path('ref', workspace.ref_id)
+                                   / 'resumption.json').read_text())['uuid']
+            uuid = _uuid.UUID(reserved)
+            root = workspace.path.parent / 'staging' / str(uuid)
+            root.mkdir(parents=True)
+            try:
+                rec = _Archive.setup(uuid, root, cls.CURRENT_FORMAT_VERSION,
+                                     rachis.__version__)
+                Format = cls.get_format_class(cls.CURRENT_FORMAT_VERSION)
+                Format.write(rec, type, format, data_initializer,
+                             provenance_capture)
+                return seal_tree(cache, workspace.ref_id, root, generated=True)
+            except BaseException:
+                workspace.release()
+                cache.garbage_collection()
+                raise
         uuid = _uuid.uuid4()
         path, cache = cls._make_temp_path(uuid)
 
@@ -460,6 +499,7 @@ class Archiver:
 
     def __init__(self, path, process_alias, fmt, cache):
         self.path = path
+        self._cache = cache
         self.process_alias = process_alias
         self._fmt = fmt
         self._destructor = weakref.finalize(self, cache._deallocate,
@@ -501,6 +541,10 @@ class Archiver:
     @property
     def citations(self):
         return getattr(self._fmt, 'citations', cite.Citations())
+
+    def snapshot(self):
+        from .view import ConcreteArchiveView
+        return ConcreteArchiveView(self)
 
     def save(self, filepath):
         _ZipArchive.save(self.path, filepath)

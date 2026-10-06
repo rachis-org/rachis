@@ -27,8 +27,9 @@ def _load_alias_uuid(result):
 
 def _load_nested_alias_uuid(result, cache):
     alias_uuid = _load_alias_uuid(result)
-    aliased_result = rachis.sdk.Result.load(
-        os.path.join(cache.data, alias_uuid))
+    aliased_result = cache.named_pool.load(alias_uuid) if \
+        cache.CURRENT_FORMAT_VERSION == 'v2' else rachis.sdk.Result.load(
+            os.path.join(cache.data, alias_uuid))
     return _load_alias_uuid(aliased_result)
 
 
@@ -49,7 +50,9 @@ def _load_nested_alias_uuids(collection, cache):
     alias_results = {}
     for idx, alias_uuid in enumerate(alias_uuids):
         alias_results[idx] = \
-            rachis.sdk.Result.load(os.path.join(cache.data, alias_uuid))
+            (cache.named_pool.load(alias_uuid) if
+             cache.CURRENT_FORMAT_VERSION == 'v2' else
+             rachis.sdk.Result.load(os.path.join(cache.data, alias_uuid)))
 
     return _load_alias_uuids(alias_results)
 
@@ -723,7 +726,7 @@ class TestPipelineResumption(unittest.TestCase):
 
             int_list_uuids, int_dict_uuids = e.exception.uuids
             # Nuke an element of the list
-            os.remove(os.path.join(self.pool.path, int_list_uuids[0]))
+            self.pool.remove(int_list_uuids[0])
 
             # We now expect to get this warning and recreate the list because
             # it is incomplete

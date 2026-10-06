@@ -199,8 +199,10 @@ def metadata_path_constructor(loader, node) -> MetadataInfo:
         artifact_uuids = []
         rel_fp = raw
 
-    action_fp = Path(loader.name)
-    metadata_fp = action_fp.parent / rel_fp
+    sibling = getattr(loader, 'view_parent', None)
+    if sibling is None:
+        sibling = Path(loader.name).parent
+    metadata_fp = sibling / rel_fp
     md5sum_hash = util.checksum(metadata_fp, checksum_type='md5')
 
     return MetadataInfo(artifact_uuids, rel_fp, md5sum_hash)
@@ -317,6 +319,8 @@ class ProvenanceCapture:
         self.temp_annotations_dir.mkdir()
 
     def add_ancestor(self, artifact):
+        if hasattr(artifact._archiver, 'ref_id'):
+            return self._add_view_ancestor(artifact)
         other_path = artifact._archiver.provenance_dir
         if other_path is None:
             # The artifact doesn't have provenance (e.g. version 0)
@@ -353,6 +357,73 @@ class ProvenanceCapture:
                 if not destination.exists():
                     shutil.copytree(str(annotation), str(destination))
 
+        return str(artifact.uuid)
+
+    def _add_view_ancestor(self, artifact):
+        from rachis.core.cache import get_cache
+        from .view import copy_tree
+        if artifact._archiver.provenance_dir is None:
+            return NoProvenance(artifact.uuid)
+        cache = get_cache()
+        if cache.CURRENT_FORMAT_VERSION == 'v2':
+            dependencies = getattr(self, '_cache_dependencies', {})
+            dependencies[artifact._archiver.ref_id] = artifact._archiver.cache
+            self._cache_dependencies = dependencies
+        if cache.CURRENT_FORMAT_VERSION != 'v2':
+            # Explicit transfer into a V1 construction workspace.
+            with artifact._archiver.snapshot() as view:
+                copy_tree(view.root / 'provenance',
+                          self.ancestor_dir / str(artifact.uuid),
+                          exclude=(self.ANCESTOR_DIR,))
+                ancestors = view.root / 'provenance' / self.ANCESTOR_DIR
+                if ancestors.exists():
+                    for ancestor in ancestors.iterdir():
+                        target = self.ancestor_dir / ancestor.name
+                        if not target.exists():
+                            copy_tree(ancestor, target)
+                annotations = view.root / 'annotations'
+                if annotations.exists():
+                    for annotation in annotations.iterdir():
+                        target = self.temp_annotations_dir / annotation.name
+                        if not target.exists():
+                            copy_tree(annotation, target)
+            return str(artifact.uuid)
+        # Retain actual packs and immutable byte indexes, rather than copying
+        # transitive provenance trees. Captured masks are independent of future
+        # mutations to the input's shared editable ref.
+        import os
+        from .archiver_v2 import whiteout_bytes, read_whiteouts
+        from ..cache_v2 import durable_write, fsync_dir
+        retained = self.path / '.cache-v2-ancestry'
+        retained.mkdir(exist_ok=True)
+        with artifact._archiver.snapshot() as view:
+            masks = read_whiteouts(retained) | view.whiteouts
+            annotations = retained / 'annotations'
+            annotations.mkdir(exist_ok=True)
+            for category, node_id, pack in view.packs:
+                target = ((retained / (node_id + '.zip'))
+                          if category == 'provenance'
+                          else annotations / (node_id + '.zip'))
+                if target.exists():
+                    continue
+                # Opened pack inode is retained by the snapshot. Copy across
+                # filesystems; within this cache capture a hardlink to that
+                # same binding under LOCK, with an identity recheck.
+                source = Path(pack._cache_file.name)
+                with cache.lock:
+                    current = source.stat() if source.exists() else None
+                    opened = os.fstat(pack._cache_file.fileno())
+                    matches = (current is not None
+                               and current.st_ino == opened.st_ino)
+                    if matches and cache is artifact._archiver.cache:
+                        os.link(source, target)
+                if not target.exists():
+                    pack._cache_file.seek(0)
+                    with target.open('wb') as output:
+                        import shutil
+                        shutil.copyfileobj(pack._cache_file, output)
+            durable_write(retained / 'whiteout.jsonl', whiteout_bytes(masks))
+            fsync_dir(retained)
         return str(artifact.uuid)
 
     def make_citation_key(self, domain, package=None, identifier=None,
@@ -543,7 +614,17 @@ class ProvenanceCapture:
         # create a copy of the backing dir so factory (the hard stuff is
         # mostly done by this point)
         forked._build_paths()
-        distutils.dir_util.copy_tree(str(self.path), str(forked.path))
+        if (self.path / '.cache-v2-ancestry').exists():
+            def copy_member(source, destination):
+                if ('.cache-v2-ancestry' in Path(source).parts
+                        and source.endswith('.zip')):
+                    import os
+                    return os.link(source, destination)
+                return shutil.copy2(source, destination)
+            shutil.copytree(self.path, forked.path, dirs_exist_ok=True,
+                            copy_function=copy_member)
+        else:
+            distutils.dir_util.copy_tree(str(self.path), str(forked.path))
 
         return forked
 
@@ -684,3 +765,13 @@ class ReportProvenanceCapture(ProvenanceCapture):
         action['inputs'] = self.inputs
 
         return action
+
+
+def load_action_stream(stream):
+    """Parse YAML with an explicit concrete or logical sibling resolver."""
+    loader = yaml.SafeLoader(stream)
+    loader.view_parent = getattr(stream, 'view_parent', None)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()

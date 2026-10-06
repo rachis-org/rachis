@@ -24,7 +24,8 @@ import pytest
 from flufl.lock import LockState
 
 import rachis
-from rachis.core.cache import (Cache, _exit_cleanup, get_cache, _get_user,
+from rachis.core.cache import (CacheV1 as Cache, _exit_cleanup, get_cache,
+                               _get_user,
                                _VERSION_TEMPLATE)
 from rachis.core.testing.type import IntSequence1, IntSequence2, SingleInt
 from rachis.core.testing.util import get_dummy_plugin
@@ -533,7 +534,7 @@ class TestCache(unittest.TestCase):
 
         # This test needs to use a cache that exists past the lifespan of the
         # function
-        cache = get_cache()
+        cache = Cache(tempfile.mkdtemp(prefix='legacy-exit-test-') + '/cache')
         test_pool = cache.create_pool(TEST_POOL, reuse=True)
 
         with test_pool:
@@ -637,13 +638,12 @@ class TestCache(unittest.TestCase):
             self.assertTrue(user_expected.issubset(user_observed))
 
     def test_inconsistent_cache(self):
-        cache = Cache()
+        path = os.path.join(self.test_dir.name, 'invalid-cache')
+        cache = Cache(path)
         (cache.path / 'VERSION').unlink()
-
-        del cache
-
-        with self.assertWarnsRegex(UserWarning, "in an inconsistent state"):
-            Cache()
+        with self.assertRaisesRegex(ValueError, 'VERSION'):
+            Cache(path)
+        self.assertTrue((cache.path / 'data').exists())
 
     def test_output_collection_provenance(self):
         """ This is really a prov test, but it's here because the
@@ -662,9 +662,8 @@ class TestCache(unittest.TestCase):
         self.assertEqual(observed, expected)
 
     def test_cache_existing_dir(self):
-        with self.assertRaisesRegex(
-                ValueError, f"Path: '{self.not_cache_path}' already exists"):
-            Cache(self.not_cache_path)
+        cache = Cache(self.not_cache_path)
+        self.assertTrue(Cache.is_cache(cache.path))
 
     def test_futuristic_cache(self):
         future_version = "9001"

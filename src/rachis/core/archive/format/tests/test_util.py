@@ -5,6 +5,7 @@
 #
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
+import hashlib
 import os
 import pathlib
 import tempfile
@@ -20,6 +21,7 @@ from rachis.core.archive.archiver import Archiver, ArchiveRecord
 from rachis.core.archive.format.v7_0 import ArchiveFormat
 from rachis.core.archive.format.util import artifact_version
 from rachis.core.annotate import Note
+from rachis.core.util import from_checksum_format
 from rachis.sdk import Artifact
 
 
@@ -152,8 +154,14 @@ class TestArtifactVersion(unittest.TestCase, ArchiveTestingMixin):
                          rf'id: {note.id}\nname: mynote\ntype: Note')
         # check that the contents of the note is what we expect
         self.assertRegex(str(note_contents), 'my special text')
-        # check that the checksums file contains the two files we expect
-        self.assertRegex(str(checksums), '^.*metadata.yaml.*note.txt.*$')
+        # Verify both entries and their digests regardless of file order.
+        self.assertCountEqual(
+            [from_checksum_format(line)
+             for line in checksums.decode('utf-8').splitlines()],
+            [('metadata.yaml', hashlib.sha512(
+                annotation_metadata.encode('utf-8')).hexdigest()),
+             ('note.txt', hashlib.sha512(note_contents).hexdigest())],
+        )
 
     # testing data directory size helpers
     # total file size calculation within a provided directory

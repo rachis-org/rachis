@@ -306,7 +306,8 @@ class TestVisualization(unittest.TestCase, ArchiveTestingMixin):
             data_dir, self.make_provenance_capture())
 
         def get_abs_path(rel):
-            return str(visualization._archiver.root_dir / rel)
+            return str(visualization._archiver.data_dir /
+                       pathlib.Path(rel).relative_to('data'))
         actual = visualization.get_index_paths(relative=False)
         expected = {'html': get_abs_path('data/index.html'),
                     'tsv': get_abs_path('data/index.tsv')}
@@ -431,7 +432,7 @@ class TestMakeReport(unittest.TestCase):
             template,
             collection,
             descriptions={'first': 'A description for the first plot.'})
-        res_dir = str(report_viz._archiver.path)
+        res_dir = str(report_viz._archiver.data_dir.parent)
 
         # verify index.html at top level and subfigures index.json
         top_index = os.path.join(res_dir, 'data', 'index.html')
@@ -461,7 +462,7 @@ class TestMakeReport(unittest.TestCase):
             self.template,
             {'inner': self.viz2},
             descriptions={'inner': 'A nested leaf description.'})
-        inner_path = inner_report._archiver.path
+        inner_path = inner_report._archiver.data_dir.parent
 
         # inner report will have two entries in subfigures, index and viz2
         self.assertEqual(
@@ -475,7 +476,7 @@ class TestMakeReport(unittest.TestCase):
             self.template,
             collection,
             descriptions={'nested': 'A description for the nested report.'})
-        res_dir = outer_report._archiver.path
+        res_dir = outer_report._archiver.data_dir.parent
 
         subfigures_dir = os.path.join(res_dir, 'data', 'subfigures')
         index_fp = os.path.join(subfigures_dir, 'index.json')

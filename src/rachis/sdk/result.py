@@ -242,6 +242,10 @@ class Result(IResult):
         self._archiver.save(filepath)
         return filepath
 
+    def snapshot(self):
+        """Retain a consistent logical archive view until context close."""
+        return self._archiver.snapshot()
+
     def _alias(self, name, provenance, ctx, qiime_type=None):
         self._assert_alias_type_refines_realized_type(qiime_type, self.type)
 
@@ -676,7 +680,11 @@ class Visualization(Result):
         for abspath in self._archiver.data_dir.iterdir():
             data_path = str(abspath.relative_to(self._archiver.data_dir))
             if data_path.startswith('index.'):
-                relpath = abspath.relative_to(self._archiver.root_dir)
+                if hasattr(self._archiver.root_dir, 'view'):
+                    relpath = pathlib.Path('data') / abspath.relative_to(
+                        self._archiver.data_dir)
+                else:
+                    relpath = abspath.relative_to(self._archiver.root_dir)
                 ext = relpath.suffix[1:]
                 if ext in result:
                     raise ValueError(

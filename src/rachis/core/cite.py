@@ -64,7 +64,7 @@ class Citations(collections.OrderedDict):
         if package is not None:
             file = importlib.resources.open_text(package, path)
         else:
-            file = open(path)
+            file = path.open() if hasattr(path, 'open') else open(path)
 
         with file as fh:
             try:

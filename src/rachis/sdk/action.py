@@ -272,53 +272,60 @@ class Action(metaclass=abc.ABCMeta):
 
         """
         def bound_callable(*args, **kwargs):
-            ctx = context_factory()
-            provenance = self._ProvCaptureCls(
-                self.type, self.plugin_id, self.id, execution_ctx)
+            ctx = context_factory()._execution_context()
+            import contextlib
+            lifecycle = (ctx.scope if ctx.cache.CURRENT_FORMAT_VERSION == 'v2'
+                         else contextlib.nullcontext())
+            with lifecycle:
+                provenance = self._ProvCaptureCls(
+                    self.type, self.plugin_id, self.id, execution_ctx)
 
-            if self.deprecated:
-                with rachis.core.util.warning() as warn:
-                    warn(self._build_deprecation_message(), FutureWarning)
+                if self.deprecated:
+                    with rachis.core.util.warning() as warn:
+                        warn(self._build_deprecation_message(), FutureWarning)
 
-            if self.migrated:
-                with rachis.core.util.warning() as warn:
-                    warn(self._build_migration_message(), FutureWarning)
+                if self.migrated:
+                    with rachis.core.util.warning() as warn:
+                        warn(self._build_migration_message(), FutureWarning)
 
-            # Type management
-            collated_inputs = self.signature.collate_inputs(*args, **kwargs)
-            self.signature.check_types(**collated_inputs)
-            output_types = self.signature.solve_output(**collated_inputs)
-            callable_args = self.signature.coerce_user_input(**collated_inputs)
+                # Type management
+                collated_inputs = self.signature.collate_inputs(
+                    *args, **kwargs)
+                self.signature.check_types(**collated_inputs)
+                output_types = self.signature.solve_output(**collated_inputs)
+                callable_args = self.signature.coerce_user_input(
+                    **collated_inputs)
 
-            # validate and cache checksums
-            checksum_cache = ChecksumCache()
-            for input in collated_inputs.values():
-                if isinstance(input, Artifact):
-                    checksum_cache.cache_artifact(input)
-                elif isinstance(input, ResultCollection):
-                    checksum_cache.cache_result_collection(input)
+                # validate and cache checksums
+                checksum_cache = ChecksumCache()
+                for input in collated_inputs.values():
+                    if isinstance(input, Artifact):
+                        checksum_cache.cache_artifact(input)
+                    elif isinstance(input, ResultCollection):
+                        checksum_cache.cache_result_collection(input)
 
-            callable_args, captures = \
-                self.signature.transform_and_add_callable_args_to_prov(
-                    provenance, **callable_args)
+                callable_args, captures = \
+                    self.signature.transform_and_add_callable_args_to_prov(
+                        provenance, **callable_args)
 
-            outputs = self._callable_executor_(
-                ctx, callable_args, output_types, provenance)
+                outputs = self._callable_executor_(
+                    ctx, callable_args, output_types, provenance)
 
-            self._ensure_captures_set(captures)
+                self._ensure_captures_set(captures)
 
-            if len(outputs) != len(self.signature.outputs):
-                raise ValueError(
-                    "Number of callable outputs must match number of "
-                    "outputs defined in signature: %d != %d" %
-                    (len(outputs), len(self.signature.outputs)))
+                if len(outputs) != len(self.signature.outputs):
+                    raise ValueError(
+                        "Number of callable outputs must match number of "
+                        "outputs defined in signature: %d != %d" %
+                        (len(outputs), len(self.signature.outputs)))
 
-            # Wrap in a Results object mapping output name to value so
-            # users have access to outputs by name or position.
-            results = rachis.sdk.Results(
-                self.signature.outputs.keys(), outputs)
+                # Wrap in a Results object mapping output name to value so
+                # users have access to outputs by name or position.
+                results = rachis.sdk.Results(
+                    self.signature.outputs.keys(), outputs)
 
-            return results
+                ctx._adopt_outputs(results)
+                return results
 
         bound_callable = self._rewrite_wrapper_signature(bound_callable)
         self._set_wrapper_properties(bound_callable)
@@ -536,7 +543,12 @@ class Visualizer(Action):
     # Abstract method implementations:
 
     def _callable_executor_(self, ctx, view_args, output_types, provenance):
-        with tempfile.TemporaryDirectory(prefix='rachis-temp-') as temp_dir:
+        directory = (ctx.cache.acquire_directory('visualizer')
+                     if ctx.cache.CURRENT_FORMAT_VERSION == 'v2' else
+                     tempfile.TemporaryDirectory(prefix='rachis-temp-'))
+        with directory as workspace:
+            temp_dir = (str(workspace.path) if hasattr(workspace, 'path')
+                        else workspace)
             ret_val = self._callable(output_dir=temp_dir, **view_args)
             if ret_val is not None:
                 raise TypeError(

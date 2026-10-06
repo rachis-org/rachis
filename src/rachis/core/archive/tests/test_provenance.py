@@ -33,7 +33,7 @@ class TestProvenanceIntegration(unittest.TestCase):
         p_dir = c._archiver.provenance_dir
 
         new_m = rachis.Metadata.load(
-            str(p_dir / 'artifacts' / str(b.uuid) / 'action' / 'metadata.tsv'))
+            p_dir / 'artifacts' / str(b.uuid) / 'action' / 'metadata.tsv')
 
         pd.testing.assert_frame_equal(m.to_dataframe(), new_m.to_dataframe())
 
@@ -69,7 +69,7 @@ class TestProvenanceIntegration(unittest.TestCase):
 
         # Check that metadata is written out fully
         new_m = rachis.Metadata.load(
-            str(p_dir / 'artifacts' / str(b.uuid) / 'action' / 'metadata.tsv'))
+            p_dir / 'artifacts' / str(b.uuid) / 'action' / 'metadata.tsv')
 
         pd.testing.assert_frame_equal(m.to_dataframe(), new_m.to_dataframe())
 
@@ -113,7 +113,7 @@ class TestProvenanceIntegration(unittest.TestCase):
                              'id\tc\n#q2:types\tcategorical\n0\tbaz\n')
 
         new_merged_md = rachis.Metadata.load(
-            str(p_dir / 'artifacts' / str(b.uuid) / 'action' / 'metadata.tsv'))
+            p_dir / 'artifacts' / str(b.uuid) / 'action' / 'metadata.tsv')
         pd.testing.assert_frame_equal(new_merged_md.to_dataframe(),
                                       merged_md.to_dataframe())
 

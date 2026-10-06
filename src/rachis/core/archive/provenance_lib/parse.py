@@ -502,6 +502,23 @@ def parse_provenance(cfg: Config, payload: Any) -> ParserResults:
 
     '''
     payload, parser = select_parser(payload)
+    if hasattr(payload, 'snapshot'):
+        from copy import copy
+        with payload.snapshot() as view:
+            retained = copy(payload)
+            retained.path = view.root
+            retained._fmt = copy(payload._fmt)
+            retained._fmt.path = view.root
+            if payload.provenance_dir is not None:
+                retained._fmt.provenance_dir = view.root / 'provenance'
+            parsed = parser.parse_prov(cfg, retained)
+            # Parsing uses the retained snapshot throughout. Nodes keep the
+            # live source handle for later operations that acquire new views.
+            for _, attrs in parsed.prov_digraph.nodes(data=True):
+                node = attrs.get('node_data')
+                if node is not None and hasattr(node, '_archiver'):
+                    node._archiver = payload
+            return parsed
     return parser.parse_prov(cfg, payload)
 
 
@@ -542,8 +559,9 @@ def select_parser(payload: Any) -> Parser:
 
     try:
         payload = _load_payload(payload)
-        parser = \
-            PARSER_TYPE_MAP.get(payload.__class__.__name__).get_parser(payload)
+        parser_type = (ArchiveParser if isinstance(payload, Archiver) else
+                       PARSER_TYPE_MAP.get(payload.__class__.__name__))
+        parser = parser_type.get_parser(payload)
         if parser is not None:
             return payload, parser
     except Exception as e:

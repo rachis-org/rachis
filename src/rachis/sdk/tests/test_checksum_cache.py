@@ -10,6 +10,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
+import pytest
 
 import rachis
 from rachis import Artifact
@@ -69,6 +70,7 @@ class TestChecksumCache(unittest.TestCase):
 
         self.assertGreater(calls_without_cache, calls_with_cache)
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_checksum_cache_equivalent_results(self):
         '''
         Tests that the checksum cache produces the same checksums file

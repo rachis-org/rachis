@@ -37,9 +37,12 @@ class Context(IContext):
             self.cache = get_cache()
             # Only ever do this on the root context. We only want to index the
             # pool once before we start adding our own stuff to it.
-            with self.cache.lock:
-                if self.cache.named_pool is not None:
+            if self.cache.named_pool is not None:
+                if self.cache.CURRENT_FORMAT_VERSION == 'v2':
                     self.cache.named_pool.create_index()
+                else:
+                    with self.cache.lock:
+                        self.cache.named_pool.create_index()
 
         if action_obj is None and parent is not None:
             raise ValueError('Only parentless contexts can be instantiated '
@@ -47,6 +50,36 @@ class Context(IContext):
 
         self.action_obj = action_obj
         self._parent = parent
+        if self.cache.CURRENT_FORMAT_VERSION == 'v2':
+            self.scope = None
+
+    def _execution_context(self):
+        if self.cache.CURRENT_FORMAT_VERSION != 'v2':
+            return self
+        from copy import copy
+        ctx = copy(self)
+        owner = (self._parent.scope if self._parent is not None
+                 else self.cache.scope)
+        ctx.scope = owner.child()
+        return ctx
+
+    def _adopt_outputs(self, outputs):
+        if self.cache.CURRENT_FORMAT_VERSION != 'v2':
+            return
+        owner = (self._parent.scope if self._parent is not None
+                 else self.cache.root_scope)
+        def adopt(value):
+            if isinstance(value, rachis.sdk.IResult):
+                archiver = value._archiver
+                if hasattr(archiver, 'ref_id'):
+                    owner.adopt(archiver.ref_id)
+            elif isinstance(value, dict) or hasattr(value, 'values'):
+                for child in value.values():
+                    adopt(child)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    adopt(child)
+        adopt(outputs)
 
     def _dispatch_(self, args, kwargs):
         exe = self.action_obj._bind(lambda: self)
@@ -185,6 +218,17 @@ class Context(IContext):
            failure, a context can still identify what will (no longer) be
            returned.
         """
+        if self.cache.CURRENT_FORMAT_VERSION == 'v2':
+            new_ref = self.cache.retain_result(ref)
+            owner = self.scope
+            if owner is None or owner.closed:
+                owner = (self._parent.scope if self._parent is not None
+                         and not self._parent.scope.closed
+                         else self.cache.root_scope)
+            owner.adopt(new_ref._archiver.ref_id)
+            if self.cache.named_pool is not None:
+                self.cache.named_pool.save(new_ref)
+            return new_ref
         with self.cache.lock:
             new_ref = self.cache.process_pool.save(ref)
 

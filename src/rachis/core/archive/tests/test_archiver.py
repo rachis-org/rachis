@@ -7,6 +7,7 @@
 # ----------------------------------------------------------------------------
 
 import os
+import pytest
 import tempfile
 import unittest
 import uuid
@@ -297,6 +298,7 @@ class TestArchiver(unittest.TestCase, ArchiveTestingMixin):
         self.assertEqual(diff.removed, {})
         self.assertEqual(diff.changed, {})
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_checksums_mismatch(self):
         # We set everything in the artifact to be read-only. This test needs to
         # mimic if the user were to somehow write it anyway, so we set write
@@ -361,6 +363,8 @@ class TestArchiver(unittest.TestCase, ArchiveTestingMixin):
             'VERSION'
         ])
 
+        if not self.archiver.annotations_dir.exists():
+            expected.discard('annotations')
         observed = set(file for file in archive.relative_iterdir())
         self.assertEqual(observed, expected)
 

@@ -38,6 +38,7 @@ class ValidateChecksumTests(unittest.TestCase):
         self.assertEqual(diff, ChecksumDiff({}, {}, {}))
 
     @pytest.mark.filterwarnings('ignore::UserWarning')
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_validate_checksums_invalid(self):
         '''
         Mangle an intact v5 Archive so that its checksums.md5 is invalid,
@@ -65,6 +66,7 @@ class ValidateChecksumTests(unittest.TestCase):
                          ['provenance/citations.bib'])
 
     @pytest.mark.filterwarnings('ignore::UserWarning')
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_validate_checksums_checksums_missing(self):
         int_seq = Artifact.import_data('IntSequence1', [1, 2, 3])
         os.remove(int_seq._archiver.path / 'checksums.sha512')

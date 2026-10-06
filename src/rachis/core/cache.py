@@ -93,7 +93,7 @@ def get_cache():
     --------
     >>> test_dir = tempfile.TemporaryDirectory(prefix='rachis-test-temp-')
     >>> cache_path = os.path.join(test_dir.name, 'cache')
-    >>> cache = Cache(cache_path)
+    >>> cache = CacheV1(cache_path)
     >>> # get_cache() will return the temp cache, not the one we just made.
     >>> get_cache() == cache
     False
@@ -221,7 +221,13 @@ def _exit_cleanup():
     """When the process ends, for each cache used by this process we remove the
     process pool created by this process then run garbage collection.
     """
-    for cache in USED_CACHES:
+    for cache in list(USED_CACHES):
+        if cache.CURRENT_FORMAT_VERSION == 'v2':
+            try:
+                cache.close()
+            except Exception:
+                pass
+            continue
         target = cache.processes / os.path.basename(cache.process_pool.path)
 
         # There are several legitimate reasons the path could not exist. It
@@ -386,8 +392,8 @@ class MEGALock(tm):
 
         del lockless_dict['thread_lock']
         del lockless_dict['flufl_lock']
-        del lockless_dict['_thread']
-        del lockless_dict['_thread_is_done']
+        lockless_dict.pop('_thread', None)
+        lockless_dict.pop('_thread_is_done', None)
 
         return lockless_dict
 
@@ -398,7 +404,67 @@ class MEGALock(tm):
         self.flufl_lock = _FluflLock(self.flufl_fp, lifetime=self.lifetime)
 
 
+def _cache_version(path):
+    """Read format before any backend is allowed to touch the root."""
+    try:
+        marker = (pathlib.Path(path) / 'VERSION').read_text()
+    except (OSError, UnicodeError) as e:
+        raise ValueError(f"Path '{path}' has no valid cache VERSION") from e
+    match = re.fullmatch(r'QIIME 2\ncache: (1|v1|v2)\n'
+                         r'framework: [^\n]+\n?', marker)
+    if match is None:
+        raise ValueError(f"Unsupported or malformed cache VERSION at '{path}'")
+    return '1' if match[1] in ('1', 'v1') else 'v2'
+
+
 class Cache:
+    """Public cache factory. Storage versions have independent backends."""
+
+    CURRENT_FORMAT_VERSION = 'v2'
+
+    def __new__(cls, path=None, process_pool_lifespan=45):
+        from .cache_v2 import CacheV2
+        if path is None:
+            if cls is CacheV1:
+                parent, path = _get_temp_path()
+                _create_temp_path(parent, path)
+            else:
+                path = pathlib.Path(tempfile.gettempdir()) / 'rachis-v2' \
+                    / _get_user()
+        path = pathlib.Path(path).resolve()
+        if path.exists() and any(path.iterdir()):
+            version = _cache_version(path)
+        else:
+            version = '1' if cls is CacheV1 else 'v2'
+        backend = CacheV1 if version == '1' else CacheV2
+        if cls is not Cache and cls is not backend:
+            raise ValueError(
+                f"Cache backend does not match VERSION at '{path}'")
+        for cache in USED_CACHES:
+            if (isinstance(cache, backend) and cache.path == path
+                    and path.exists()):
+                return cache
+        obj = object.__new__(backend)
+        obj._selected_path = path
+        return obj
+
+    @classmethod
+    def is_cache(cls, path):
+        try:
+            version = _cache_version(path)
+        except ValueError:
+            return False
+        if version == '1':
+            return CacheV1.is_cache(path)
+        from .cache_v2 import CacheV2
+        return CacheV2.is_cache(path)
+
+    @classmethod
+    def validate_key(cls, key):
+        return CacheV1.validate_key(key)
+
+
+class CacheV1(Cache):
     """General structure of the cache:
 
     ::
@@ -460,29 +526,9 @@ class Cache:
     base_cache_contents = \
         set(('data', 'keys', 'pools', 'processes', 'VERSION'))
 
-    def __new__(cls, path=None):
-        if path is None:
-            qiime2_dir, path = _get_temp_path()
-            _create_temp_path(qiime2_dir, path)
-
-        # We have to ensure we really have the same path here because otherwise
-        # something as simple as path='/tmp/qiime2/x' and path='/tmp/qiime2/x/'
-        # would create two different Cache objects
-        for cache in USED_CACHES:
-            if os.path.exists(path) and os.path.exists(cache.path) and \
-                    os.path.samefile(path, cache.path):
-                return cache
-
-        return super(Cache, cls).__new__(cls)
-
     def __init__(self, path=None, process_pool_lifespan=45):
         """Creates a Cache object backed by the directory specified by path. If
         no path is provided, it gets a path to a temp cache.
-
-        Warning
-        -------
-        If no path is provided and the path $TMPDIR/qiime2/$USER exists but is
-        not a valid cache, we remove the directory and create a cache there.
 
         Parameters
         ----------
@@ -504,7 +550,8 @@ class Cache:
             self.__init(path=path, process_pool_lifespan=process_pool_lifespan)
 
     def __init(self, path=None, process_pool_lifespan=45):
-        created_path = False
+        path = self._selected_path
+        created_path = not path.exists() or not any(path.iterdir())
         qiime2_dir, temp_cache_path = _get_temp_path()
 
         if path is not None:
@@ -535,6 +582,9 @@ class Cache:
             # QIIME 2 created path
             created_path = True
 
+        if not created_path and not CacheV1.is_cache(self.path):
+            raise ValueError(f"Path: '{self.path}' is not a valid V1 cache.")
+
         self.lock = \
             MEGALock(str(self.lockfile), lifetime=timedelta(minutes=3))
 
@@ -547,21 +597,9 @@ class Cache:
             # to create the cache contents here
             if not Cache.is_cache(self.path):
                 if not created_path:
-                    # We own the temp_cache_path, so we can recreate it if
-                    # there was something wrong with it
-                    if self.path == temp_cache_path:
-                        set_permissions(self.path, USER_GROUP_RWX,
-                                        USER_GROUP_RWX, skip_root=True)
-                        self._remove_cache_contents()
-                        self._create_cache_contents()
-                        warnings.warn(
-                            "Your temporary cache was found to be in an "
-                            "inconsistent state. It has been recreated.")
-                    else:
-                        raise ValueError(f"Path: '{self.path}' already exists "
-                                         "and is not a cache.")
-                else:
-                    self._create_cache_contents()
+                    raise ValueError(f"Path: '{self.path}' already exists "
+                                     "and is not a cache.")
+                self._create_cache_contents()
             # else: it was a cache with the contents already in it
 
         self.process_pool = self._create_process_pool()
@@ -604,6 +642,9 @@ class Cache:
         """
         _CACHE.cache = None
 
+    def __getnewargs__(self):
+        return (str(self.path),)
+
     def __getstate__(self):
         """Tell the cache not to pickle anything related to the daemon that
         keeps files around on MacOS because it can't pickle, and we don't need
@@ -631,6 +672,9 @@ class Cache:
                 " a compute node without setting your cache to a globally"
                 " accessible location.")
 
+    def __deepcopy__(self, memo):
+        return self
+
     @classmethod
     def is_cache(cls, path):
         """Tells us if the path we were given is a cache.
@@ -649,7 +693,7 @@ class Cache:
         --------
         >>> test_dir = tempfile.TemporaryDirectory(prefix='rachis-test-temp-')
         >>> cache_path = os.path.join(test_dir.name, 'cache')
-        >>> cache = Cache(cache_path)
+        >>> cache = CacheV1(cache_path)
         >>> Cache.is_cache(cache_path)
         True
         >>> test_dir.cleanup()
@@ -664,9 +708,8 @@ class Cache:
         if not contents.issuperset(cls.base_cache_contents):
             return False
 
-        regex = \
-            re.compile(
-                r"QIIME 2\ncache: v?(\d+)\nframework: (20\d\d\.\d+)")
+        regex = re.compile(
+            r"QIIME 2\ncache: v?(\d+)\nframework: ([^\n]+)")
         with open(path / 'VERSION') as fh:
             version_file = fh.read()
             matches = regex.findall(version_file)
@@ -775,7 +818,7 @@ class Cache:
         --------
         >>> test_dir = tempfile.TemporaryDirectory(prefix='rachis-test-temp-')
         >>> cache_path = os.path.join(test_dir.name, 'cache')
-        >>> cache = Cache(cache_path)
+        >>> cache = CacheV1(cache_path)
         >>> pool = cache.create_pool(key='key')
         >>> cache.get_keys() == ['key']
         True
@@ -977,7 +1020,7 @@ class Cache:
         >>> from rachis.core.testing.type import IntSequence1
         >>> test_dir = tempfile.TemporaryDirectory(prefix='rachis-test-temp-')
         >>> cache_path = os.path.join(test_dir.name, 'cache')
-        >>> cache = Cache(cache_path)
+        >>> cache = CacheV1(cache_path)
         >>> artifact = Artifact.import_data(IntSequence1, [0, 1, 2])
         >>> saved_artifact = cache.save(artifact, 'key')
         >>> # save returned an artifact that is backed by the data in the cache
@@ -1106,7 +1149,7 @@ class Cache:
         >>> from rachis.core.testing.type import IntSequence1
         >>> test_dir = tempfile.TemporaryDirectory(prefix='rachis-test-temp-')
         >>> cache_path = os.path.join(test_dir.name, 'cache')
-        >>> cache = Cache(cache_path)
+        >>> cache = CacheV1(cache_path)
         >>> artifact = Artifact.import_data(IntSequence1, [0, 1, 2])
         >>> saved_artifact = cache.save(artifact, 'key')
         >>> loaded_artifact = cache.load('key')
@@ -1191,7 +1234,7 @@ class Cache:
         >>> from rachis.core.testing.type import IntSequence1
         >>> test_dir = tempfile.TemporaryDirectory(prefix='rachis-test-temp-')
         >>> cache_path = os.path.join(test_dir.name, 'cache')
-        >>> cache = Cache(cache_path)
+        >>> cache = CacheV1(cache_path)
         >>> artifact = Artifact.import_data(IntSequence1, [0, 1, 2])
         >>> saved_artifact = cache.save(artifact, 'key')
         >>> cache.get_keys() == ['key']
@@ -1260,9 +1303,15 @@ class Cache:
                 # manually because the uuid isn't a part of the ArchivePath
                 if not isinstance(ref._archiver.path, ArchivePath):
                     os.mkdir(destination)
-                    shutil.copytree(
-                        ref._archiver.path, destination, dirs_exist_ok=True,
-                        copy_function=duplicate)
+                    if hasattr(ref._archiver, 'ref_id'):
+                        from .archive.view import copy_tree
+                        with ref._archiver.snapshot() as view:
+                            copy_tree(view.root, destination)
+                    else:
+                        shutil.copytree(
+                            ref._archiver.path, destination,
+                            dirs_exist_ok=True,
+                            copy_function=duplicate)
                 # Otherwise, the path we are copying should already contain the
                 # uuid, so we don't need to manually create the uuid directory
                 else:
@@ -1565,7 +1614,7 @@ class Pool:
         --------
         >>> test_dir = tempfile.TemporaryDirectory(prefix='rachis-test-temp-')
         >>> cache_path = os.path.join(test_dir.name, 'cache')
-        >>> cache = Cache(cache_path)
+        >>> cache = CacheV1(cache_path)
         >>> pool = cache.create_pool(key='pool')
         >>> # When we with in the pool the set cache will be the cache the pool
         >>> # belongs to, and the named pool on that cache will be the pool
@@ -1657,7 +1706,7 @@ class Pool:
         >>> from rachis.core.testing.type import IntSequence1
         >>> test_dir = tempfile.TemporaryDirectory(prefix='rachis-test-temp-')
         >>> cache_path = os.path.join(test_dir.name, 'cache')
-        >>> cache = Cache(cache_path)
+        >>> cache = CacheV1(cache_path)
         >>> pool = cache.create_pool(key='pool')
         >>> artifact = Artifact.import_data(IntSequence1, [0, 1, 2])
         >>> pool_artifact = pool.save(artifact)
@@ -1795,7 +1844,7 @@ class Pool:
         >>> from rachis.core.testing.type import IntSequence1
         >>> test_dir = tempfile.TemporaryDirectory(prefix='rachis-test-temp-')
         >>> cache_path = os.path.join(test_dir.name, 'cache')
-        >>> cache = Cache(cache_path)
+        >>> cache = CacheV1(cache_path)
         >>> pool = cache.create_pool(key='pool')
         >>> artifact = Artifact.import_data(IntSequence1, [0, 1, 2])
         >>> pool_artifact = pool.save(artifact)
@@ -1835,7 +1884,7 @@ class Pool:
         >>> from rachis.core.testing.type import IntSequence1
         >>> test_dir = tempfile.TemporaryDirectory(prefix='rachis-test-temp-')
         >>> cache_path = os.path.join(test_dir.name, 'cache')
-        >>> cache = Cache(cache_path)
+        >>> cache = CacheV1(cache_path)
         >>> pool = cache.create_pool('pool')
         >>> artifact = Artifact.import_data(IntSequence1, [0, 1, 2])
         >>> pool_artifact = pool.save(artifact)
