@@ -461,10 +461,6 @@ class Artifact(Result):
         return self._view(view_type)
 
     def _view(self, view_type, recorder=None):
-        if view_type is rachis.Metadata and not self.has_metadata():
-            raise TypeError(
-                "Artifact %r cannot be viewed as Rachis Metadata." % self)
-
         from_type = transform.ModelType.from_view_type(self.format)
 
         if isinstance(get_origin(view_type), type(Union)):

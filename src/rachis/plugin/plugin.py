@@ -74,7 +74,7 @@ from rachis.core.cite import _make_citations_tuple
 
 
 TransformerRecord = collections.namedtuple(
-    'TransformerRecord', ['transformer', 'plugin', 'citations'])
+    'TransformerRecord', ['transformer', 'plugin', 'citations', 'upgrade'])
 SemanticTypeRecord = collections.namedtuple(
     'SemanticTypeRecord', ['semantic_type', 'plugin'])
 SemanticTypeFragmentRecord = collections.namedtuple(
@@ -341,10 +341,10 @@ class Plugin:
             return validator
         return decorator
 
-    def register_transformer(self, _fn=None, *, citations=None):
+    def register_transformer(
+        self, _fn=None, *, citations=None, upgrade: Optional[bool] = None
+    ):
         """ **Decorator** which registers a transformer to convert data
-
-        This decorator may be used with or without arguments.
 
         Parameters
         ----------
@@ -354,6 +354,20 @@ class Plugin:
         citations : CitationRecord or list of CitationRecord
           Citation(s) to associate with a result whenever this transformer is
           used internally. Can also use an entire :py:class:`Citations` object.
+        upgrade : Bool | None
+            How to consider this transformer when searching for transformation
+            paths between formats. There are three options:
+
+            `True` indicates that the transformer is not lossy, is usable at
+            any step in transformer search paths, and takes precedence over
+            `False`.
+
+            `False` indicates that the transformer is lossy but can be used in
+            transformer search paths only if there are no other satisfactory
+            paths that include only `upgrade=True` transformers.
+
+            None indicates that the transformer is lossy and can be used only
+            at the terminal ends of search paths. This is the default.
 
         Returns
         -------
@@ -372,7 +386,7 @@ class Plugin:
 
         Examples
         --------
-        >>> @plugin.register_transformer
+        >>> @plugin.register_transformer(upgrade=True)
         ... def _0(data: pd.DataFrame) -> CSVFormat:
         ...     ff = CSVFormat()
         ...     with ff.open() as fh:
@@ -400,6 +414,14 @@ class Plugin:
         # def _(x: A) -> B:
         #   ...
         # ```
+        if (
+            upgrade is not True and upgrade is not False
+            and upgrade is not None
+        ):
+            raise TypeError(
+                'The upgrade parameter must be one of True, False, or None.'
+            )
+
         citations = _make_citations_tuple(citations)
 
         def decorator(transformer):
@@ -426,7 +448,11 @@ class Plugin:
                                 % (transformer, input, output))
 
             self.transformers[input, output] = TransformerRecord(
-                transformer=transformer, plugin=self, citations=citations)
+                transformer=transformer,
+                plugin=self,
+                citations=citations,
+                upgrade=upgrade
+            )
             return transformer
 
         if _fn is None:

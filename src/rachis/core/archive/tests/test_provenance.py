@@ -14,7 +14,9 @@ import pandas as pd
 
 import rachis
 from rachis.plugins import dummy_plugin
+from rachis.core.testing.format import FirstStepFormat
 from rachis.core.testing.type import IntSequence1, Mapping
+from rachis.core.util import load_action_yaml
 import rachis.core.archive.provenance as provenance
 
 
@@ -276,6 +278,33 @@ class TestProvenanceIntegration(unittest.TestCase):
 
         with (viz_p_dir / 'action' / 'action.yaml').open() as fh:
             self.assertIn('output-name: visualization', fh.read())
+
+    def test_transitive_import_records_each_transformer(self):
+        '''
+        Asserts that transitive transformations made at import time are
+        correctly recorded in the imported artifact's "action.yaml".
+        '''
+        artifact = rachis.Artifact.import_data(
+            'ThirdStep', FirstStepFormat(), view_type=FirstStepFormat
+        )
+
+        action = load_action_yaml(artifact._archiver.path)
+
+        self.assertEqual(
+            action['transformers']['output'],
+            [
+                {
+                    'from': 'FirstStepFormat',
+                    'to': 'SecondStepFormat',
+                    'plugin': 'dummy-plugin',
+                },
+                {
+                    'from': 'SecondStepFormat',
+                    'to': 'ThirdStepFormat',
+                    'plugin': 'dummy-plugin',
+                },
+            ],
+        )
 
 
 if __name__ == '__main__':
