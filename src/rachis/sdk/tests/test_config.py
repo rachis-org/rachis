@@ -16,7 +16,7 @@ from parsl.executors.threads import ThreadPoolExecutor
 from rachis import Artifact, Cache
 
 import rachis.util
-from rachis.core.util import load_action_yaml
+from rachis.core.archive import Archiver
 from rachis.core.testing.type import SingleInt
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.sdk.parallel_config import (PARALLEL_CONFIG, _TEST_EXECUTOR_,
@@ -283,7 +283,7 @@ class TestConfig(unittest.TestCase):
         return execution_contexts
 
     def _load_alias_execution_context(self, result):
-        alias_uuid = load_action_yaml(
-            result._archiver.path)['action']['alias-of']
-        return load_action_yaml(
-            self.cache.data / alias_uuid)['execution']['execution_context']
+        archive = Archiver.get_archive(result._archiver.path)
+        alias_uuid = archive.load_action_yaml()['action']['alias-of']
+        archive = Archiver.get_archive(self.cache.data / alias_uuid)
+        return archive.load_action_yaml()['execution']['execution_context']

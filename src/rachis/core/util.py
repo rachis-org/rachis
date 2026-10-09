@@ -16,7 +16,6 @@ import re
 import sys
 import collections
 import uuid as _uuid
-import yaml
 import zipfile
 import pathlib
 import shutil
@@ -437,44 +436,6 @@ def touch_under_path(path):
                     os.path.join(directory, file), None, follow_symlinks=False)
             except FileNotFoundError:
                 pass
-
-
-def load_action_yaml(path):
-    """Takes a path to an unzipped Artifact and loads its action.yaml with
-    yaml.safe_load
-    """
-    # TODO: Make these actually do something useful at least for the tags
-    # that are relevant to what we need out of provenance (this is partially
-    # done)
-    def ref_constructor(loader, node):
-        # We only care about the name of the thing we are referencing which
-        # is at the end of this list
-        return node.value.split(':')[-1]
-
-    def cite_constructor(loader, node):
-        return node.value
-
-    def metadata_constructor(loader, node):
-        # Use the checksum of the metadata as its identifier, so we can tell
-        # if two artifacts used the same metadata input
-        metadata_path = prov_path / node.value
-        return checksum(filepath=metadata_path, checksum_type='md5')
-
-    # these are backstops and are generally superceded by yaml.SafeLoader
-    # which has the preferred constructors from provenance
-    # found under CONSTRUCTOR_REGISTRY within provenance.py
-    yaml.constructor.SafeConstructor.add_constructor('!ref', ref_constructor)
-    yaml.constructor.SafeConstructor.add_constructor('!cite', cite_constructor)
-    yaml.constructor.SafeConstructor.add_constructor('!metadata',
-                                                     metadata_constructor)
-
-    prov_path = path / 'provenance' / 'action'
-    action_path = prov_path / 'action.yaml'
-
-    with open(action_path) as fh:
-        prov = yaml.safe_load(fh)
-
-    return prov
 
 
 def create_collection_name(*, name, key, idx, size):

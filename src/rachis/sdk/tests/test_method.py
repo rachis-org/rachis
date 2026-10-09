@@ -22,7 +22,7 @@ from rachis.core.testing.method import (concatenate_ints, merge_mappings,
 from rachis.core.testing.type import (
     IntSequence1, IntSequence2, SingleInt, Mapping)
 from rachis.core.testing.util import get_dummy_plugin
-from rachis.core.util import load_action_yaml
+from rachis.core.archive import Archiver
 
 
 # TODO refactor these tests along with Visualizer tests to remove duplication.
@@ -751,7 +751,8 @@ class TestMethod(unittest.TestCase):
         returned_seed = int1.view(int)
 
         # Get parameter value from provenance
-        action_yaml = load_action_yaml(int1._archiver.path)
+        archive = Archiver.get_archive(int1._archiver.path)
+        action_yaml = archive.load_action_yaml()
         prov_seed = action_yaml['action']['parameters'][0]['random_seed']
 
         self.assertEqual(returned_seed, prov_seed)
@@ -765,7 +766,8 @@ class TestMethod(unittest.TestCase):
         self.assertEqual(returned_seed, 0)
 
         # Get parameter value from provenance
-        action_yaml = load_action_yaml(int1._archiver.path)
+        archive = Archiver.get_archive(int1._archiver.path)
+        action_yaml = archive.load_action_yaml()
         prov_seed = action_yaml['action']['parameters'][0]['random_seed']
 
         self.assertEqual(returned_seed, prov_seed)
@@ -780,7 +782,8 @@ class TestMethod(unittest.TestCase):
         self.assertEqual(returned_seed, 0)
 
         # Get parameter value from provenance
-        action_yaml = load_action_yaml(int1._archiver.path)
+        archive = Archiver.get_archive(int1._archiver.path)
+        action_yaml = archive.load_action_yaml()
         prov_seed = action_yaml['action']['parameters'][0]['random_seed']
 
         self.assertEqual(returned_seed, prov_seed)
@@ -795,7 +798,8 @@ class TestMethod(unittest.TestCase):
         self.assertEqual(returned_seed, 2)
 
         # Get parameter value from provenance
-        action_yaml = load_action_yaml(int1._archiver.path)
+        archive = Archiver.get_archive(int1._archiver.path)
+        action_yaml = archive.load_action_yaml()
         prov_seed = action_yaml['action']['parameters'][0]['random_seed']
 
         self.assertEqual(returned_seed, prov_seed)

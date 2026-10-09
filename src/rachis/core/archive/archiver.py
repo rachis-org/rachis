@@ -31,7 +31,7 @@ from rachis.core.util import (
 )
 from rachis.core.archive.format.v0 import ArchiveFormat
 from rachis.core.archive.provenance import (
-    metadata_path_constructor, MetadataInfo
+    metadata_path_constructor, MetadataInfo, ZipActionYamlLoader
 )
 from rachis.core.annotate import Note, Annotation, ANNOTATION_TYPE_DICT
 
@@ -229,7 +229,7 @@ class _ZipArchive(_Archive):
         return filepath
 
     @classmethod
-    def _as_zip_path(self, path):
+    def _as_zip_path(cls, path):
         path = str(pathlib.PurePosixPath(path))
         # zip files don't work well with '.' which is the identity of a Path
         # obj, so just convert to empty string which is basically the identity
@@ -237,6 +237,11 @@ class _ZipArchive(_Archive):
         if path == '.':
             path = ''
         return path
+
+    def load_action_yaml(self):
+        action_path = Path('provenance') / 'action' / 'action.yaml'
+        with self.open(action_path) as fh:
+            return yaml.load(fh, Loader=ZipActionYamlLoader)
 
 
 class _NoOpArchive(_Archive):
@@ -266,6 +271,13 @@ class _NoOpArchive(_Archive):
         root = path
         return ArchiveRecord(root, root / self.VERSION_FILE,
                              self.uuid, self.version, self.framework_version)
+
+    def load_action_yaml(self):
+        action_path = self.path / 'provenance' / 'action' / 'action.yaml'
+        with open(action_path) as fh:
+            prov = yaml.safe_load(fh)
+
+        return prov
 
 
 class ArchiveCheck(_Archive):
@@ -362,7 +374,7 @@ class Archiver:
                             archive.version))
 
     @classmethod
-    def peek(cls, filepath):
+    def peek(cls, filepath: Path):
         archive = cls.get_archive(filepath)
         Format = cls.get_format_class(archive.version)
         if Format is None:
@@ -372,7 +384,21 @@ class Archiver:
         # e.g. a new format has a new property that peek should describe. We
         # add some compatability code here to return a default for that
         # property on older formats.
-        return Format.load_metadata(archive)
+
+        version, _ = archive._get_versions()
+        if float(version) < 1:
+            return [*Format.load_metadata(archive), None]
+
+        yaml_dict = archive.load_action_yaml()
+
+        plugin = yaml_dict['action'].get('plugin')
+        if plugin is not None:
+            plugin = plugin.split(':')[-1]
+        action = yaml_dict['action'].get('action')
+        if plugin:
+            action = plugin + '.' + action
+
+        return [*Format.load_metadata(archive), action]
 
     @classmethod
     def extract(cls, filepath, dest):

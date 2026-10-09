@@ -273,6 +273,17 @@ for key in CONSTRUCTOR_REGISTRY:
     yaml.SafeLoader.add_constructor(key, CONSTRUCTOR_REGISTRY[key])
 
 
+class ZipActionYamlLoader(yaml.SafeLoader):
+    pass
+
+
+def zipfile_metadata_constructor(loader, node):
+    return loader.construct_scalar(node)
+
+
+ZipActionYamlLoader.add_constructor('!metadata', zipfile_metadata_constructor)
+
+
 class ProvenanceCapture:
     ANCESTOR_DIR = 'artifacts'
     ACTION_DIR = 'action'

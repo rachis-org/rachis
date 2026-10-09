@@ -24,12 +24,12 @@ import pytest
 from flufl.lock import LockState
 
 import rachis
+from rachis.core.archive import Archiver
 from rachis.core.cache import (Cache, _exit_cleanup, get_cache, _get_user,
                                _VERSION_TEMPLATE)
 from rachis.core.testing.type import IntSequence1, IntSequence2, SingleInt
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.sdk.result import Artifact
-from rachis.core.util import load_action_yaml
 
 # NOTE: If you see an error after all of your tests have ran saying that a pool
 # called __TEST_FAILURE__ doesn't exist and you were running tests in multiple
@@ -121,8 +121,8 @@ def _load_outputs(collection):
     outputs = []
 
     for result in collection.values():
-        output = load_action_yaml(
-            result._archiver.path)['action']['output-name']
+        archive = Archiver.get_archive(result._archiver.path)
+        output = archive.load_action_yaml()['action']['output-name']
         outputs.append(output)
 
     return outputs

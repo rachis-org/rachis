@@ -8,7 +8,6 @@
 
 import rachis.core.archive.format.v0 as v0
 
-
 class ArchiveFormat(v0.ArchiveFormat):
     PROVENANCE_DIR = 'provenance'
 
