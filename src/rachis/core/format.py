@@ -10,7 +10,7 @@ import rachis.core.path as qpath
 
 
 class FormatBase:
-    def __init__(self, path=None, mode='w'):
+    def __init__(self, path=None, mode='w', allow_empty=False):
         import rachis.plugin.model as model
         if path is None:
             if mode != 'w':
@@ -27,6 +27,7 @@ class FormatBase:
             self.path = qpath.InPath(path)
 
         self._mode = mode
+        self.allow_empty = allow_empty
 
     def __str__(self):
         return str(self.path)

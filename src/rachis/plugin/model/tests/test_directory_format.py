@@ -16,7 +16,7 @@ from rachis.plugin.model import SingleFileDirectoryFormat
 import rachis.util
 
 from rachis.core.testing.format import IntSequenceFormat
-from rachis.core.exceptions import ValidationError
+from rachis.core.exceptions import ValidationError, RachisWarning
 
 
 # Define dummy plugin formats to test with
@@ -43,6 +43,9 @@ class OptionalDirFmt(model.DirectoryFormat):
                        optional=False)
     file3 = model.File(r'test_text3.txt', format=IntSequenceFormat,
                        optional=True)
+
+class SingleFileDirFmt(model.DirectoryFormat):
+    file1 = model.File(r'test.txt', format=IntSequenceFormat, optional=False)
 
 
 class TestDirectoryFormat(unittest.TestCase):
@@ -131,3 +134,9 @@ class TestDirectoryFormat(unittest.TestCase):
                 ValidationError, r'should contain exactly one file.*found 2'
             ):
                 DummySingleFileDirFmt(path=tempdir, mode='r').validate()
+
+    def test_single_empty_file_warns(self):
+        files_dir_fp = self.get_data_path('test_text_files_single/')
+        with self.assertWarns(RachisWarning):
+            format = SingleFileDirFmt(files_dir_fp, mode='r')
+            format.validate()
