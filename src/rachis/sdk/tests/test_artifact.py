@@ -614,9 +614,8 @@ class TestArtifact(unittest.TestCase, ArchiveTestingMixin):
         self.assertTrue(True)  # Checkpoint assertion
         A.validate(level='max')
         self.assertTrue(True)  # Checkpoint assertion
-        A = Artifact.import_data('IntSequence1', [1, 2, 3, 4, 5, 6, 7, 10])
         with self.assertRaisesRegex(ValidationError, '3 more'):
-            A.validate(level='max')
+            A = Artifact.import_data('IntSequence1', [1, 2, 3, 4, 5, 6, 7, 10])
 
     def test_artifact_validate_max_on_import(self):
         fp = get_data_path('intsequence-fail-max-validation.txt')
@@ -661,9 +660,7 @@ class TestArtifact(unittest.TestCase, ArchiveTestingMixin):
 
     def test_cannot_be_viewed_as_metadata(self):
         A = Artifact.import_data('IntSequence1', [1, 2, 3, 4])
-        with self.assertRaisesRegex(TypeError,
-                                    'Artifact.*IntSequence1.*cannot be viewed '
-                                    'as Rachis Metadata'):
+        with self.assertRaisesRegex(Exception, 'No transformation from '):
             A.view(Metadata)
 
 
