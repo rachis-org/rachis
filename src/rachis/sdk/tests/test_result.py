@@ -488,6 +488,7 @@ class TestResult(unittest.TestCase, ArchiveTestingMixin):
         artifact.validate()
         self.assertTrue(True)  # Checkpoint
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_validate_artifact_bad(self):
         artifact = Artifact.import_data('IntSequence1', [1, 2, 3, 4])
         # We set everything in the artifact to be read-only. This test needs to
@@ -510,6 +511,7 @@ class TestResult(unittest.TestCase, ArchiveTestingMixin):
         visualization.validate()
         self.assertTrue(True)  # Checkpoint
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_validate_vizualization_bad(self):
         visualization = Visualization._from_data_dir(
              self.data_dir, self.make_provenance_capture())
@@ -565,6 +567,7 @@ class TestResult(unittest.TestCase, ArchiveTestingMixin):
                     'IntSequence1', [1, 'a', 3, 4], validate_level='min'
                 )
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_validate_checksums(self):
         '''
         Tests that Artifact.validate_checksums passes when artifact contents
@@ -751,6 +754,7 @@ class TestResultCollection(unittest.TestCase):
         ):
             collection.validate(level='max')
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_validate_checksums(self):
         '''
         Tests that ResultCollection.validate_checksums passes when its artifact
@@ -813,7 +817,7 @@ class TestRedactMetadata(unittest.TestCase):
         metadata_paths, _ = self.artifact1.metadata_paths()
 
         for path in metadata_paths:
-            self.assertEqual(os.path.getsize(path), 0)
+            self.assertEqual(len(path.read_bytes()), 0)
 
     def test_redact_metadata_twice_fails(self):
         self.artifact2.redact_metadata()

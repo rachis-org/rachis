@@ -6,9 +6,7 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 import abc
-import os
 import pandas as pd
-import pathlib
 import warnings
 import yaml
 
@@ -358,8 +356,12 @@ class ProvNode:
 
         all_md = dict()
         for param_name in metadata_fps:
-            filepath = str(pfx / metadata_fps[param_name])
-            df = pd.read_csv(filepath, sep='\t')
+            filepath = pfx / metadata_fps[param_name]
+            with filepath.open() as stream:
+                try:
+                    df = pd.read_csv(stream, sep='\t')
+                except pd.errors.EmptyDataError:
+                    df = pd.DataFrame()
             all_md[param_name] = df
 
         return all_md
@@ -573,8 +575,10 @@ class _Action:
         return self._action_dict.get('transformers')
 
     def __init__(self, fp: str):
-        with open(fp) as action_fh:
-            self._action_dict = yaml.safe_load(action_fh)
+        from rachis.core.archive.provenance import load_action_stream
+        source = fp.open() if hasattr(fp, 'open') else open(fp)
+        with source as action_fh:
+            self._action_dict = load_action_stream(action_fh)
 
         self._action_details = self._action_dict['action']
         self._execution_details = self._action_dict['execution']
@@ -593,7 +597,7 @@ class _Citations:
     '''
 
     def __init__(self, fp: str):
-        with open(fp) as fh:
+        with (fp.open() if hasattr(fp, 'open') else open(fp)) as fh:
             bib_db = bp.loads(fh.read())
         self.citations = bib_db.get_entry_dict()
 
@@ -606,7 +610,8 @@ class _ResultMetadata:
     '''Basic metadata about a single Rachis Result from metadata.yaml.'''
 
     def __init__(self, md_fp: str):
-        with open(md_fp) as md_fh:
+        source = md_fp.open() if hasattr(md_fp, 'open') else open(md_fp)
+        with source as md_fh:
             _md_dict = yaml.safe_load(md_fh)
         self.uuid = _md_dict['uuid']
         self.type = _md_dict['type']
@@ -863,10 +868,10 @@ class ParserV2(ParserV1):
 
         # If this is the Result of an import, or an Action with no inputs,
         # it won't have this dir.
-        if os.path.exists(archiver.provenance_dir / 'artifacts'):
-            for fp in os.listdir(archiver.provenance_dir / 'artifacts'):
-                fp = pathlib.Path(fp)
-                node_uuid = os.path.basename(fp)
+        ancestors = archiver.provenance_dir / 'artifacts'
+        if ancestors.exists():
+            for fp in ancestors.iterdir():
+                node_uuid = fp.name
 
                 if node_uuid in archive_contents:
                     continue

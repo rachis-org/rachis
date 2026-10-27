@@ -50,7 +50,7 @@ def parse_version(
         version_fp = archiver.path / 'VERSION'
 
     try:
-        with open(str(version_fp)) as v_fp:
+        with version_fp.open() as v_fp:
             version_contents = v_fp.read().strip()
     except KeyError:
         raise ValueError(

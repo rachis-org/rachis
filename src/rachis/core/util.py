@@ -156,6 +156,8 @@ def has_checksum_native(checksum_type):
 
 
 def checksum(filepath, checksum_type):
+    if hasattr(filepath, 'view') or hasattr(filepath, 'read'):
+        return checksum_python(filepath, checksum_type)
     if not in_test_mode() and has_checksum_native(checksum_type):
         return checksum_native(filepath, checksum_type)
     else:
@@ -171,7 +173,14 @@ def checksum_python(filepath, checksum_type):
     else:
         raise TypeError(f'Unsupported checksum type: {checksum_type!r}')
 
-    with open(str(filepath), mode='rb') as fh:
+    import contextlib
+    if hasattr(filepath, 'read'):
+        manager = contextlib.nullcontext(filepath)
+    elif hasattr(filepath, 'open'):
+        manager = filepath.open('rb')
+    else:
+        manager = open(filepath, 'rb')
+    with manager as fh:
         for chunk in iter(lambda: fh.read(io.DEFAULT_BUFFER_SIZE), b""):
             hash_obj.update(chunk)
     return hash_obj.hexdigest()
@@ -217,6 +226,10 @@ def checksum_directory(directory, checksum_type):
     else:
         checksum = checksum_python
 
+    if hasattr(directory, 'view'):
+        return {str(p.relative_to(directory)):
+                checksum_python(p, checksum_type)
+                for p in directory.rglob('*') if p.is_file()}
     directory = str(directory)
     sums = collections.OrderedDict()
     for root, dirs, files in os.walk(directory, topdown=True):
@@ -457,22 +470,21 @@ def load_action_yaml(path):
     def metadata_constructor(loader, node):
         # Use the checksum of the metadata as its identifier, so we can tell
         # if two artifacts used the same metadata input
-        metadata_path = prov_path / node.value
+        metadata_path = prov_path / node.value.split(':', 1)[-1]
         return checksum(filepath=metadata_path, checksum_type='md5')
 
-    # these are backstops and are generally superceded by yaml.SafeLoader
-    # which has the preferred constructors from provenance
-    # found under CONSTRUCTOR_REGISTRY within provenance.py
-    yaml.constructor.SafeConstructor.add_constructor('!ref', ref_constructor)
-    yaml.constructor.SafeConstructor.add_constructor('!cite', cite_constructor)
-    yaml.constructor.SafeConstructor.add_constructor('!metadata',
-                                                     metadata_constructor)
+    class ActionLoader(yaml.SafeLoader):
+        pass
+
+    ActionLoader.add_constructor('!ref', ref_constructor)
+    ActionLoader.add_constructor('!cite', cite_constructor)
+    ActionLoader.add_constructor('!metadata', metadata_constructor)
 
     prov_path = path / 'provenance' / 'action'
     action_path = prov_path / 'action.yaml'
 
-    with open(action_path) as fh:
-        prov = yaml.safe_load(fh)
+    with action_path.open() as fh:
+        prov = yaml.load(fh, Loader=ActionLoader)
 
     return prov
 

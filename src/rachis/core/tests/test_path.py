@@ -7,6 +7,7 @@
 # ----------------------------------------------------------------------------
 
 import os
+import pytest
 import pathlib
 import shutil
 import tempfile
@@ -83,6 +84,7 @@ class TestOutPath(unittest.TestCase):
         self.assertIsInstance(g, OutPath)
         self.assertTrue(g.is_dir())
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_new_outpath_context_mgr(self):
         with OutPath() as f:
             path = str(f)
@@ -90,6 +92,7 @@ class TestOutPath(unittest.TestCase):
             self.assertTrue(os.path.isfile(path))
         self.assertFalse(os.path.isfile(path))
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_destructor(self):
         f = OutPath()
         path = str(f)

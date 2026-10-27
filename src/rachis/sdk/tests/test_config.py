@@ -285,5 +285,12 @@ class TestConfig(unittest.TestCase):
     def _load_alias_execution_context(self, result):
         alias_uuid = load_action_yaml(
             result._archiver.path)['action']['alias-of']
+        if self.cache.CURRENT_FORMAT_VERSION == 'v2':
+            from rachis.core.archive.provenance import load_action_stream
+            action = (result._archiver.provenance_dir / 'artifacts'
+                      / alias_uuid / 'action/action.yaml')
+            with action.open() as stream:
+                execution = load_action_stream(stream)['execution']
+                return execution['execution_context']
         return load_action_yaml(
             self.cache.data / alias_uuid)['execution']['execution_context']

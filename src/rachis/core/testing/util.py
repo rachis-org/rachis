@@ -29,7 +29,11 @@ class ArchiveTestingMixin:
     """Mixin for testing properties of archives created by Archiver."""
 
     def assertArchiveMembers(self, archive_filepath, root_dir, expected):
-        """Assert members are in an archive.
+        """Assert file members are in an archive.
+
+        Directory records are optional ZIP entries; compare files as in the
+        extracted-tree assertion. Tests for empty directories check them
+        explicitly.
 
         Parameters
         ----------
@@ -49,7 +53,9 @@ class ArchiveTestingMixin:
         archive_filepath = str(archive_filepath)
         root_dir = str(root_dir)
         with zipfile.ZipFile(archive_filepath, mode='r') as zf:
-            observed = set(zf.namelist())
+            observed = {
+                info.filename for info in zf.infolist() if not info.is_dir()
+            }
 
         # Path separator '/' is hardcoded because paths in the zipfile will
         # always use this separator.

@@ -40,7 +40,9 @@ class MetadataFileError(Exception):
 
 class MetadataReader:
     def __init__(self, filepath):
-        if not os.path.isfile(filepath):
+        exists = (filepath.is_file() if hasattr(filepath, 'is_file')
+                  else hasattr(filepath, 'read') or os.path.isfile(filepath))
+        if not exists:
             raise MetadataFileError(
                 "Metadata file path doesn't exist, or the path points to "
                 "something other than a file. Please check that the path "
@@ -65,8 +67,16 @@ class MetadataReader:
             #     https://docs.python.org/3/library/csv.html#id3
 
             # Ignore BOM on read (but do not write BOM)
-            with open(self._filepath,
-                      'r', newline='', encoding='utf-8-sig') as fh:
+            import contextlib
+            if hasattr(self._filepath, 'read'):
+                stream = contextlib.nullcontext(self._filepath)
+            elif hasattr(self._filepath, 'open'):
+                stream = self._filepath.open(
+                    'r', newline='', encoding='utf-8-sig')
+            else:
+                stream = open(self._filepath, 'r', newline='',
+                              encoding='utf-8-sig')
+            with stream as fh:
                 tsv_reader = csv.reader(fh, dialect='excel-tab', strict=True)
                 self._reader = (self._strip_cell_whitespace(row)
                                 for row in tsv_reader)

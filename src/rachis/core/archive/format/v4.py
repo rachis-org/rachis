@@ -24,12 +24,12 @@ class ArchiveFormat(v3.ArchiveFormat):
     @property
     def citations(self):
         files = []
-        files.append(str(self.provenance_dir / 'citations.bib'))
+        files.append(self.provenance_dir / 'citations.bib')
 
         if (self.provenance_dir / 'artifacts').exists():
             for ancestor in (self.provenance_dir / 'artifacts').iterdir():
                 if (ancestor / 'citations.bib').exists():
-                    files.append(str(ancestor / 'citations.bib'))
+                    files.append(ancestor / 'citations.bib')
 
         citations = Citations()
         for f in files:

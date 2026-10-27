@@ -26,6 +26,8 @@ class FormatBase:
         else:
             self.path = qpath.InPath(path)
 
+        self._directory = getattr(self.path, '_directory',
+                                  getattr(path, '_directory', None))
         self._mode = mode
 
     def __str__(self):

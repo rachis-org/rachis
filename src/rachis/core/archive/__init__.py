@@ -9,7 +9,9 @@
 from .provenance import (ImportProvenanceCapture, ActionProvenanceCapture,
                          PipelineProvenanceCapture, ReportProvenanceCapture)
 from .archiver import Archiver
+from .pack import ZipPack
 
 
-__all__ = ['Archiver', 'ImportProvenanceCapture', 'ActionProvenanceCapture',
-           'PipelineProvenanceCapture', 'ReportProvenanceCapture']
+__all__ = ['Archiver', 'ZipPack', 'ImportProvenanceCapture',
+           'ActionProvenanceCapture', 'PipelineProvenanceCapture',
+           'ReportProvenanceCapture']

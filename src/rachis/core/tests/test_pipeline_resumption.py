@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 import pandas as pd
+import yaml
 
 import rachis
 from rachis.core.cache import Cache
@@ -27,6 +28,13 @@ def _load_alias_uuid(result):
 
 def _load_nested_alias_uuid(result, cache):
     alias_uuid = _load_alias_uuid(result)
+    if cache.CURRENT_FORMAT_VERSION == 'v2':
+        # Completed child frames release their intermediate RefDirs. The
+        # returned archive still retains those nodes as ancestral provenance.
+        action = (result._archiver.provenance_dir / 'artifacts' / alias_uuid
+                  / 'action' / 'action.yaml')
+        return yaml.load(action.read_text(), Loader=yaml.BaseLoader)[
+            'action']['alias-of']
     aliased_result = rachis.sdk.Result.load(
         os.path.join(cache.data, alias_uuid))
     return _load_alias_uuid(aliased_result)
@@ -42,14 +50,17 @@ def _load_alias_uuids(collection):
 
 
 def _load_nested_alias_uuids(collection, cache):
+    if cache.CURRENT_FORMAT_VERSION == 'v2':
+        return [_load_nested_alias_uuid(result, cache)
+                for result in collection.values()]
     alias_uuids = _load_alias_uuids(collection)
 
     # load_alias_uuids is expecting a dictionary, so just make a dictionary
     # here so it gets what it wants
     alias_results = {}
     for idx, alias_uuid in enumerate(alias_uuids):
-        alias_results[idx] = \
-            rachis.sdk.Result.load(os.path.join(cache.data, alias_uuid))
+        alias_results[idx] = rachis.sdk.Result.load(
+            os.path.join(cache.data, alias_uuid))
 
     return _load_alias_uuids(alias_results)
 
@@ -723,7 +734,7 @@ class TestPipelineResumption(unittest.TestCase):
 
             int_list_uuids, int_dict_uuids = e.exception.uuids
             # Nuke an element of the list
-            os.remove(os.path.join(self.pool.path, int_list_uuids[0]))
+            self.pool.remove(int_list_uuids[0])
 
             # We now expect to get this warning and recreate the list because
             # it is incomplete

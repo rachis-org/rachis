@@ -10,7 +10,7 @@ import warnings
 from rachis.plugin import IContext
 from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
-from rachis.core.cache import get_cache
+from rachis.core.cache import get_cache, _CACHE
 import rachis.sdk
 
 
@@ -35,11 +35,12 @@ class Context(IContext):
             self.cache = parent.cache
         else:
             self.cache = get_cache()
-            # Only ever do this on the root context. We only want to index the
-            # pool once before we start adding our own stuff to it.
-            with self.cache.lock:
-                if self.cache.named_pool is not None:
-                    self.cache.named_pool.create_index()
+
+        self._pool = (parent.pool if parent is not None
+                      else self.cache.named_pool)
+        # Index once before the root action starts adding results.
+        if self.pool is not None and parent is None:
+            self.pool.create_index()
 
         if action_obj is None and parent is not None:
             raise ValueError('Only parentless contexts can be instantiated '
@@ -47,6 +48,77 @@ class Context(IContext):
 
         self.action_obj = action_obj
         self._parent = parent
+        if self.cache.CURRENT_FORMAT_VERSION == 'v2':
+            self.scope = None
+
+    @property
+    def pool(self):
+        """The fixed recycle-pool binding, inherited by child Contexts."""
+        return self._pool
+
+    def _execution_context(self):
+        from copy import copy
+        ctx = copy(self)
+        if self.cache.CURRENT_FORMAT_VERSION != 'v2':
+            return ctx
+        ctx._return_scope = (self._parent.scope if self._parent is not None
+                             else self.cache.scope)
+        ctx.scope = self.cache.create_scope(pool=self.pool)
+        return ctx
+
+    def __enter__(self):
+        self._previous_context = getattr(_CACHE, 'context', None)
+        self._previous_pool = self.cache.named_pool
+        _CACHE.context = self
+        if self.cache.CURRENT_FORMAT_VERSION != 'v2':
+            self.cache._named_pool_ = self.pool
+            return self
+        self._previous_scope = getattr(self.cache._scope_local, 'scope', None)
+        self.cache._scope_local.scope = self.scope
+        self.cache._scope_local.pool = self.pool
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        _CACHE.context = self._previous_context
+        if self.cache.CURRENT_FORMAT_VERSION != 'v2':
+            self.cache._named_pool_ = self._previous_pool
+            return
+        self.cache._scope_local.scope = self._previous_scope
+        self.cache._scope_local.pool = self._previous_pool
+        self.scope.close(success=exc_type is None)
+
+    def _retain_inputs(self, inputs):
+        if self.cache.CURRENT_FORMAT_VERSION != 'v2':
+            return
+
+        def retain(value):
+            if isinstance(value, rachis.sdk.IResult):
+                self.cache.retain_result(value)
+            elif isinstance(value, dict) or hasattr(value, 'values'):
+                for child in value.values():
+                    retain(child)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    retain(child)
+        retain(inputs)
+
+    def _adopt_outputs(self, outputs):
+        if self.cache.CURRENT_FORMAT_VERSION != 'v2':
+            return
+        owner = self._return_scope
+
+        def adopt(value):
+            if isinstance(value, rachis.sdk.IResult):
+                archiver = value._archiver
+                if hasattr(archiver, 'ref_id'):
+                    owner.adopt(archiver.ref_id)
+            elif isinstance(value, dict) or hasattr(value, 'values'):
+                for child in value.values():
+                    adopt(child)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    adopt(child)
+        adopt(outputs)
 
     def _dispatch_(self, args, kwargs):
         exe = self.action_obj._bind(lambda: self)
@@ -57,7 +129,7 @@ class Context(IContext):
     def _callable_action_(self, *args, **kwargs):
         # If we have a named_pool, we need to check for cached results that
         # we can reuse.
-        if self.cache.named_pool is not None and \
+        if self.pool is not None and \
                 (cached_results := self._check_cache(args, kwargs)):
             return cached_results
 
@@ -83,7 +155,7 @@ class Context(IContext):
             arguments.append({k: v})
 
         invocation = HashableInvocation(plugin_action, arguments)
-        if invocation in self.cache.named_pool.index:
+        if invocation in self.pool.index:
             # It is conceivable that since we created our index the
             # pool we indexed has been destroyed. If that is the
             # case we want to just continue on and rerun the action
@@ -95,7 +167,7 @@ class Context(IContext):
     def _load_cache(self, invocation):
         """Load cached results
         """
-        cached_outputs = self.cache.named_pool.index[invocation]
+        cached_outputs = self.pool.index[invocation]
         loaded_outputs = {}
 
         for name, _type in self.action_obj.signature.outputs.items():
@@ -111,7 +183,7 @@ class Context(IContext):
 
                 for elem_info in collection_order:
                     elem = cached_collection[elem_info]
-                    loaded_elem = self.cache.named_pool.load(elem)
+                    loaded_elem = self.pool.load(elem)
                     loaded_collection[
                         elem_info.item_name] = loaded_elem
 
@@ -119,7 +191,7 @@ class Context(IContext):
             else:
                 output = cached_outputs[name]
                 loaded_outputs[name] = \
-                    self.cache.named_pool.load(output)
+                    self.pool.load(output)
 
         return rachis.sdk.Results(
             loaded_outputs.keys(), loaded_outputs.values())
@@ -185,11 +257,13 @@ class Context(IContext):
            failure, a context can still identify what will (no longer) be
            returned.
         """
+        if self.cache.CURRENT_FORMAT_VERSION == 'v2':
+            return self.cache.retain_result(ref)
         with self.cache.lock:
             new_ref = self.cache.process_pool.save(ref)
 
-            if self.cache.named_pool is not None:
-                self.cache.named_pool.save(new_ref)
+            if self.pool is not None:
+                self.pool.save(new_ref)
 
         # Return an artifact backed by the data in the cache
         return new_ref

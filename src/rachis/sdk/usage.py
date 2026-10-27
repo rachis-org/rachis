@@ -39,7 +39,6 @@ from typing import Set, List, Literal, Any, Callable, Type, Union
 import dataclasses
 import functools
 import re
-import yaml
 
 import rachis
 from rachis import sdk
@@ -1736,8 +1735,9 @@ class Usage:
             alias_path = node._archiver.provenance_dir / 'artifacts' \
                 / alias_uuid / 'action' / 'action.yaml'
 
-            with open(alias_path) as fh:
-                alias_yaml = yaml.safe_load(fh)
+            from rachis.core.archive.provenance import load_action_stream
+            with alias_path.open() as fh:
+                alias_yaml = load_action_stream(fh)
 
             var_type = self._find_var_type_from_prov(node, alias_yaml)
         elif action_type == 'import':

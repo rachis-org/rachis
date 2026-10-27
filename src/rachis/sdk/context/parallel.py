@@ -89,7 +89,7 @@ class ParallelContext(Context):
         # are proxies because if we got a proxy as an argument, we know it
         # is a new thing we are computing from a prior step in the pipeline
         # and thus will not be cached.
-        if self.cache.named_pool is not None and \
+        if self.pool is not None and \
                 not _contains_proxies(*args, **kwargs) and \
                 (cached_results := self._check_cache(args, kwargs)):
             return cached_results

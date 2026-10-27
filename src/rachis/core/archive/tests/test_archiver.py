@@ -7,6 +7,7 @@
 # ----------------------------------------------------------------------------
 
 import os
+import pytest
 import tempfile
 import unittest
 import uuid
@@ -168,7 +169,9 @@ class TestArchiver(unittest.TestCase, ArchiveTestingMixin):
                 '%s/provenance/action/action.yaml' % root_dir
             }
 
-            observed = set(zf.namelist())
+            observed = {
+                info.filename for info in zf.infolist() if not info.is_dir()
+            }
 
             # Not using self.assertArchiveMembers() because it accepts paths
             # relative to root_dir, and we have extra paths at the same level
@@ -247,7 +250,9 @@ class TestArchiver(unittest.TestCase, ArchiveTestingMixin):
                 '%s/VERSION' % second_root_dir
             }
 
-            observed = set(zf.namelist())
+            observed = {
+                info.filename for info in zf.infolist() if not info.is_dir()
+            }
 
             self.assertEqual(observed, expected)
 
@@ -297,6 +302,7 @@ class TestArchiver(unittest.TestCase, ArchiveTestingMixin):
         self.assertEqual(diff.removed, {})
         self.assertEqual(diff.changed, {})
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_checksums_mismatch(self):
         # We set everything in the artifact to be read-only. This test needs to
         # mimic if the user were to somehow write it anyway, so we set write
@@ -361,6 +367,8 @@ class TestArchiver(unittest.TestCase, ArchiveTestingMixin):
             'VERSION'
         ])
 
+        if not self.archiver.annotations_dir.exists():
+            expected.discard('annotations')
         observed = set(file for file in archive.relative_iterdir())
         self.assertEqual(observed, expected)
 

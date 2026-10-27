@@ -165,9 +165,9 @@ class TestAnnotationEndpoints(unittest.TestCase):
             names.append(annotation.name)
             contents.append(annotation.contents)
 
-        # make sure the ordering & members for names/contents are correct
-        self.assertEqual(names, exp_names)
-        self.assertEqual(contents, exp_contents)
+        # Membership pairs names with contents; iteration order is unspecified.
+        self.assertCountEqual(list(zip(names, contents)),
+                              list(zip(exp_names, exp_contents)))
 
     # `REMOVE_ANNOTATION` ENDPOINT TESTS
     def test_remove_annotation_from_empty_result_error(self):

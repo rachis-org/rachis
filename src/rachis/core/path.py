@@ -27,10 +27,18 @@ def _party_parrot(self, *args):
     raise TypeError("Cannot mutate %r." % self)
 
 
-def _init_path(cls, is_dir, prefix=None):
+def _init_path(cls, is_dir, prefix=None, scoped=False):
     from rachis.core.cache import get_cache
 
     cache = get_cache()
+    if cache.CURRENT_FORMAT_VERSION == 'v2':
+        directory = cache.acquire_directory()
+        if is_dir:
+            path = directory.path
+        else:
+            path = directory.path / 'file'
+            path.touch()
+        return (str(path), directory) if scoped else str(path)
     tmp_path = cache.get_tmp_path()
 
     if hasattr(cls, 'DEFAULT_PREFIX'):
@@ -53,7 +61,7 @@ def _init_path(cls, is_dir, prefix=None):
         # prevent a resource leak.
         os.close(fd)
 
-    return path
+    return (path, None) if scoped else path
 
 
 class OwnedPath(_ConcretePath):
@@ -111,6 +119,7 @@ class InPath(OwnedPath):
     def __init__(self, path):
         super().__init__(path)
         self.__backing_path = path
+        self._directory = getattr(path, '_directory', None)
         if hasattr(path, '_user_owned'):
             self._user_owned = path._user_owned
 
@@ -138,19 +147,31 @@ class OutPath(OwnedPath):
 
     if _SHIM_PATHLIB:
         def __new__(cls, dir=False):
-            path = _init_path(cls, is_dir=dir)
+            path, directory = _init_path(cls, is_dir=dir, scoped=True)
             obj = super().__new__(cls, path)
-            obj._destructor = weakref.finalize(obj, obj._destruct, str(obj))
+            obj._directory = directory
+            if directory is None:
+                obj._destructor = weakref.finalize(
+                    obj, obj._destruct, str(obj))
+            else:
+                obj._destructor = weakref.finalize(
+                    obj, directory.cache._deallocate, directory.ref_id)
             return obj
     else:
         def __init__(self, dir=False):
             """
             Create a tempfile, return pathlib.Path reference to it.
             """
-            path = _init_path(self.__class__, is_dir=dir)
+            path, directory = _init_path(
+                self.__class__, is_dir=dir, scoped=True)
             super().__init__(path)
-            self._destructor = weakref.finalize(
-                self, self._destruct, str(self))
+            self._directory = directory
+            if directory is None:
+                self._destructor = weakref.finalize(
+                    self, self._destruct, str(self))
+            else:
+                self._destructor = weakref.finalize(
+                    self, directory.cache._deallocate, directory.ref_id)
 
     def __enter__(self):
         return self
@@ -175,16 +196,25 @@ class InternalDirectory(_ConcretePath):
         def __new__(cls, *args, prefix=None):
             cls._validate_init(*args, prefix=prefix)
             if args == ():
-                path = _init_path(cls, is_dir=True, prefix=prefix)
-                return super().__new__(cls, path)
+                path, directory = _init_path(cls, is_dir=True, prefix=prefix,
+                                             scoped=True)
+                obj = super().__new__(cls, path)
+                obj._directory = directory
+                return obj
             else:
                 # pickle's reduce is happening and we are py3.11
                 return super().__new__(cls, *args)
     else:
         def __init__(self, *args, prefix=None):
             self._validate_init(*args, prefix=prefix)
-            path = _init_path(self.__class__, is_dir=True, prefix=prefix)
-            super().__init__(path)
+            if args:
+                super().__init__(*args)
+                self._directory = None
+            else:
+                path, directory = _init_path(self.__class__, is_dir=True,
+                                             prefix=prefix, scoped=True)
+                super().__init__(path)
+                self._directory = directory
 
     def __truediv__(self, path):
         # We don't want to create self-destructing paths when using the join

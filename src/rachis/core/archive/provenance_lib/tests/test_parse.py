@@ -30,7 +30,7 @@ from ..archive_parser import (
 
 from .testing_utilities import DummyArtifacts
 
-from rachis import Artifact, Cache
+from rachis import Artifact, CacheV1 as Cache
 from rachis.core.archive.archiver import ChecksumDiff, Archiver
 from rachis.core.archive.provenance_lib.tests.testing_utilities import (
     write_zip_file
@@ -338,6 +338,7 @@ class ProvDAGTests(unittest.TestCase):
                 self.assertEqual(list(diff.changed.keys()),
                                  ['provenance/citations.bib'])
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_missing_checksums_sha512(self):
         single_int = Artifact.import_data('SingleInt', 0)
         os.remove(single_int._archiver.path / 'checksums.sha512')
@@ -355,6 +356,7 @@ class ProvDAGTests(unittest.TestCase):
         self.assertEqual(diff, None)
 
     @pytest.mark.filterwarnings('ignore::UserWarning')
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_error_if_missing_node_files(self):
         concat_ints = self.dp.methods['concatenate_ints']
 
@@ -782,6 +784,7 @@ class ProvDAGTests(unittest.TestCase):
         )
         self.assertEqual(no_validation_dag.checksum_diff, None)
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_no_checksum_validation_missing_checksums_sha512(self):
         concat_ints = self.dp.methods['concatenate_ints']
 
@@ -800,6 +803,7 @@ class ProvDAGTests(unittest.TestCase):
         )
         self.assertEqual(dag.checksum_diff, None)
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_no_checksum_validation_missing_node_files(self):
         concat_ints = self.dp.methods['concatenate_ints']
 

@@ -56,9 +56,23 @@ class ProxyResult(Proxy, IResult):
             qiime_type if qiime_type is not None else self._qiime_type_
         )
 
+        resolved = []
+        shared_lifetime = ctx.cache.CURRENT_FORMAT_VERSION == 'v2'
+        if shared_lifetime:
+            owner = (ctx._parent.scope if ctx._parent is not None
+                     else ctx.cache.root_scope)
+            directory = getattr(provenance.path, '_directory', None)
+            if directory is not None:
+                owner.adopt(directory.ref_id)
+
         def _alias_hook():
+            if shared_lifetime and resolved:
+                return resolved[0]
             result = new._get_element_(new._future_.result())
-            return result._alias(name, provenance, ctx, qiime_type)
+            alias = result._alias(name, provenance, ctx, qiime_type)
+            if shared_lifetime:
+                resolved.append(alias)
+            return alias
 
         new = self.__class__(self._future_, self._selector_, alias_type)
         new._alias_hook = _alias_hook

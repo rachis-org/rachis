@@ -6,6 +6,7 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 import os
+import pytest
 import shutil
 import tempfile
 import unittest
@@ -81,6 +82,7 @@ class TestVersionParser(unittest.TestCase):
             actual, (self.archive_version_exp, framework_version_exp)
         )
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_parse_version_no_VERSION_file(self):
         int_seq = Artifact.import_data('IntSequence1', [1, 2, 3])
         os.remove(int_seq._archiver.path / 'VERSION')
@@ -89,6 +91,7 @@ class TestVersionParser(unittest.TestCase):
                                     'No such file or directory:.*VERSION'):
             parse_version(int_seq._archiver)
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_parse_version_VERSION_file_missing_archive_field(self):
         int_seq = Artifact.import_data('IntSequence1', [1, 2, 3])
 
@@ -104,6 +107,7 @@ class TestVersionParser(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'VERSION.*out of spec.*'):
             parse_version(int_seq._archiver)
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_parse_version_VERSION_file_extra_field(self):
         int_seq = Artifact.import_data('IntSequence1', [1, 2, 3])
 
@@ -185,6 +189,7 @@ class TestVersionParser(unittest.TestCase):
     def test_fmwk_version_invalid_year(self):
         self.assertNotRegex('framework: 1953.3.0', self.re_l3)
 
+    @pytest.mark.usefixtures("legacy_tree_cache")
     def test_parser_semantic_versioning_fallback(self):
         int_seq = Artifact.import_data('IntSequence1', [1, 2, 3])
 

@@ -44,12 +44,19 @@ class DummyArtifacts:
             os.path.dirname(os.path.abspath(__file__)), 'data'
         )
 
-        self.init_import_artifacts()
-        self.init_action_artifacts()
-        self.init_all_version_artifacts()
-        self.init_artifact_with_md_in_provenance()
-        self.init_fake_action_artifact()
-        self.init_no_checksum_dag()
+        from rachis.core.cache import CacheV1
+        from rachis.core.cache import _CACHE
+        previous = getattr(_CACHE, 'cache', None)
+        _CACHE.cache = CacheV1(os.path.join(self.tempdir, 'legacy-cache'))
+        try:
+            self.init_import_artifacts()
+            self.init_action_artifacts()
+            self.init_all_version_artifacts()
+            self.init_artifact_with_md_in_provenance()
+            self.init_fake_action_artifact()
+            self.init_no_checksum_dag()
+        finally:
+            _CACHE.cache = previous
 
     def init_import_artifacts(self):
         '''
@@ -77,7 +84,9 @@ class DummyArtifacts:
             # This dir is empty on imported artifacts and won't actually be
             # here for real .qzas of imported artifacts. Caused us a bit of a
             # headache https://github.com/rachis-org/rachis/pull/943
-            os.rmdir(artifact._archiver.provenance_dir / 'artifacts')
+            empty_ancestors = artifact._archiver.provenance_dir / 'artifacts'
+            if empty_ancestors.exists():
+                os.rmdir(empty_ancestors)
             setattr(self, name, test_artifact)
 
     def init_action_artifacts(self):

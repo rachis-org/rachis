@@ -78,7 +78,9 @@ class Annotation():
             corresponding annotation directory.
 
         """
-        with open(os.path.join(filepath, 'metadata.yaml'), 'r') as fh:
+        if not hasattr(filepath, 'open'):
+            filepath = pathlib.Path(filepath)
+        with (filepath / 'metadata.yaml').open() as fh:
             meta_yaml = yaml.safe_load(fh)
             annotation_type = meta_yaml['type']
 
@@ -87,15 +89,15 @@ class Annotation():
             # NOTE
             if annotation_type == 'Note':
                 # Validate that `note.txt` exists
-                note_fp = os.path.join(filepath, 'note.txt')
-                if not os.path.exists(note_fp):
+                note_fp = filepath / 'note.txt'
+                if not note_fp.exists():
                     raise ValueError(
                         'Unable to load malformed Note with name: '
                         f'"{annotation.name}" due to missing `note.txt` file.'
                     )
                 # Attach contents to Note
                 else:
-                    with open(note_fp, 'r') as fh:
+                    with note_fp.open() as fh:
                         annotation.contents = fh.read()
 
             # SIGNATURE
@@ -109,13 +111,13 @@ class Annotation():
 
                 # Validate `signature.gpg` and Signature-level
                 # `checksums.sha512` files exist
-                sig_fp = os.path.join(filepath, 'signature.gpg')
-                sig_checksum_fp = os.path.join(filepath, 'checksums.sha512')
+                sig_fp = filepath / 'signature.gpg'
+                sig_checksum_fp = filepath / 'checksums.sha512'
                 fp_dict = {'signature.gpg': sig_fp,
                            'checksums.sha512': sig_checksum_fp}
 
                 for name, fp in fp_dict.items():
-                    if not os.path.exists(fp):
+                    if not fp.exists():
                         raise ValueError(
                             'Unable to load malformed Signature with name: '
                             f'"{annotation.name}" '
