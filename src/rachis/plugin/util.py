@@ -96,7 +96,7 @@ def get_nonhidden_files(dir: Path) -> list[Path]:
     for path in candidates:
         if not path.is_file():
             continue
-        if any([part.startswith('.') for part in path.parts]):
+        if any([part.startswith('.') for part in path.relative_to(dir).parts]):
             continue
 
         non_hidden.append(path)

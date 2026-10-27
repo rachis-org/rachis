@@ -418,26 +418,26 @@ class TestArtifact(unittest.TestCase, ArchiveTestingMixin):
         DirectoryFormat.
         '''
         test_dir = pathlib.Path(self.test_dir.name)
+        import_dir = test_dir / '.parent-keep' / 'import-me'
+        import_dir.mkdir(parents=True)
 
-        with open(test_dir / 'file1.txt', 'w') as fh:
+        with open(import_dir / 'file1.txt', 'w') as fh:
             fh.write('42\n')
 
-        with open(test_dir / 'file2.txt', 'w') as fh:
+        with open(import_dir / 'file2.txt', 'w') as fh:
             fh.write('42\n')
 
-        dotfile = test_dir / '.dotfile'
+        dotfile = import_dir / '.dotfile'
         dotfile.touch()
 
-        dotdir = test_dir / '.dotdir'
+        dotdir = import_dir / '.dotdir'
         os.mkdir(dotdir)
 
-        nested = test_dir / '.dotdir' / 'nested'
+        nested = import_dir / '.dotdir' / 'nested'
         nested.touch()
 
         # If dotfiles weren't ignored, this would fail.
-        Artifact.import_data(SingleInt, test_dir)
-
-
+        Artifact.import_data(SingleInt, import_dir)
 
     def test_import_data_with_unreachable_path(self):
         with self.assertRaisesRegex(rachis.plugin.ValidationError,
