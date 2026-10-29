@@ -8,6 +8,7 @@
 
 import types
 import unittest
+from unittest.mock import patch
 
 import rachis.plugin
 import rachis.sdk
@@ -16,7 +17,8 @@ import rachis.util
 from rachis.core.testing.type import (IntSequence1, IntSequence2, Mapping,
                                       FourInts, Kennel, Dog, Cat, SingleInt)
 from rachis.core.testing.format import (IntSequenceDirectoryFormat,
-                                        IntSequenceV2DirectoryFormat)
+                                        IntSequenceV2DirectoryFormat,
+                                        SingleIntFormat)
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.core.testing.plugin import is1_use, is2_use
 from rachis.plugin.testing import assert_no_nans_in_tables
@@ -485,6 +487,26 @@ class TestPlugin(unittest.TestCase):
                 description='Output is registered as returning a List which is'
                             ' bad.'
             )
+
+    def test_register_format_validates_compression(self):
+        for level in (None, 0, 1, 9):
+            with self.subTest(level=level):
+                plugin = rachis.plugin.Plugin(
+                    name='compression-test', version='0.0.0',
+                    website='https://example.com')
+                with patch.object(SingleIntFormat, 'COMPRESSION', level):
+                    plugin.register_formats(SingleIntFormat)
+
+        for level in (-1, 10, True, 1.5, '2'):
+            with self.subTest(level=level):
+                plugin = rachis.plugin.Plugin(
+                    name='compression-test', version='0.0.0',
+                    website='https://example.com')
+                with patch.object(SingleIntFormat, 'COMPRESSION', level):
+                    with self.assertRaisesRegex(
+                            ValueError, 'COMPRESSION must be an integer '
+                                        'from 0 to 9'):
+                        plugin.register_formats(SingleIntFormat)
 
 
 if __name__ == '__main__':

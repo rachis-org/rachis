@@ -13,6 +13,7 @@ import uuid
 import zipfile
 import pathlib
 import importlib
+from unittest.mock import patch
 
 from rachis.sdk.result import Result
 from rachis.core.annotate import Note
@@ -21,10 +22,21 @@ from rachis.core.archive import ImportProvenanceCapture
 from rachis.core.archive.archiver import _ZipArchive, ArchiveCheck
 from rachis.core.archive.format.util import artifact_version
 from rachis.core.archive.provenance_lib.archive_parser import FORMAT_REGISTRY
-from rachis.core.testing.format import IntSequenceDirectoryFormat
-from rachis.core.testing.type import IntSequence1
+from rachis.core.testing.format import (
+    FourIntsDirectoryFormat, IntSequenceDirectoryFormat,
+    RedundantSingleIntDirectoryFormat, SingleIntFormat,
+)
+from rachis.core.testing.type import FourInts, IntSequence1, SingleInt
 from rachis.core.testing.util import ArchiveTestingMixin
 from rachis.core.util import is_uuid4, set_permissions, OTHER_NO_WRITE
+
+
+class StoredIntFormat(SingleIntFormat):
+    COMPRESSION = 0
+
+
+class BestIntFormat(SingleIntFormat):
+    COMPRESSION = 9
 
 
 class TestArchiver(unittest.TestCase, ArchiveTestingMixin):
@@ -32,23 +44,24 @@ class TestArchiver(unittest.TestCase, ArchiveTestingMixin):
         prefix = "rachis-test-temp-"
         self.temp_dir = tempfile.TemporaryDirectory(prefix=prefix)
 
-        # Initialize an Archiver. The values passed to the constructor mostly
-        # don't matter to the Archiver, but we'll pass valid Artifact test data
-        # anyways in case Archiver's behavior changes in the future.
-        def data_initializer(data_dir):
-            fp = os.path.join(str(data_dir), 'ints.txt')
-            with open(fp, 'w') as fh:
-                fh.write('1\n')
-                fh.write('2\n')
-                fh.write('3\n')
-
-        self.archiver = Archiver.from_data(
+        self.archiver = self._make_archiver(
             IntSequence1, IntSequenceDirectoryFormat,
-            data_initializer=data_initializer,
-            provenance_capture=ImportProvenanceCapture())
+            {'ints.txt': '1\n2\n3\n'})
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def _make_archiver(self, semantic_type, directory_format, files):
+        """Create an archiver containing the supplied relative data files."""
+        def data_initializer(data_dir):
+            for name, contents in files.items():
+                path = data_dir / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(contents)
+
+        return Archiver.from_data(
+            semantic_type, directory_format, data_initializer,
+            ImportProvenanceCapture())
 
     def test_save_invalid_filepath(self):
         # Empty filepath.
@@ -64,27 +77,12 @@ class TestArchiver(unittest.TestCase, ArchiveTestingMixin):
             self.archiver.save(os.path.join(self.temp_dir.name, 'foo', ''))
 
     def test_save_excludes_dotfiles_in_data_dir(self):
-        def data_initializer(data_dir):
-            data_dir = str(data_dir)
-            fp = os.path.join(data_dir, 'ints.txt')
-            with open(fp, 'w') as fh:
-                fh.write('1\n')
-                fh.write('2\n')
-                fh.write('3\n')
-
-            hidden_fp = os.path.join(data_dir, '.hidden-file')
-            with open(hidden_fp, 'w') as fh:
-                fh.write("You can't see me if I can't see you\n")
-
-            hidden_dir = os.path.join(data_dir, '.hidden-dir')
-            os.mkdir(hidden_dir)
-            with open(os.path.join(hidden_dir, 'ignored-file'), 'w') as fh:
-                fh.write("I'm ignored because I live in a hidden dir :(\n")
-
-        archiver = Archiver.from_data(
+        archiver = self._make_archiver(
             IntSequence1, IntSequenceDirectoryFormat,
-            data_initializer=data_initializer,
-            provenance_capture=ImportProvenanceCapture())
+            {'ints.txt': '1\n2\n3\n',
+             '.hidden-file': "You can't see me if I can't see you\n",
+             '.hidden-dir/ignored-file':
+                 "I'm ignored because I live in a hidden dir :(\n"})
 
         fp = os.path.join(self.temp_dir.name, 'archive.zip')
         archiver.save(fp)
@@ -429,6 +427,94 @@ class TestArchiver(unittest.TestCase, ArchiveTestingMixin):
         # ensure there are no subclasses (ie new archive versions that
         # havent been added to the format registry)
         self.assertEqual(ArchiveFormat.__subclasses__(), [])
+
+    def _save_with_write_calls(self, archiver, name):
+        """Save an archiver and return its path and per-member ZIP options."""
+        filepath = pathlib.Path(self.temp_dir.name) / name
+        calls = []
+        original_write = zipfile.ZipFile.write
+
+        def recording_write(zip_file, *args, **kwargs):
+            calls.append((args, kwargs))
+            return original_write(zip_file, *args, **kwargs)
+
+        with patch.object(zipfile.ZipFile, 'write', recording_write):
+            archiver.save(filepath)
+
+        options = {kwargs['arcname'].split('/data/', 1)[-1]: kwargs
+                   for _, kwargs in calls}
+        return filepath, options
+
+    def test_save_uses_default_compression_when_unconfigured(self):
+        filepath, options = self._save_with_write_calls(
+            self.archiver, 'default.qza')
+
+        self.assertNotIn('compress_type', options['ints.txt'])
+        self.assertNotIn('compresslevel', options['ints.txt'])
+
+        with zipfile.ZipFile(filepath) as zf:
+            root = str(self.archiver.uuid)
+            member = zf.getinfo(f'{root}/data/ints.txt')
+            self.assertEqual(member.compress_type, zipfile.ZIP_DEFLATED)
+
+    def test_save_uses_member_format_compression(self):
+        directory_format = RedundantSingleIntDirectoryFormat
+        with (patch.object(directory_format.int1, 'format', StoredIntFormat),
+              patch.object(directory_format.int2, 'format', BestIntFormat)):
+            archiver = self._make_archiver(
+                SingleInt, directory_format,
+                {'file1.txt': '1\n', 'file2.txt': '1\n'})
+            filepath, options = self._save_with_write_calls(
+                archiver, 'mixed.qza')
+
+        self.assertEqual(
+            options['file2.txt']['compress_type'], zipfile.ZIP_DEFLATED)
+        self.assertEqual(options['file2.txt']['compresslevel'], 9)
+
+        with zipfile.ZipFile(filepath) as zf:
+            root = str(archiver.uuid)
+            self.assertEqual(
+                zf.getinfo(f'{root}/data/file1.txt').compress_type,
+                zipfile.ZIP_STORED)
+            self.assertEqual(
+                zf.getinfo(f'{root}/metadata.yaml').compress_type,
+                zipfile.ZIP_DEFLATED)
+
+    def test_load_archive_with_stored_data_member(self):
+        directory_format = RedundantSingleIntDirectoryFormat
+        with patch.object(directory_format.int1, 'format', StoredIntFormat):
+            archiver = self._make_archiver(
+                SingleInt, directory_format,
+                {'file1.txt': '1\n', 'file2.txt': '1\n'})
+            filepath, _ = self._save_with_write_calls(
+                archiver, 'stored.qza')
+
+        with zipfile.ZipFile(filepath) as zf:
+            root = str(archiver.uuid)
+            self.assertEqual(
+                zf.getinfo(f'{root}/data/file1.txt').compress_type,
+                zipfile.ZIP_STORED)
+
+        loaded = Archiver.load(filepath)
+        self.assertEqual(loaded.uuid, archiver.uuid)
+        self.assertEqual(loaded.type, SingleInt)
+        self.assertEqual(loaded.format, directory_format)
+        self.assertEqual((loaded.data_dir / 'file1.txt').read_text(), '1\n')
+
+    def test_save_compresses_nested_file_collection(self):
+        with patch.object(SingleIntFormat, 'COMPRESSION', 1):
+            archiver = self._make_archiver(
+                FourInts, FourIntsDirectoryFormat,
+                {'file1.txt': '1\n', 'file2.txt': '2\n',
+                 'nested/file3.txt': '3\n', 'nested/file4.txt': '4\n'})
+            _, options = self._save_with_write_calls(
+                archiver, 'nested.qza')
+
+        for name in ('file1.txt', 'file2.txt', 'nested/file3.txt',
+                     'nested/file4.txt'):
+            self.assertEqual(
+                options[name]['compress_type'], zipfile.ZIP_DEFLATED)
+            self.assertEqual(options[name]['compresslevel'], 1)
 
 
 if __name__ == '__main__':

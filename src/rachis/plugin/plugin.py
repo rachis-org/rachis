@@ -68,6 +68,7 @@ import rachis.core.type.grammar as grammar
 from rachis.core.validate import ValidationObject
 from rachis.plugin.model import DirectoryFormat
 from rachis.plugin.model.base import FormatBase
+from rachis.plugin.model.file_format import _FileFormat
 from rachis.core.type import is_semantic_type
 from rachis.core.util import get_view_name
 from rachis.core.cite import _make_citations_tuple
@@ -82,6 +83,8 @@ SemanticTypeFragmentRecord = collections.namedtuple(
 FormatRecord = collections.namedtuple('FormatRecord', ['format', 'plugin'])
 ViewRecord = collections.namedtuple(
     'ViewRecord', ['name', 'view', 'plugin', 'citations'])
+
+
 # semantic_type and type_expression will point to the same value in
 # ArtifactClassRecords as type_expression is deprecated in favor of
 # semantic_type
@@ -265,6 +268,8 @@ class Plugin:
             is_format = False
             if issubclass(view, FormatBase):
                 is_format = True
+                if issubclass(view, _FileFormat):
+                    view._validate_compression()
 
             name = get_view_name(view)
             if name in self.views:

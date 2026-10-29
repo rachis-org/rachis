@@ -73,6 +73,7 @@ class TestFileFormat(unittest.TestCase):
     def tearDown(self):
         self.test_dir.cleanup()
 
+
     def test_view_expected(self):
         number = self.format.view(int)
         self.assertEqual(1, number)
