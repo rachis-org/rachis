@@ -90,6 +90,13 @@ class ProxyResult(Proxy, IResult):
     def citations(self):
         return self._archiver.citations
 
+    @property
+    def record_provenance(self):
+        if hasattr(self, "_record_provenance"):
+            return self._record_provenance
+
+        return True
+
     def result(self):
         if self._alias_hook:
             # Create our alias on result request if a hook has been added

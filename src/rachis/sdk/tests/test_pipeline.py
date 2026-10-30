@@ -69,7 +69,9 @@ class TestPipeline(unittest.TestCase):
             ('do_extra_thing', inspect.Parameter(
                 'do_extra_thing', kind, annotation=Bool)),
             ('add', inspect.Parameter(
-                'add', kind, default=1, annotation=Int))
+                'add', kind, default=1, annotation=Int)),
+            ('record_provenance', inspect.Parameter(
+                'record_provenance', kind, default=True, annotation=Bool))
         ]
 
         for callable_attr in '__call__', 'asynchronous':
@@ -232,6 +234,29 @@ class TestPipeline(unittest.TestCase):
     def test_typical_pipeline(self):
         for call in self.iter_callables('typical_pipeline'):
             results = call(self.int_sequence, self.mapping, False)
+
+            self.assertEqual(results.left_viz.type, Visualization)
+            self.assertEqual(results.left.view(list), [1])
+            self.assertEqual(results.right.view(list), [2, 3])
+            self.assertNotEqual(results.out_map.uuid, self.mapping.uuid)
+            self.assertEqual(results.out_map.view(dict),
+                             self.mapping.view(dict))
+
+            results = call(self.int_sequence, self.mapping, True, add=5)
+            self.assertEqual(results.left.view(list), [6])
+            self.assertEqual(results.right.view(list), [2, 3])
+
+            with self.assertRaisesRegex(ValueError, 'Bad mapping'):
+                m = rachis.Artifact.import_data(Mapping, {'a': 1})
+                call(self.int_sequence, m, False)
+
+    # TODO: Right now this test just asserts things don't crash, not that
+    # any specific desirable behavior is happening
+    def test_typical_pipeline_record_no_inner_prov(self):
+        for call in self.iter_callables('typical_pipeline'):
+            results = call(
+                self.int_sequence, self.mapping, False, record_provenance=False
+            )
 
             self.assertEqual(results.left_viz.type, Visualization)
             self.assertEqual(results.left.view(list), [1])

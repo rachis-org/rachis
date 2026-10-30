@@ -30,7 +30,12 @@ def _validate_collection(collection_order):
 
 
 class Context(IContext):
-    def __init__(self, action_obj=None, parent=None):
+    def __init__(
+                self, action_obj=None, parent=None, *,
+                record_provenance=True
+            ):
+        self._record_provenance = record_provenance
+
         if parent is not None:
             self.cache = parent.cache
         else:
@@ -124,7 +129,9 @@ class Context(IContext):
         return rachis.sdk.Results(
             loaded_outputs.keys(), loaded_outputs.values())
 
-    def get_action(self, plugin: str, action: str):
+    def get_action(
+                self, plugin: str, action: str, *, record_provenance: bool=True
+            ):
         """Return a function matching the callable API of an action.
         This function is aware of the pipeline context and manages its own
         cleanup as appropriate.
@@ -145,7 +152,9 @@ class Context(IContext):
                 % (action, plugin))
 
         # Create a context for the new action
-        child_context = self.__class__(new_action_obj, parent=self)
+        child_context = self.__class__(
+            new_action_obj, parent=self, record_provenance=record_provenance
+        )
 
         # Return a callable for the new action
         callable_action = child_context.action_obj._rewrite_wrapper_signature(
@@ -180,7 +189,7 @@ class Context(IContext):
     # in the named cache in the end. We only have the pipeline alias in the
     # process pool
     def add_reference(self, ref):
-        """Add a reference to something destructable that will be owned by the
+        """Add a reference to something destructible that will be owned by the
            parent scope. The reason it needs to be tracked is so that on
            failure, a context can still identify what will (no longer) be
            returned.
