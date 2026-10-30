@@ -1,0 +1,17 @@
+# GlobusComputeExecutor needs the optional globus-compute-sdk dependency, and
+# it cannot be parsed from TOML, so it is only supported through the Python
+# API. Its executor option takes a globus_compute_sdk.Executor, but rachis
+# looks up anything under an executor key in parsl.executors
+[parsl]
+
+[[parsl.executors]]
+class = "GlobusComputeExecutor"
+label = "globus_compute"
+working_dir = "/tmp/rachis-test/globus_compute"
+
+[parsl.executors.executor]
+class = "Executor"
+endpoint_id = "00000000-0000-4000-8000-000000000000"
+
+[[parsl.executors.storage_access]]
+class = "NoOpFileStaging"

@@ -1,0 +1,33 @@
+[parsl]
+
+[[parsl.executors]]
+class = "MPIExecutor"
+label = "mpi"
+launch_cmd = "process_worker_pool.py {debug}"
+interchange_launch_cmd = "interchange.py"
+address = "127.0.0.1"
+loopback_address = "127.0.0.1"
+worker_port = 54321
+worker_port_range = [52000, 53000]
+interchange_port_range = [53000, 54000]
+working_dir = "/tmp/rachis-test/mpi"
+worker_debug = true
+max_workers_per_block = 2
+prefetch_capacity = 2
+heartbeat_threshold = 60
+heartbeat_period = 10
+drain_period = 3600
+poll_period = 5
+address_probe_timeout = 30
+worker_logdir_root = "/tmp/rachis-test/mpi_logs"
+mpi_launcher = "srun"
+block_error_handler = false
+encrypted = true
+
+# MPIExecutor requires its provider to use the SimpleLauncher
+[parsl.executors.provider]
+class = "SlurmProvider"
+nodes_per_block = 2
+
+[parsl.executors.provider.launcher]
+class = "SimpleLauncher"

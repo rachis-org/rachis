@@ -1,0 +1,34 @@
+[parsl]
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "htex"
+launch_cmd = "process_worker_pool.py {debug} --max_workers_per_node={max_workers_per_node}"
+interchange_launch_cmd = ["interchange.py"]
+address = "127.0.0.1"
+loopback_address = "127.0.0.1"
+worker_port = 54321
+worker_port_range = [50000, 51000]
+interchange_port_range = [51000, 52000]
+working_dir = "/tmp/rachis-test/htex"
+worker_debug = true
+cores_per_worker = 2.0
+mem_per_worker = 1.5
+max_workers_per_node = 4
+cpu_affinity = "block"
+available_accelerators = ["0", "1"]
+prefetch_capacity = 2
+heartbeat_threshold = 60
+heartbeat_period = 10
+drain_period = 3600
+poll_period = 5
+address_probe_timeout = 30
+worker_logdir_root = "/tmp/rachis-test/htex_logs"
+block_error_handler = false
+encrypted = false
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.manager_selector]
+class = "BlockIdManagerSelector"

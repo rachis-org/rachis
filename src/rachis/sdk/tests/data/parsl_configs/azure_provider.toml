@@ -1,0 +1,31 @@
+# AzureProvider needs the optional azure and msrestazure dependencies and
+# contacts Azure when it is constructed
+[parsl]
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "azure"
+
+[parsl.executors.provider]
+class = "AzureProvider"
+init_blocks = 2
+min_blocks = 1
+max_blocks = 4
+parallelism = 0.5
+worker_init = "source ~/.bashrc"
+location = "eastus"
+group_name = "rachis.group"
+key_name = "rachis"
+key_file = "/tmp/rachis-test/azure_keys.json"
+vnet_name = "rachis.vnet"
+linger = true
+
+[parsl.executors.provider.vm_reference]
+vm_size = "Standard_D1"
+publisher = "Canonical"
+offer = "UbuntuServer"
+sku = "18.04-LTS"
+version = "latest"
+
+[parsl.executors.provider.launcher]
+class = "SingleNodeLauncher"

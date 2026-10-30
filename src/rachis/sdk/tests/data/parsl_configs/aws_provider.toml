@@ -1,0 +1,30 @@
+# AWSProvider needs the optional boto3 dependency and contacts AWS when it is
+# constructed
+[parsl]
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "aws"
+
+[parsl.executors.provider]
+class = "AWSProvider"
+image_id = "ami-0123456789abcdef0"
+key_name = "rachis-test"
+init_blocks = 2
+min_blocks = 1
+max_blocks = 4
+nodes_per_block = 1
+parallelism = 0.5
+worker_init = "source ~/.bashrc"
+instance_type = "t2.micro"
+region = "us-west-2"
+spot_max_bid = 1.0
+key_file = "/tmp/rachis-test/aws_keys.json"
+profile = "default"
+iam_instance_profile_arn = "arn:aws:iam::123456789012:instance-profile/rachis"
+state_file = "/tmp/rachis-test/aws_state.json"
+walltime = "02:00:00"
+linger = true
+
+[parsl.executors.provider.launcher]
+class = "SingleNodeLauncher"

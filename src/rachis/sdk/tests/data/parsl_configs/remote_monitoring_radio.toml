@@ -1,0 +1,42 @@
+# Every option of each monitoring radio that ships with parsl. Executors take
+# these as remote_monitoring_radio
+[parsl]
+
+[[parsl.executors]]
+class = "ThreadPoolExecutor"
+label = "threads"
+
+[parsl.executors.remote_monitoring_radio]
+class = "MultiprocessingQueueRadio"
+
+[[parsl.executors]]
+class = "ThreadPoolExecutor"
+label = "threads_filesystem"
+
+[parsl.executors.remote_monitoring_radio]
+class = "FilesystemRadio"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "htex"
+
+[parsl.executors.remote_monitoring_radio]
+class = "HTEXRadio"
+
+[[parsl.executors]]
+class = "MPIExecutor"
+label = "mpi"
+
+[parsl.executors.remote_monitoring_radio]
+class = "UDPRadio"
+address = "127.0.0.1"
+port = 55056
+atexit_timeout = 5
+debug = true
+hmac_digest = "sha256"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "SimpleLauncher"

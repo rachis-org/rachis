@@ -1,0 +1,11 @@
+# TaskVineExecutor needs the optional ndcctools dependency, and it cannot be
+# parsed from TOML, so it is only supported through the Python API
+[parsl]
+
+[[parsl.executors]]
+class = "TaskVineExecutor"
+label = "task_vine"
+worker_launch_method = "provider"
+
+[parsl.executors.provider]
+class = "LocalProvider"

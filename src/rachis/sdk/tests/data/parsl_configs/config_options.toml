@@ -1,0 +1,24 @@
+# Every parsl.Config option that can be expressed in TOML. retry_handler and
+# std_autopath take callables and dependency_resolver takes a prebuilt
+# instance, so they are not covered here
+[parsl]
+exit_mode = "wait"
+garbage_collect = false
+internal_tasks_max_threads = 4
+retries = 2
+run_dir = "/tmp/rachis-test/runinfo"
+strategy = "htex_auto_scale"
+strategy_period = 2.5
+max_idletime = 60.0
+usage_tracking = 0
+project_name = "rachis-test"
+initialize_logging = false
+
+# The checkpoint and app cache options were moved off of parsl.Config and onto
+# the memoizer
+[parsl.memoizer]
+class = "BasicMemoizer"
+checkpoint_files = ["/tmp/rachis-test/runinfo/000/checkpoint"]
+checkpoint_period = "00:30:00"
+checkpoint_mode = "periodic"
+memoize = false

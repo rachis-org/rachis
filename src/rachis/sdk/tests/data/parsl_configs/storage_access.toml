@@ -1,0 +1,46 @@
+# Every option of each staging provider that ships with parsl and does not
+# need an optional dependency. Executors take these as storage_access
+[parsl]
+
+[[parsl.executors]]
+class = "ThreadPoolExecutor"
+label = "threads"
+
+[[parsl.executors.storage_access]]
+class = "NoOpFileStaging"
+
+[[parsl.executors.storage_access]]
+class = "HTTPInTaskStaging"
+
+[[parsl.executors.storage_access]]
+class = "FTPInTaskStaging"
+
+[[parsl.executors.storage_access]]
+class = "ZipFileStaging"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "htex"
+
+[[parsl.executors.storage_access]]
+class = "HTTPSeparateTaskStaging"
+
+[[parsl.executors.storage_access]]
+class = "FTPSeparateTaskStaging"
+
+[[parsl.executors.storage_access]]
+class = "RSyncStaging"
+hostname = "login.example.org"
+
+[[parsl.executors]]
+class = "MPIExecutor"
+label = "mpi"
+
+[[parsl.executors.storage_access]]
+class = "NoOpFileStaging"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "SimpleLauncher"

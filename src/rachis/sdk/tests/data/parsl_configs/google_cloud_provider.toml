@@ -1,0 +1,24 @@
+# GoogleCloudProvider needs the optional google-api-python-client dependency
+# and contacts Google Cloud when it is constructed
+[parsl]
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "google_cloud"
+
+[parsl.executors.provider]
+class = "GoogleCloudProvider"
+project_id = "rachis-test"
+key_file = "/tmp/rachis-test/google_keys.json"
+region = "us-central1"
+os_project = "debian-cloud"
+os_family = "debian-12"
+google_version = "v1"
+instance_type = "n1-standard-2"
+init_blocks = 2
+min_blocks = 1
+max_blocks = 4
+parallelism = 0.5
+
+[parsl.executors.provider.launcher]
+class = "SingleNodeLauncher"

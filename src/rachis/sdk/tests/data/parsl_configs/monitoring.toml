@@ -1,0 +1,14 @@
+# MonitoringHub needs the optional sqlalchemy dependency
+[parsl]
+
+[parsl.monitoring]
+class = "MonitoringHub"
+hub_address = "127.0.0.1"
+hub_port = 55055
+hub_port_range = [55000, 56000]
+workflow_name = "rachis-test"
+workflow_version = "1.0"
+logging_endpoint = "sqlite:////tmp/rachis-test/monitoring.db"
+monitoring_debug = true
+resource_monitoring_enabled = false
+resource_monitoring_interval = 5.0

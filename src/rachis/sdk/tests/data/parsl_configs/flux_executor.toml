@@ -1,0 +1,20 @@
+[parsl]
+
+[[parsl.executors]]
+class = "FluxExecutor"
+label = "flux"
+working_dir = "/tmp/rachis-test/flux"
+# FluxExecutor raises if this is unset and flux is not on the PATH. It is not
+# checked for existence
+flux_path = "/opt/flux/bin/flux"
+launch_cmd = "{flux} start {python} {manager} {protocol} {hostname} {port}"
+
+[parsl.executors.flux_executor_kwargs]
+threads = 2
+
+[parsl.executors.provider]
+class = "SlurmProvider"
+
+[parsl.executors.provider.launcher]
+class = "SrunLauncher"
+overrides = "--mpi=none"

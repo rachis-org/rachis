@@ -12,6 +12,7 @@ import psutil
 import platformdirs
 import threading
 import importlib
+import inspect
 
 import parsl
 import tomlkit
@@ -51,18 +52,73 @@ VENDORED_CONFIG = {
 PARSL_DATA_PROVIDER = 'parsl.data_provider'
 PARSL_EXECUTOR = 'parsl.executors'
 PARSL_LAUNCHER = 'parsl.launchers'
+PARSL_MANAGER_SELECTOR = 'parsl.executors.high_throughput.manager_selector'
+PARSL_MEMOIZER = 'parsl.dataflow.memoization'
 PARSL_MONITORING = 'parsl.monitoring'
 PARSL_PROVIDER = 'parsl.providers'
+PARSL_RADIO = ('parsl.monitoring.radios.filesystem',
+               'parsl.monitoring.radios.htex',
+               'parsl.monitoring.radios.multiprocessing',
+               'parsl.monitoring.radios.udp')
+PARSL_STAGING = ('parsl.data_provider.file_noop', 'parsl.data_provider.ftp',
+                 'parsl.data_provider.globus', 'parsl.data_provider.http',
+                 'parsl.data_provider.rsync', 'parsl.data_provider.zip')
 module_paths = {
-    'data_provider': PARSL_DATA_PROVIDER,
-    'data_providers': PARSL_DATA_PROVIDER,
     'executor': PARSL_EXECUTOR,
     'executors': PARSL_EXECUTOR,
     'launcher': PARSL_LAUNCHER,
     'launchers': PARSL_LAUNCHER,
+    'manager_selector': PARSL_MANAGER_SELECTOR,
+    'memoizer': PARSL_MEMOIZER,
     'monitoring': PARSL_MONITORING,
     'provider': PARSL_PROVIDER,
-    'providers': PARSL_PROVIDER
+    'providers': PARSL_PROVIDER,
+    'remote_monitoring_radio': PARSL_RADIO,
+    'storage_access': PARSL_STAGING,
+}
+
+# parsl classes that need optional dependencies which are not in the QIIME 2
+# conda environments at this time. Maps each class to the modules it imports
+optional_dependencies = {
+    'AWSProvider': ['boto3'],
+    'AzureProvider': ['azure.common', 'azure.mgmt.compute',
+                      'azure.mgmt.network', 'azure.mgmt.resource',
+                      'msrestazure'],
+    'GlobusComputeExecutor': ['globus_compute_sdk'],
+    'GlobusStaging': ['globus_sdk'],
+    'GoogleCloudProvider': ['googleapiclient'],
+    'KubernetesProvider': ['kubernetes'],
+    'MonitoringHub': ['sqlalchemy'],
+    'RadicalPilotExecutor': ['radical.pilot', 'radical.utils'],
+    'TaskVineExecutor': ['ndcctools.taskvine'],
+    'WorkQueueExecutor': ['ndcctools.work_queue'],
+}
+
+# parsl classes we cannot parse from a TOML config, which can only be used by
+# passing an instantiated parsl.Config to ParallelConfig
+python_api_only_classes = {
+    # Its executor option takes a globus_compute_sdk.Executor, but we look up
+    # anything under an executor key in parsl.executors
+    'GlobusComputeExecutor',
+    # These are not exported from parsl.executors
+    'RadicalPilotExecutor',
+    'TaskVineExecutor',
+}
+
+# Options of parsl classes we cannot parse from a TOML config because they take
+# a callable or an existing instance, which can only be used by passing an
+# instantiated parsl.Config to ParallelConfig. Maps each class to these options
+python_api_only_options = {
+    'Config': {'dependency_resolver', 'retry_handler', 'std_autopath'},
+}
+
+# TOML has no tuples, so options parsl requires to be tuples are loaded as
+# lists. Maps each of these options to a function that converts its value
+tuple_options = {
+    'interchange_port_range': tuple,
+    'worker_port_range': tuple,
+    # A list of (claim name, mount path) pairs
+    'persistent_volumes': lambda volumes: [tuple(v) for v in volumes],
 }
 
 
@@ -93,7 +149,8 @@ def get_vendored_config():
     """
     from rachis.core.util import in_test_mode
 
-    # If we are running tests, get the test config not the normal one
+    # If we are running tests, always use the vendored config dict, don't try
+    # to load from a file and potentially get a different config.
     config_fp = None
     if in_test_mode():
         source = 'vendored config dict'
@@ -217,9 +274,10 @@ def load_config_from_dict(config_dict):
                             ' follow the correct format of:\n\n'
                             "{'plugin': {'action': 'executor'}}")
 
+    # debug is for us, not parsl, so it must be removed before processing
+    PARALLEL_CONFIG.debug = parallel_config_dict.pop('debug', False)
     processed_parallel_config_dict = _process_config(parallel_config_dict)
 
-    PARALLEL_CONFIG.debug = parallel_config_dict.pop('debug', False)
     if processed_parallel_config_dict != {}:
         parallel_config = parsl.Config(**processed_parallel_config_dict)
     else:
@@ -267,6 +325,7 @@ def _process_config(config_dict):
     dict
         Kwargs that can be used to instantiate a parsl.Config
     """
+    _check_python_api_only_options('Config', config_dict)
     config_kwargs = {}
 
     for key, value in config_dict.items():
@@ -303,19 +362,26 @@ def _process_key(key, value):
         This could be a primitive, it could be a list of primitives, it could
         be an instantiated parsl class, it could be a mixture of the above.
     """
+    # Our key points to a value parsl needs as a tuple
+    if key in tuple_options:
+        return tuple_options[key](value)
     # Our key points to a list
-    if isinstance(value, list):
+    elif isinstance(value, list):
         processed_value = []
         for item in value:
             processed_value.append(_process_key(key, item))
         return processed_value
     # Our key needs to point to some object.
     elif key in module_paths:
-        # Get the module our class is from
-        module = importlib.import_module(module_paths[key])
+        _type = value['class']
+        _check_optional_dependencies(key, value)
+        if _type in python_api_only_classes:
+            raise ValueError(_python_api_only_message(_type))
 
         # Get the class we need to instantiate
-        cls = getattr(module, value['class'])
+        cls = _get_class(key, _type)
+
+        _check_python_api_only_options(_type, value)
 
         # Get the kwargs we need to pass to the class constructor
         kwargs = {}
@@ -329,6 +395,125 @@ def _process_key(key, value):
     # Our key points to primitive data
     else:
         return value
+
+
+def _get_class(key, class_name):
+    """Finds the parsl class with the given name in the modules for the given
+    key in the config.
+
+    Parameters
+    ----------
+    key: string
+        The key in the config whose value is an instance of the class
+    class_name: string
+        The name of the class
+
+    Returns
+    -------
+    type
+        The class
+    """
+    modules = module_paths[key]
+    if isinstance(modules, str):
+        modules = (modules,)
+
+    for module_path in modules:
+        module = importlib.import_module(module_path)
+        if hasattr(module, class_name):
+            return getattr(module, class_name)
+
+    raise AttributeError(
+        f'Could not find a parsl class named {class_name!r} for {key!r}. '
+        f'Looked in: {", ".join(modules)}')
+
+
+def _get_missing_dependencies(class_name):
+    """Gets the optional dependencies the given parsl class needs that are not
+    installed.
+
+    Parameters
+    ----------
+    class_name: string
+        The name of the parsl class
+
+    Returns
+    -------
+    list[string]
+        The modules the class needs that could not be imported
+    """
+    missing = []
+    for module in optional_dependencies.get(class_name, []):
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            missing.append(module)
+
+    return missing
+
+
+def _check_optional_dependencies(key, options):
+    """Raises an ImportError explaining what is missing if the parsl class the
+    options are for needs optional dependencies that are not installed.
+
+    Parameters
+    ----------
+    key: string
+        The key in the config whose value is an instance of the class
+    options: dict
+        The class's table from the config, which names the class under 'class'
+    """
+    class_name = options['class']
+    missing = _get_missing_dependencies(class_name)
+    if not missing:
+        return
+
+    # We cannot build the class, but we can still make sure it accepts the
+    # options it was given. Some of these classes are not in the modules we
+    # look them up in, so we cannot check those
+    try:
+        cls = _get_class(key, class_name)
+    except AttributeError:
+        cls = None
+
+    if cls is not None:
+        kwargs = {k: v for k, v in options.items() if k != 'class'}
+        try:
+            inspect.signature(cls).bind(**kwargs)
+        except TypeError as e:
+            raise TypeError(f'{class_name}: {e}') from None
+
+    message = (
+        f'{class_name} requires {", ".join(missing)}, which could not be '
+        'imported. These are optional dependencies of parsl that are not '
+        'included in the QIIME 2 conda environments at this time, so they '
+        f'must be installed separately to use {class_name}.')
+    if class_name in python_api_only_classes:
+        message += ' Even then, ' + _python_api_only_message(class_name)
+
+    raise ImportError(message)
+
+
+def _check_python_api_only_options(class_name, options):
+    """Raises a ValueError if the config gives the parsl class an option we
+    cannot parse from a TOML config.
+
+    Parameters
+    ----------
+    class_name: string
+        The name of the parsl class
+    options: dict
+        The class's table from the config
+    """
+    for option in options:
+        if option in python_api_only_options.get(class_name, set()):
+            raise ValueError(_python_api_only_message(
+                f'The {option!r} option of {class_name}'))
+
+
+def _python_api_only_message(subject):
+    return (f'{subject} cannot be parsed from a TOML config, so it is only '
+            'supported through the Python API by passing an instantiated '
+            'parsl.Config to ParallelConfig.')
 
 
 class ParallelConfig():

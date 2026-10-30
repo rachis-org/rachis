@@ -1,0 +1,32 @@
+# KubernetesProvider needs the optional kubernetes dependency and reads the
+# cluster config when it is constructed
+[parsl]
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "kubernetes"
+
+[parsl.executors.provider]
+class = "KubernetesProvider"
+image = "quay.io/qiime2/amplicon:latest"
+namespace = "rachis"
+nodes_per_block = 1
+init_blocks = 2
+min_blocks = 1
+max_blocks = 4
+max_cpu = 4.0
+max_mem = "8Gi"
+init_cpu = 1.0
+init_mem = "1Gi"
+extra_requests = {"nvidia.com/gpu" = "1"}
+extra_limits = {"nvidia.com/gpu" = "1"}
+parallelism = 0.5
+worker_init = "source ~/.bashrc"
+pod_name = "rachis-worker"
+user_id = "1000"
+group_id = "1000"
+run_as_non_root = true
+secret = "rachis-secret"
+persistent_volumes = [["rachis-claim", "/mnt/data"]]
+service_account_name = "rachis"
+annotations = {"rachis/test" = "true"}

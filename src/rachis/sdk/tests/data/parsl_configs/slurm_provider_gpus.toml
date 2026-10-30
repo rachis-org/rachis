@@ -1,0 +1,12 @@
+# SlurmProvider's gpus_per_node and gres options were added in parsl 2026.02.23,
+# which is newer than the oldest parsl we support, so they are tested separately
+[parsl]
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "slurm"
+
+[parsl.executors.provider]
+class = "SlurmProvider"
+gpus_per_node = 1
+gres = "gpu:1"

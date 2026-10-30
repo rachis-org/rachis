@@ -1,0 +1,122 @@
+# Every option of each launcher that ships with parsl
+[parsl]
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "simple"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "SimpleLauncher"
+debug = false
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "single_node"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "SingleNodeLauncher"
+debug = false
+fail_on_any = true
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "srun"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "SrunLauncher"
+debug = false
+overrides = "--cpu-bind=cores"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "aprun"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "AprunLauncher"
+debug = false
+overrides = "-cc depth"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "srun_mpi"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "SrunMPILauncher"
+debug = false
+overrides = "--cpu-bind=cores"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "jsrun"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "JsrunLauncher"
+debug = false
+overrides = "-g 1"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "gnu_parallel"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "GnuParallelLauncher"
+debug = false
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "mpi_exec"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "MpiExecLauncher"
+debug = false
+bind_cmd = "--cpu-bind"
+overrides = "--depth=4"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "mpi_run"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "MpiRunLauncher"
+debug = false
+bash_location = "/usr/bin/bash"
+overrides = "-np 4"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "wrapped"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "WrappedLauncher"
+debug = false
+prepend = "apptainer exec rachis.sif"

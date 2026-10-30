@@ -1,0 +1,10 @@
+# RadicalPilotExecutor needs the optional radical.pilot dependency, and it
+# cannot be parsed from TOML, so it is only supported through the Python API
+[parsl]
+
+[[parsl.executors]]
+class = "RadicalPilotExecutor"
+label = "radical_pilot"
+resource = "local.localhost"
+bulk_mode = true
+working_dir = "/tmp/rachis-test/radical_pilot"

@@ -1,0 +1,38 @@
+# WorkQueueExecutor needs the optional ndcctools dependency
+[parsl]
+
+[[parsl.executors]]
+class = "WorkQueueExecutor"
+label = "work_queue"
+working_dir = "/tmp/rachis-test/work_queue"
+project_name = "rachis-test"
+# WorkQueueExecutor raises if this file does not exist
+project_password_file = "/dev/null"
+address = "127.0.0.1"
+port = 9123
+env = {RACHIS_VAR = "value"}
+shared_fs = true
+use_cache = true
+source = true
+pack = true
+extra_pkgs = ["numpy"]
+autolabel = true
+autolabel_window = 2
+autocategory = false
+max_retries = 3
+init_command = "source ~/.bashrc"
+worker_options = "--cores 4"
+full_debug = false
+worker_executable = "/opt/cctools/bin/work_queue_worker"
+function_dir = "/tmp/rachis-test/work_queue_functions"
+coprocess = true
+scaling_cores_per_worker = 2
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[[parsl.executors.storage_access]]
+class = "NoOpFileStaging"
+
+[parsl.executors.remote_monitoring_radio]
+class = "FilesystemRadio"

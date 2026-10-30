@@ -1,0 +1,8 @@
+[parsl]
+
+[[parsl.executors]]
+class = "ThreadPoolExecutor"
+label = "threads"
+max_threads = 3
+thread_name_prefix = "rachis"
+working_dir = "/tmp/rachis-test/threads"

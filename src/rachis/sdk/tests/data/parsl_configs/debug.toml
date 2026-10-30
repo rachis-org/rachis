@@ -1,0 +1,8 @@
+# debug is a rachis option, not a parsl one, and should not be passed to
+# parsl.Config
+[parsl]
+debug = true
+
+[[parsl.executors]]
+class = "ThreadPoolExecutor"
+label = "default"

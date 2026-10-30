@@ -1,0 +1,12 @@
+# GlobusStaging needs the optional globus-sdk dependency
+[parsl]
+
+[[parsl.executors]]
+class = "ThreadPoolExecutor"
+label = "threads"
+
+[[parsl.executors.storage_access]]
+class = "GlobusStaging"
+endpoint_uuid = "00000000-0000-4000-8000-000000000000"
+endpoint_path = "/rachis-test"
+local_path = "/tmp/rachis-test/globus"

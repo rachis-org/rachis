@@ -1,0 +1,164 @@
+# Every option of each provider that ships with parsl and does not need an
+# optional dependency, except the options in slurm_provider_gpus.toml
+[parsl]
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "local"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+nodes_per_block = 1
+init_blocks = 2
+min_blocks = 1
+max_blocks = 4
+worker_init = "source ~/.bashrc"
+cmd_timeout = 15
+parallelism = 0.5
+
+[parsl.executors.provider.launcher]
+class = "SingleNodeLauncher"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "slurm"
+
+[parsl.executors.provider]
+class = "SlurmProvider"
+partition = "general"
+account = "rachis"
+qos = "normal"
+constraint = "intel"
+clusters = "cluster1"
+nodes_per_block = 2
+cores_per_node = 8
+mem_per_node = 16
+init_blocks = 2
+min_blocks = 1
+max_blocks = 4
+parallelism = 0.5
+walltime = "01:00:00"
+scheduler_options = "#SBATCH --mail-type=END"
+regex_job_id = 'Submitted batch job (?P<id>\S*)'
+worker_init = "module load miniconda"
+cmd_timeout = 20
+status_batch_size = 10
+exclusive = false
+
+[parsl.executors.provider.launcher]
+class = "SrunLauncher"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "condor"
+
+[parsl.executors.provider]
+class = "CondorProvider"
+nodes_per_block = 1
+cores_per_slot = 4
+mem_per_slot = 2.0
+init_blocks = 2
+min_blocks = 1
+max_blocks = 4
+parallelism = 0.5
+environment = {RACHIS_VAR = "value"}
+project = "rachis"
+scheduler_options = "+JobFlavour = \"espresso\""
+transfer_input_files = ["input_a.txt", "input_b.txt"]
+walltime = "00:30:00"
+worker_init = "source ~/.bashrc"
+requirements = "OpSys == \"LINUX\""
+cmd_timeout = 30
+cmd_chunk_size = 50
+
+[parsl.executors.provider.launcher]
+class = "SingleNodeLauncher"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "grid_engine"
+
+[parsl.executors.provider]
+class = "GridEngineProvider"
+nodes_per_block = 1
+init_blocks = 2
+min_blocks = 1
+max_blocks = 4
+parallelism = 0.5
+walltime = "00:30:00"
+scheduler_options = "#$ -pe smp 4"
+worker_init = "source ~/.bashrc"
+cmd_timeout = 30
+queue = "all.q"
+
+[parsl.executors.provider.launcher]
+class = "SingleNodeLauncher"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "torque"
+
+[parsl.executors.provider]
+class = "TorqueProvider"
+account = "rachis"
+queue = "batch"
+scheduler_options = "#PBS -m e"
+worker_init = "source ~/.bashrc"
+nodes_per_block = 1
+init_blocks = 2
+min_blocks = 1
+max_blocks = 4
+parallelism = 0.5
+walltime = "00:30:00"
+cmd_timeout = 30
+
+[parsl.executors.provider.launcher]
+class = "AprunLauncher"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "lsf"
+
+[parsl.executors.provider]
+class = "LSFProvider"
+nodes_per_block = 1
+cores_per_block = 4
+cores_per_node = 4
+init_blocks = 2
+min_blocks = 1
+max_blocks = 4
+parallelism = 0.5
+walltime = "00:30:00"
+scheduler_options = "#BSUB -alloc_flags smt4"
+worker_init = "source ~/.bashrc"
+project = "rachis"
+queue = "normal"
+cmd_timeout = 30
+bsub_redirection = true
+request_by_nodes = false
+
+[parsl.executors.provider.launcher]
+class = "JsrunLauncher"
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "pbspro"
+
+[parsl.executors.provider]
+class = "PBSProProvider"
+account = "rachis"
+queue = "workq"
+scheduler_options = "#PBS -m e"
+select_options = "ngpus=1"
+worker_init = "source ~/.bashrc"
+nodes_per_block = 1
+cpus_per_node = 4
+init_blocks = 2
+min_blocks = 1
+max_blocks = 4
+parallelism = 0.5
+walltime = "00:30:00"
+cmd_timeout = 30
+
+[parsl.executors.provider.launcher]
+class = "MpiExecLauncher"
