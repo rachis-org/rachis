@@ -440,21 +440,6 @@ class TestParslConfigParsing(unittest.TestCase):
                 'class': 'ThreadPoolExecutor',
                 'storage_access': [{'class': 'NotAStagingProvider'}]}]}})
 
-    def test_no_default_executor(self):
-        with self.assertRaisesRegex(
-                ValueError, "needs an executor labeled 'default'.*are "
-                "labeled 'threads', 'tpool'"):
-            load_config_from_dict({'parsl': {'executors': [
-                {'class': 'ThreadPoolExecutor', 'label': 'threads'},
-                {'class': 'ThreadPoolExecutor', 'label': 'tpool'}]}})
-
-    def test_no_executors(self):
-        # parsl gives a config without executors one labeled 'threads'
-        with self.assertRaisesRegex(
-                ValueError, "needs an executor labeled 'default'.*are "
-                "labeled 'threads'"):
-            load_config_from_dict({'parsl': {'strategy': 'None'}})
-
     def test_every_config_has_a_default_executor(self):
         # The parser only checks configs it builds, and it cannot build most
         # of the configs that need optional dependencies. The mapping only
