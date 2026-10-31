@@ -15,3 +15,7 @@ max_idletime = 60.0
 usage_tracking = 0
 project_name = "rachis-test"
 initialize_logging = false
+
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "default"

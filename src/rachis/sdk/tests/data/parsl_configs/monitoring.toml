@@ -1,6 +1,10 @@
 # MonitoringHub needs the optional sqlalchemy dependency
 [parsl]
 
+[[parsl.executors]]
+class = "HighThroughputExecutor"
+label = "default"
+
 [parsl.monitoring]
 class = "MonitoringHub"
 hub_address = "127.0.0.1"

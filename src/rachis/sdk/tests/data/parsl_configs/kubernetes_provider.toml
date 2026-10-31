@@ -4,7 +4,7 @@
 
 [[parsl.executors]]
 class = "HighThroughputExecutor"
-label = "kubernetes"
+label = "default"
 
 [parsl.executors.provider]
 class = "KubernetesProvider"

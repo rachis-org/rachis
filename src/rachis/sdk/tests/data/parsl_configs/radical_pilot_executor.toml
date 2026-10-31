@@ -4,7 +4,7 @@
 
 [[parsl.executors]]
 class = "RadicalPilotExecutor"
-label = "radical_pilot"
+label = "default"
 resource = "local.localhost"
 bulk_mode = true
 working_dir = "/tmp/rachis-test/radical_pilot"

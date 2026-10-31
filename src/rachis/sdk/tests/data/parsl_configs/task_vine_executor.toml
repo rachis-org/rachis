@@ -4,7 +4,7 @@
 
 [[parsl.executors]]
 class = "TaskVineExecutor"
-label = "task_vine"
+label = "default"
 worker_launch_method = "provider"
 
 [parsl.executors.provider]

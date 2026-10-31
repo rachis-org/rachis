@@ -440,6 +440,36 @@ class TestParslConfigParsing(unittest.TestCase):
                 'class': 'ThreadPoolExecutor',
                 'storage_access': [{'class': 'NotAStagingProvider'}]}]}})
 
+    def test_no_default_executor(self):
+        with self.assertRaisesRegex(
+                ValueError, "needs an executor labeled 'default'.*are "
+                "labeled 'threads', 'tpool'"):
+            load_config_from_dict({'parsl': {'executors': [
+                {'class': 'ThreadPoolExecutor', 'label': 'threads'},
+                {'class': 'ThreadPoolExecutor', 'label': 'tpool'}]}})
+
+    def test_no_executors(self):
+        # parsl gives a config without executors one labeled 'threads'
+        with self.assertRaisesRegex(
+                ValueError, "needs an executor labeled 'default'.*are "
+                "labeled 'threads'"):
+            load_config_from_dict({'parsl': {'strategy': 'None'}})
+
+    def test_every_config_has_a_default_executor(self):
+        # The parser only checks configs it builds, and it cannot build most
+        # of the configs that need optional dependencies. The mapping only
+        # configs have no executors, so the vendored config's are used
+        mapping_only = {'mapping_only_config.toml',
+                        'mapping_only_config_old.toml'}
+        for fp in self.config_dir.glob('*.toml'):
+            if fp.name in mapping_only:
+                continue
+
+            with self.subTest(config=fp.name):
+                executors = self._read_config(fp)['parsl'].get('executors', [])
+                labels = [executor.get('label') for executor in executors]
+                self.assertIn('default', labels)
+
     def test_debug(self):
         self._load_config('debug.toml')
         self.assertTrue(PARALLEL_CONFIG.debug)

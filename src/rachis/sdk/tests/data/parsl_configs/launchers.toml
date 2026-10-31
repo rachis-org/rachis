@@ -3,7 +3,7 @@
 
 [[parsl.executors]]
 class = "HighThroughputExecutor"
-label = "simple"
+label = "default"
 
 [parsl.executors.provider]
 class = "LocalProvider"

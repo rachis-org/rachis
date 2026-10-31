@@ -4,7 +4,7 @@
 
 [[parsl.executors]]
 class = "ThreadPoolExecutor"
-label = "threads"
+label = "default"
 
 [parsl.executors.remote_monitoring_radio]
 class = "MultiprocessingQueueRadio"

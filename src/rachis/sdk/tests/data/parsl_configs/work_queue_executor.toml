@@ -5,7 +5,7 @@
 
 [[parsl.executors]]
 class = "WorkQueueExecutor"
-label = "work_queue"
+label = "default"
 working_dir = "/tmp/rachis-test/work_queue"
 project_name = "rachis-test"
 # WorkQueueExecutor raises if this file does not exist
