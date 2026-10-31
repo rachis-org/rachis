@@ -1,4 +1,6 @@
-# WorkQueueExecutor needs the optional ndcctools dependency
+# WorkQueueExecutor needs the optional ndcctools dependency. source, pack and
+# extra_pkgs are not covered, because they send the app's source code to the
+# workers, which cannot run the closure rachis runs actions in
 [parsl]
 
 [[parsl.executors]]
@@ -13,9 +15,6 @@ port = 9123
 env = {RACHIS_VAR = "value"}
 shared_fs = true
 use_cache = true
-source = true
-pack = true
-extra_pkgs = ["numpy"]
 autolabel = true
 autolabel_window = 2
 autocategory = false
@@ -30,9 +29,6 @@ scaling_cores_per_worker = 2
 
 [parsl.executors.provider]
 class = "LocalProvider"
-
-[[parsl.executors.storage_access]]
-class = "NoOpFileStaging"
 
 [parsl.executors.remote_monitoring_radio]
 class = "FilesystemRadio"

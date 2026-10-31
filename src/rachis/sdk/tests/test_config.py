@@ -17,14 +17,12 @@ import unittest
 import unittest.mock
 
 import parsl
-import parsl.data_provider
 import parsl.executors
 import parsl.launchers
 import parsl.monitoring
 import parsl.monitoring.radios
 import parsl.providers
 import tomlkit
-from parsl.data_provider.staging import Staging
 from parsl.executors.threads import ThreadPoolExecutor
 from parsl.monitoring.radios.base import RadioConfig
 
@@ -300,8 +298,9 @@ PARSL_VERSION = tuple(int(part) for part in parsl.__version__.split('.')[:3])
 
 class TestParslConfigParsing(unittest.TestCase):
     """Parses the configs in data/parsl_configs, which between them use every
-    option of every parsl class that can be written in TOML, so we notice when
-    a parsl release changes its config in a way our parser cannot handle.
+    option of every parsl class that can be written in TOML and that a rachis
+    user could make use of, so we notice when a parsl release changes its
+    config in a way our parser cannot handle.
 
     The configs are only parsed into parsl objects, never loaded by parsl, so
     nothing is ever submitted to a scheduler or cloud provider.
@@ -314,6 +313,32 @@ class TestParslConfigParsing(unittest.TestCase):
     # SlurmProvider appends the partition to scheduler_options
     REWRITTEN_OPTIONS = {'block_error_handler', 'environment',
                          'scheduler_options', 'worker_init'}
+
+    # parsl classes a rachis user cannot make use of, so the configs do not
+    # use them
+    UNUSABLE_CLASSES = {
+        # It rejects every task without a parsl_resource_specification, and
+        # rachis never gives one
+        'MPIExecutor',
+        # These start VMs in a network of their own from images without rachis,
+        # so the workers cannot see the cache rachis is using
+        'AWSProvider', 'AzureProvider', 'GoogleCloudProvider',
+    }
+
+    # Options a rachis user cannot make use of, so the configs do not use
+    # them. Maps each class to these options
+    UNUSABLE_OPTIONS = {
+        # The memoizer only memoizes and checkpoints apps created with
+        # cache=True, which rachis's apps are not
+        'Config': {'memoizer'},
+        # These send the app's source code to the workers, which cannot run the
+        # closure rachis runs actions in. extra_pkgs only applies with pack
+        'WorkQueueExecutor': {'source', 'pack', 'extra_pkgs'},
+    }
+
+    # Staging only acts on parsl File objects, which rachis never gives its
+    # apps, so no executor's storage_access is used either
+    UNUSABLE_SHARED_OPTIONS = {'storage_access'}
 
     def setUp(self):
         self.config_dir = pathlib.Path(str(
@@ -330,10 +355,11 @@ class TestParslConfigParsing(unittest.TestCase):
         for module in (parsl.executors, parsl.providers, parsl.launchers):
             classes.extend(getattr(module, name)
                            for name in dict.fromkeys(module.__all__))
-        # These are spread across their packages' modules with no list of them
-        classes.extend(self._find_subclasses(parsl.data_provider, Staging))
+        # These are spread across their package's modules with no list of them
         classes.extend(
             self._find_subclasses(parsl.monitoring.radios, RadioConfig))
+        classes = [cls for cls in classes
+                   if cls.__name__ not in self.UNUSABLE_CLASSES]
 
         used_options = collections.defaultdict(set)
         for fp in self.config_dir.glob('*.toml'):
@@ -352,16 +378,20 @@ class TestParslConfigParsing(unittest.TestCase):
                 for param in inspect.signature(cls).parameters.values()
                 if param.kind not in (param.VAR_POSITIONAL,
                                       param.VAR_KEYWORD)}
-            # These are covered by test_python_api_only_options
+            # The python API only options are covered by
+            # test_python_api_only_options
             unused = (options - used_options[name]
-                      - python_api_only_options.get(name, set()))
+                      - python_api_only_options.get(name, set())
+                      - self.UNUSABLE_OPTIONS.get(name, set())
+                      - self.UNUSABLE_SHARED_OPTIONS)
             if unused:
                 missing[name] = sorted(unused)
 
         self.assertEqual(
             missing, {}, 'These parsl classes or options are not used by any '
             'config in data/parsl_configs. Add them to one to test that they '
-            'parse.')
+            'parse, or to UNUSABLE_CLASSES or UNUSABLE_OPTIONS if a rachis '
+            'user cannot make use of them.')
 
     def test_config_options(self):
         self._load_config('config_options.toml')
@@ -378,9 +408,6 @@ class TestParslConfigParsing(unittest.TestCase):
 
     def test_high_throughput_executor(self):
         self._load_config('high_throughput_executor.toml')
-
-    def test_mpi_executor(self):
-        self._load_config('mpi_executor.toml')
 
     def test_flux_executor(self):
         # FluxExecutor registers a finalizer that joins a thread parsl only
@@ -401,9 +428,6 @@ class TestParslConfigParsing(unittest.TestCase):
                      '2026.02.23')
     def test_slurm_provider_gpus(self):
         self._load_config('slurm_provider_gpus.toml')
-
-    def test_storage_access(self):
-        self._load_config('storage_access.toml')
 
     def test_remote_monitoring_radio(self):
         self._load_config('remote_monitoring_radio.toml')
@@ -468,11 +492,6 @@ class TestParslConfigParsing(unittest.TestCase):
         # our conda environments at this time
         self._load_optional_config('monitoring.toml', 'MonitoringHub')
 
-    def test_globus_staging(self):
-        # Requires the optional dependency globus-sdk, which we do not have in
-        # our conda environments at this time
-        self._load_optional_config('globus_staging.toml', 'GlobusStaging')
-
     def test_work_queue_executor(self):
         # Requires the optional dependency ndcctools, which we do not have in
         # our conda environments at this time
@@ -499,30 +518,6 @@ class TestParslConfigParsing(unittest.TestCase):
         # from TOML, so it is only supported through the Python API
         self._assert_python_api_only(
             'globus_compute_executor.toml', 'GlobusComputeExecutor')
-
-    @unittest.skipUnless(_get_missing_dependencies('AWSProvider'),
-                         'AWSProvider contacts AWS when boto3 is installed')
-    def test_aws_provider(self):
-        # Requires the optional dependency boto3, which we do not have in our
-        # conda environments at this time
-        self._load_optional_config('aws_provider.toml', 'AWSProvider')
-
-    @unittest.skipUnless(_get_missing_dependencies('AzureProvider'),
-                         'AzureProvider contacts Azure when its dependencies '
-                         'are installed')
-    def test_azure_provider(self):
-        # Requires the optional Azure SDK dependencies, which we do not have in
-        # our conda environments at this time
-        self._load_optional_config('azure_provider.toml', 'AzureProvider')
-
-    @unittest.skipUnless(_get_missing_dependencies('GoogleCloudProvider'),
-                         'GoogleCloudProvider contacts Google Cloud when '
-                         'google-api-python-client is installed')
-    def test_google_cloud_provider(self):
-        # Requires the optional dependency google-api-python-client, which we
-        # do not have in our conda environments at this time
-        self._load_optional_config(
-            'google_cloud_provider.toml', 'GoogleCloudProvider')
 
     @unittest.skipUnless(_get_missing_dependencies('KubernetesProvider'),
                          'KubernetesProvider reads the cluster config when '
