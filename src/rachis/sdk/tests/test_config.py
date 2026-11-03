@@ -317,9 +317,6 @@ class TestParslConfigParsing(unittest.TestCase):
     # parsl classes a rachis user cannot make use of, so the configs do not
     # use them
     UNUSABLE_CLASSES = {
-        # It rejects every task without a parsl_resource_specification, and
-        # rachis never gives one
-        'MPIExecutor',
         # These start VMs in a network of their own from images without rachis,
         # so the workers cannot see the cache rachis is using
         'AWSProvider', 'AzureProvider', 'GoogleCloudProvider',
@@ -408,6 +405,9 @@ class TestParslConfigParsing(unittest.TestCase):
 
     def test_high_throughput_executor(self):
         self._load_config('high_throughput_executor.toml')
+
+    def test_mpi_executor(self):
+        self._load_config('mpi_executor.toml')
 
     def test_flux_executor(self):
         # FluxExecutor registers a finalizer that joins a thread parsl only

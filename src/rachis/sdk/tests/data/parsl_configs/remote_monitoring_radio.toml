@@ -24,8 +24,8 @@ label = "htex"
 class = "HTEXRadio"
 
 [[parsl.executors]]
-class = "HighThroughputExecutor"
-label = "htex_udp"
+class = "MPIExecutor"
+label = "mpi"
 
 [parsl.executors.remote_monitoring_radio]
 class = "UDPRadio"
@@ -34,3 +34,9 @@ port = 55056
 atexit_timeout = 5
 debug = true
 hmac_digest = "sha256"
+
+[parsl.executors.provider]
+class = "LocalProvider"
+
+[parsl.executors.provider.launcher]
+class = "SimpleLauncher"
