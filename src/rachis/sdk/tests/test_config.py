@@ -19,8 +19,9 @@ import rachis.util
 from rachis.core.util import load_action_yaml
 from rachis.core.testing.type import SingleInt
 from rachis.core.testing.util import get_dummy_plugin
-from rachis.sdk.parallel_config import (PARALLEL_CONFIG, _MASK_CONDA_ENV_,
-                                        ParallelConfig, load_config_from_file)
+from rachis.sdk.parallel_config import (PARALLEL_CONFIG, _TEST_EXECUTOR_,
+                                        _MASK_CONDA_ENV_, ParallelConfig,
+                                        load_config_from_file)
 
 
 class TestConfig(unittest.TestCase):
@@ -31,18 +32,21 @@ class TestConfig(unittest.TestCase):
 
     mapping = {
         'dummy_plugin': {
-            'list_of_ints': 'tpool',
-            'concatenate_ints': 'tpool'
+            'list_of_ints': 'test',
+            'concatenate_ints': 'test'
+        },
+        'other_plugin': {
+            'concatenate_ints': 'default'
         }
     }
 
     # Expected provenance based on type of executor used
-    default_expected = [{
-        'type': 'parsl', 'parsl_type': 'HighThroughputExecutor'}, {
-        'type': 'parsl', 'parsl_type': 'HighThroughputExecutor'}]
     tpool_expected = [{
         'type': 'parsl', 'parsl_type': 'ThreadPoolExecutor'}, {
         'type': 'parsl', 'parsl_type': 'ThreadPoolExecutor'}]
+    test_expected = [{
+        'type': 'parsl', 'parsl_type': '_TEST_EXECUTOR_'}, {
+        'type': 'parsl', 'parsl_type': '_TEST_EXECUTOR_'}]
 
     def setUp(self):
         # Create config
@@ -52,8 +56,8 @@ class TestConfig(unittest.TestCase):
                     max_threads=1,
                     label='tpool'
                 ),
-                parsl.HighThroughputExecutor(
-                    max_workers_per_node=1,
+                _TEST_EXECUTOR_(
+                    max_threads=1,
                     label='default'
                 )
             ],
@@ -112,8 +116,8 @@ class TestConfig(unittest.TestCase):
         dict_execution_contexts = self._load_alias_execution_contexts(
             dict_return)
 
-        self.assertEqual(dict_execution_contexts, self.default_expected)
-        self.assertEqual(list_execution_contexts, self.tpool_expected)
+        self.assertEqual(list_execution_contexts, self.test_expected)
+        self.assertEqual(dict_execution_contexts, self.tpool_expected)
 
     def test_mapping_only_config(self):
         _, mapping = load_config_from_file(self.mapping_only_config_fp)
@@ -130,8 +134,8 @@ class TestConfig(unittest.TestCase):
         dict_execution_contexts = self._load_alias_execution_contexts(
             dict_return)
 
-        self.assertEqual(dict_execution_contexts, self.default_expected)
-        self.assertEqual(list_execution_contexts, self.tpool_expected)
+        self.assertEqual(list_execution_contexts, self.test_expected)
+        self.assertEqual(dict_execution_contexts, self.tpool_expected)
 
     def test_mapping_from_dict(self):
         with self.cache:
@@ -144,8 +148,8 @@ class TestConfig(unittest.TestCase):
         dict_execution_contexts = self._load_alias_execution_contexts(
             dict_return)
 
-        self.assertEqual(dict_execution_contexts, self.default_expected)
-        self.assertEqual(list_execution_contexts, self.tpool_expected)
+        self.assertEqual(list_execution_contexts, self.test_expected)
+        self.assertEqual(dict_execution_contexts, self.tpool_expected)
 
     def test_parallel_configs(self):
         with self.cache:
@@ -158,8 +162,8 @@ class TestConfig(unittest.TestCase):
             dict_execution_contexts = self._load_alias_execution_contexts(
                 dict_return)
 
-            self.assertEqual(list_execution_contexts, self.default_expected)
-            self.assertEqual(dict_execution_contexts, self.default_expected)
+            self.assertEqual(list_execution_contexts, self.tpool_expected)
+            self.assertEqual(dict_execution_contexts, self.tpool_expected)
 
             with ParallelConfig(self.test_default):
                 future = self.pipeline.parallel(self.art, self.art)
@@ -170,15 +174,15 @@ class TestConfig(unittest.TestCase):
             dict_execution_contexts = self._load_alias_execution_contexts(
                 dict_return)
 
-            self.assertEqual(dict_execution_contexts, self.default_expected)
-            self.assertEqual(list_execution_contexts, self.default_expected)
+            self.assertEqual(list_execution_contexts, self.test_expected)
+            self.assertEqual(dict_execution_contexts, self.test_expected)
 
             # At this point we should be using the default config again which
-            # does not have an executor called test
+            # does not have an executor called tpool
             with ParallelConfig(
                     action_executor_mapping={
-                        'dummy_plugin': {'list_of_ints': 'test'}}):
-                with self.assertRaisesRegex(KeyError, 'test'):
+                        'dummy_plugin': {'list_of_ints': 'tpool'}}):
+                with self.assertRaisesRegex(KeyError, 'tpool'):
                     future = self.pipeline.parallel(self.art, self.art)
                     list_return, dict_return = future._result()
 
@@ -207,8 +211,8 @@ class TestConfig(unittest.TestCase):
             dict_execution_contexts = self._load_alias_execution_contexts(
                 dict_return)
 
-            self.assertEqual(list_execution_contexts, self.default_expected)
-            self.assertEqual(dict_execution_contexts, self.default_expected)
+            self.assertEqual(list_execution_contexts, self.tpool_expected)
+            self.assertEqual(dict_execution_contexts, self.tpool_expected)
 
     def test_load_complex_config(self):
         """ Test that all parsl modules we currently map are correct
@@ -259,16 +263,14 @@ class TestConfig(unittest.TestCase):
             self._load_alias_execution_context(concate_output_other)
 
         self.assertEqual(dummy_execution_context,
-                         {'type': 'parsl',
-                          'parsl_type': 'ThreadPoolExecutor'})
+                         {'type': 'parsl', 'parsl_type': '_TEST_EXECUTOR_'})
         self.assertEqual(other_execution_context,
-                         {'type': 'parsl',
-                          'parsl_type': 'HighThroughputExecutor'})
+                         {'type': 'parsl', 'parsl_type': 'ThreadPoolExecutor'})
 
     def test_old_mapping(self):
         with self.assertRaisesRegex(TypeError,
                                     'The provided mapping:\n\n'
-                                    "{'list_of_ints': 'tpool'}"):
+                                    "{'list_of_ints': 'test'}"):
             load_config_from_file(self.mapping_only_config_old_fp)
 
     def _load_alias_execution_contexts(self, collection):

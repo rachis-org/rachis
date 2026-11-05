@@ -2,15 +2,18 @@
 strategy = "None"
 
 [[parsl.executors]]
-class = "HighThroughputExecutor"
+class = "ThreadPoolExecutor"
 label = "default"
-max_workers_per_node = 1
+max_threads = 1
 
 [[parsl.executors]]
-class = "ThreadPoolExecutor"
-label = "tpool"
+class = "_TEST_EXECUTOR_"
+label = "test"
 max_threads = 1
 
 [parsl.executor_mapping.dummy_plugin]
-list_of_ints = "tpool"
-concatenate_ints = "tpool"
+list_of_ints = "test"
+concatenate_ints = "test"
+
+[parsl.executor_mapping.other_plugin]
+concatenate_ints = "default"
