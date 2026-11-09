@@ -26,16 +26,12 @@ class RoundTripMixin:
         encoded, mask = encode_and_get_missing_mask(series, self.enum)
         missing = decode_from_missing_mask(encoded, mask)
 
-        # encoded = series_encode_missing(series, self.enum)
-        # missing = series_extract_missing(encoded)
-
         self.assertEqual(encoded.dtype, dtype)
 
         # the non-null side of the series
         self.assertEqual(list(encoded[encoded.notna()]), notna_exp)
 
         # the null end (but in the orginal vocabulary)
-        # pdt.assert_series_equal(missing, series[1:].astype(object))
         pdt.assert_series_equal(missing, series)
 
     def test_roundtrip_float(self):
@@ -55,8 +51,6 @@ class RoundTripMixin:
         expected = [None, float('nan')] + self.missing_terms
         series = pd.Series(expected, dtype=object)
 
-        # encoded = series_encode_missing(series, self.enum)
-        # missing = series_extract_missing(encoded)
         encoded, mask = encode_and_get_missing_mask(series, self.enum)
         missing = decode_from_missing_mask(encoded, mask)
 
