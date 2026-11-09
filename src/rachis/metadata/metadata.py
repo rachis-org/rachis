@@ -537,12 +537,6 @@ class Metadata(_MetadataBase):
             encoded_series, _ = _missing.encode_and_get_missing_mask(
                 series, missing_scheme
             )
-            # Collapse dtypes except for all NaN columns so that we can
-            # preserve empty categorical columns. Empty numeric columns will
-            # already have the expected dtype and values
-            if not encoded_series.isna().all():
-                encoded_series = encoded_series.infer_objects()
-
             dtype = encoded_series.dtype
         else:
             dtype = series.dtype
@@ -656,7 +650,8 @@ class Metadata(_MetadataBase):
         ``dtype="str"``, and numeric columns will be stored as ``dtype=float``.
 
         When ``encode_missing=True``, numeric columns containing restored
-        missing vocabulary terms may be stored as ``dtype=object``.
+        missing vocabulary terms may be stored as ``dtype=object`` (when the
+        restored values contain one or more strings).
 
         Parameters
         ----------
@@ -1358,7 +1353,6 @@ class MetadataColumn(_MetadataBase, metaclass=abc.ABCMeta):
         See Also
         --------
         get_ids
-
         """
         ids_to_keep = list(ids_to_keep)
 
@@ -1391,7 +1385,12 @@ class CategoricalMetadataColumn(MetadataColumn):
 
     @classmethod
     def _is_supported_dtype(cls, dtype):
-        # also accepts `object`
+        """
+        Return whether pandas recognizes the dtype as string-like.
+
+        By default, pandas 2.x infers `object` for text, while pandas 3.x
+        infers a new `str` dtype. This check accepts both.
+        """
         return pd.api.types.is_string_dtype(dtype)
 
     @classmethod

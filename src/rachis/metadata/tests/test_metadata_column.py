@@ -1040,6 +1040,10 @@ class TestCategoricalMetadataColumn(unittest.TestCase):
         pd.testing.assert_series_equal(obs, exp)
 
     def test_nullable_string_dtype_normalized(self):
+        """
+        Ensure that nullable string columns convert back to the expected
+        representations, replacing `pd.NA` with `np.nan`.
+        """
         series = pd.Series(
             ['foo', pd.NA, 'bar'], name='col1', dtype=pd.StringDtype(),
             index=pd.Index(['a', 'b', 'c'], name='id'))

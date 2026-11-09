@@ -777,14 +777,11 @@ class TestToDataframe(unittest.TestCase):
 
     def test_retains_column_order(self):
         index = pd.Index(['id1', 'id2'], name='id')
-        columns = ['z', 'a', 'ch']
-        data = [
-            [1.0, 'a', 'foo'],
-            [2.0, 'b', 'bar']
-        ]
-        df = pd.DataFrame(data, index=index, columns=columns)
-        df['a'] = df['a'].astype(CATEGORICAL_DTYPE)
-        df['ch'] = df['ch'].astype(CATEGORICAL_DTYPE)
+        df = pd.DataFrame(
+            {'z': [1.0, 2.0],
+             'a': pd.array(['a', 'b'], dtype=CATEGORICAL_DTYPE),
+             'ch': pd.array(['foo', 'bar'], dtype=CATEGORICAL_DTYPE)},
+            index=index)
         md = Metadata(df)
 
         obs = md.to_dataframe()
