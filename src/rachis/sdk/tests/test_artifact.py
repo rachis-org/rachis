@@ -110,7 +110,7 @@ class TestArtifact(unittest.TestCase, ArchiveTestingMixin):
         self.assertIsInstance(artifact.uuid, uuid.UUID)
         with self.assertRaisesRegex(
                 Exception,
-                'No transformation into either of'):
+                'No transformation from'):
             self.assertEqual(artifact.view(Union[str, dict]), [-1, 42, 0, 43])
 
     def test_from_view_different_type_with_multiple_view_types(self):
@@ -665,6 +665,25 @@ class TestArtifact(unittest.TestCase, ArchiveTestingMixin):
                                     'Artifact.*IntSequence1.*cannot be viewed '
                                     'as Rachis Metadata'):
             A.view(Metadata)
+
+    def test_view_from_union(self):
+        artifact = Artifact._from_view(
+            IntSequence1,
+            [1, 2, 3, 4],
+            Union[IntSequenceFormat, list],
+            self.provenance_capture
+        )
+
+        self.assertEqual(artifact.type, IntSequence1)
+        self.assertIsInstance(artifact.uuid, uuid.UUID)
+        self.assertEqual(artifact.view(list), [1, 2, 3, 4])
+
+    def test_view_to_union(self):
+        artifact = Artifact.import_data(IntSequence1, [1, 2, 3, 4])
+        artifact = artifact.view(Union[dict, list])
+
+        self.assertEqual(type(artifact), list)
+        self.assertEqual(artifact, [1, 2, 3, 4])
 
 
 if __name__ == '__main__':

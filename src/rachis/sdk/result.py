@@ -15,9 +15,10 @@ import collections
 import distutils.dir_util
 import pathlib
 import json
-from typing import Union, get_args, get_origin
+from typing import Union, get_origin
 
 from rachis.core.format import report
+from rachis.core.exceptions import ValidationError
 import rachis.plugin
 import rachis.sdk
 import rachis.core.type
@@ -437,13 +438,32 @@ class Artifact(Result):
             # lookup default format for the type
             view_type = output_dir_fmt
 
-        from_type = transform.ModelType.from_view_type(view_type)
+        if get_origin(output_dir_fmt) is Union:
+            from_type = transform.UnionType(view_type)
+        else:
+            from_type = transform.ModelType.from_view_type(view_type)
+
         to_type = transform.ModelType.from_view_type(output_dir_fmt)
 
         recorder = provenance_capture.transformation_recorder('return')
         transformation = from_type.make_transformation(to_type,
                                                        recorder=recorder)
-        result = transformation(view, validate_level)
+
+        result = None
+        if isinstance(transformation, list):
+            for trans in transformation:
+                try:
+                    result = trans(view, validate_level)
+                    break
+                except ValidationError:
+                    pass
+        else:
+            result = transformation(view, validate_level)
+
+        if result is None:
+            raise Exception(
+                f'No valid transformation from {view_type} to {output_dir_fmt}'
+            )
 
         if type_raw in pm.validators:
             validation_object = pm.validators[type]
@@ -465,32 +485,31 @@ class Artifact(Result):
             raise TypeError(
                 "Artifact %r cannot be viewed as Rachis Metadata." % self)
 
-        from_type = transform.ModelType.from_view_type(self.format)
-
-        if isinstance(get_origin(view_type), type(Union)):
-            transformation = None
-            for arg in get_args(view_type):
-                to_type = transform.ModelType.from_view_type(arg)
-                try:
-                    transformation = from_type.make_transformation(
-                        to_type, recorder=recorder)
-                    if transformation:
-                        break
-                except Exception as e:
-                    if str(e).startswith("No transformation from"):
-                        continue
-                    else:
-                        raise e
-            if not transformation:
-                raise Exception(
-                    "No transformation into either of %s was found" %
-                    ", ".join([str(x) for x in view_type.__args__])
-                )
+        if get_origin(view_type) is Union:
+            from_type = transform.UnionType(self.format)
         else:
-            to_type = transform.ModelType.from_view_type(view_type)
-            transformation = from_type.make_transformation(to_type,
-                                                           recorder=recorder)
-        result = transformation(self._archiver.data_dir)
+            from_type = transform.ModelType.from_view_type(self.format)
+
+        to_type = transform.ModelType.from_view_type(view_type)
+        transformation = from_type.make_transformation(
+            to_type, recorder=recorder
+        )
+
+        result = None
+        if isinstance(transformation, list):
+            for trans in transformation:
+                try:
+                    result = trans(self._archiver.data_dir)
+                    break
+                except ValidationError:
+                    pass
+        else:
+            result = transformation(self._archiver.data_dir)
+
+        if result is None:
+            raise Exception(
+                f'No valid transformation from {self.format} to {view_type}'
+            )
 
         if view_type is rachis.Metadata:
             result._add_artifacts([self])
