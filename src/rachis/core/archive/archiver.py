@@ -161,24 +161,16 @@ class _ZipArchive(_Archive):
         return zipfile.is_zipfile(str(path))
 
     @classmethod
-    def save(cls, source, destination, directory_format=None):
+    def save(cls, source, destination, result_format=None):
         """Write an archive, applying declared compression to data files.
 
-        The optional directory format supplies file patterns and compression
-        levels. Level 0 uses ZIP_STORED without compression. Levels 1 through
-        9 use ZIP_DEFLATED with increasing compression. Other members retain
-        the ZIP writer's default compression.
+        Use the result format's ZIP write options for paths under data/ when
+        the format provides them. Otherwise use the ZIP writer's defaults.
         """
-        compression_rules = []
-        if directory_format is not None:
-            for field_name in directory_format._fields:
-                field = getattr(directory_format, field_name)
-                level = getattr(field.format, 'COMPRESSION', None)
-                if level is not None:
-                    compression_rules.append(
-                        (re.compile(field.pathspec), level))
-
+        get_compression_options = getattr(
+            result_format, '_get_compression_options', None)
         parent_dir = os.path.split(source)[0]
+        data_dir = pathlib.Path(source) / 'data'
         with zipfile.ZipFile(str(destination), mode='w',
                              compression=zipfile.ZIP_DEFLATED,
                              allowZip64=True) as zf:
@@ -194,19 +186,10 @@ class _ZipArchive(_Archive):
                     abspath = pathlib.Path(root) / file
                     relpath = abspath.relative_to(parent_dir)
                     write_options = {}
-                    source_relpath = abspath.relative_to(source)
-                    if source_relpath.parts[0] == 'data':
-                        data_relpath = source_relpath.relative_to('data')
-                        for pattern, level in compression_rules:
-                            if pattern.fullmatch(data_relpath.as_posix()):
-                                if level == 0:
-                                    write_options['compress_type'] = (
-                                        zipfile.ZIP_STORED)
-                                else:
-                                    write_options['compress_type'] = (
-                                        zipfile.ZIP_DEFLATED)
-                                    write_options['compresslevel'] = level
-                                break
+                    if (get_compression_options is not None
+                            and abspath.is_relative_to(data_dir)):
+                        data_relpath = abspath.relative_to(data_dir).as_posix()
+                        write_options = get_compression_options(data_relpath)
 
                     zf.write(str(abspath), arcname=cls._as_zip_path(relpath),
                              **write_options)

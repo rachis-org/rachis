@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 import pathlib
+import zipfile
 
 from rachis.core import transform
 from .base import FormatBase, ValidationError, _check_validation_level
@@ -166,6 +167,24 @@ class _DirectoryMeta(type):
 
 
 class DirectoryFormat(FormatBase, metaclass=_DirectoryMeta):
+    @classmethod
+    def _get_compression_options(cls, relative_path):
+        """Return ZIP compression options for a path relative to the data dir.
+
+        An empty returned dict leaves compression to the ZIP writer's defaults.
+        """
+        for field_name in cls._fields:
+            field = getattr(cls, field_name)
+            level = getattr(field.format, 'COMPRESSION', None)
+            if (level is None
+                    or not re.fullmatch(field.pathspec, relative_path)):
+                continue
+            if level == 0:
+                return {'compress_type': zipfile.ZIP_STORED}
+            return {'compress_type': zipfile.ZIP_DEFLATED,
+                    'compresslevel': level}
+        return {}
+
     def validate(self, level='max'):
         _check_validation_level(level)
 
