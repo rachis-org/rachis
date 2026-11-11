@@ -433,7 +433,6 @@ class UsageOutputNames:
                     (key, type(val)))
             rachis.util.is_valid_python_identifier(val, 'name')
 
-
     def items(self):
         """Same as a dictionary.
 
@@ -1055,13 +1054,16 @@ class Usage:
         return self._usage_variable(name, factory, 'format')
 
     def _request_url(self, url):
+        from ssl import PROTOCOL_TLS_CLIENT
         import urllib.request
         import urllib.error
+        from truststore import SSLContext
 
         headers = {'User-Agent': self.USER_AGENT}
+        ctx = SSLContext(PROTOCOL_TLS_CLIENT)
         try:
             request = urllib.request.Request(url, headers=headers)
-            data = urllib.request.urlopen(request)
+            data = urllib.request.urlopen(request, context=ctx)
         except urllib.error.URLError as ex:
             raise ValueError(
                 'Could not obtain URL: %s\n Exception: %s' %
