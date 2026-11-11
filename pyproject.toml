@@ -22,6 +22,7 @@ dependencies = [
     "pyyaml>=6.0.3,<7.0.0",
     "setuptools>=80.9.0,<81.0.0",
     "tomlkit>=0.13.3,<0.14.0",
+    "truststore>=0.10",
     "tzlocal>=5.3.1,<6.0.0",
     "lxml>=6.0.2,<7.0.0",
 ]
