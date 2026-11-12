@@ -1117,8 +1117,9 @@ dummy_plugin.pipelines.register_function(
     },
     parameters={
         'break_from': Str % Choices(
-            {'arity', 'return-view', 'type', 'method', 'internal', 'no-plugin',
-             'no-action'})
+            {'arity', 'return-view', 'return-scalar',
+             'return-collection-member', 'type', 'method', 'internal',
+             'no-plugin', 'no-action'})
     },
     outputs=[('mapping', Mapping)],
     name='Test different ways of failing',

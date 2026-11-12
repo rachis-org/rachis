@@ -7,10 +7,11 @@
 # ----------------------------------------------------------------------------
 
 from contextlib import contextmanager
+from types import MappingProxyType
 
 from parsl.app.app import python_app
 
-from rachis.sdk.action import Frame, Pipeline
+from rachis.sdk.action import Pipeline
 from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy, ProxyResults
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
@@ -82,7 +83,7 @@ def _contains_proxy(value):
 def parsl_worker_wrapper(frame, inputs):
     """Activate the cache and decode one app's resolved dependencies."""
     with frame.ctx.cache:
-        frame.inputs = _unmap_arg(frame.inputs, inputs)
+        frame.bound_arguments = _unmap_arg(frame.bound_arguments, inputs)
         yield
 
 
@@ -91,7 +92,7 @@ def _submit_app(frame, executor, method):
     # action from the transported frame as the method's receiver.
     execute = method.__func__
     futures = []
-    frame.inputs = _map_arg(frame.inputs, futures)
+    frame.bound_arguments = _map_arg(frame.bound_arguments, futures)
 
     def worker(frame, inputs=()):
         with parsl_worker_wrapper(frame, inputs):
@@ -102,7 +103,7 @@ def _submit_app(frame, executor, method):
 
 
 class ParallelContext(Context):
-    execution_ctx = {'type': 'parsl'}
+    execution_ctx = MappingProxyType({'type': 'parsl'})
 
     def __init__(self, action_obj, parent=None):
         super(ParallelContext, self).__init__(action_obj, parent=parent)
@@ -144,6 +145,6 @@ class ParallelContext(Context):
         # Parsl can schedule against upstream futures. The worker validates
         # and coerces the arguments once those futures have resolved.
         output_types = frame.output_types
-        worker_frame = Frame(frame.action, self, frame.inputs)
+        worker_frame = frame.for_worker()
         future = _submit_app(worker_frame, executor, frame.action._inner_apply)
         return ProxyResults(future, output_types)

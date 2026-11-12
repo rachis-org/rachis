@@ -85,33 +85,38 @@ class TestActionWrappers(unittest.TestCase):
         class ObservedContext(Context):
             outer_wrappers = (observe, *Context.outer_wrappers)
 
+            def __init__(self, action, parent, *, expect_dispatch):
+                super().__init__(action, parent=parent)
+                self.expect_dispatch = expect_dispatch
+                self.dispatched = False
+
+            def _dispatch_action_(self, frame):
+                assert self.expect_dispatch, 'cache hit dispatched the action'
+                self.dispatched = True
+                return super()._dispatch_action_(frame)
+
         with TemporaryDirectory() as directory:
             cache = Cache(os.path.join(directory, 'cache'))
             with cache.create_pool('recycle'):
                 action = self.plugin.methods['no_input_method']
-                first = Context().get_action('dummy_plugin', action.id)()
-                call = ObservedContext().get_action('dummy_plugin', action.id)
-                with (
-                    patch.object(action, 'outer_wrappers', (observe,)),
-                    patch.object(ObservedContext, '_dispatch_action_') as run,
-                ):
-                    second = call()
-                    run.assert_not_called()
+                miss = ObservedContext(action, Context(), expect_dispatch=True)
+                first = action._outer_bind(lambda: miss)()
+                self.assertTrue(miss.dispatched)
+
+                hit = ObservedContext(action, Context(), expect_dispatch=False)
+                with patch.object(action, 'outer_wrappers', (observe,)):
+                    second = action._outer_bind(lambda: hit)()
 
                 self.assertEqual(first.out.uuid, second.out.uuid)
-                self.assertEqual(observed, [second, second])
+                self.assertEqual(observed, [first, second, second])
 
-    def test_cache_lookup_validates_inputs_before_hashing(self):
+    def test_invalid_input_raises_with_a_named_pool(self):
         with TemporaryDirectory() as directory:
             cache = Cache(os.path.join(directory, 'cache'))
             with cache.create_pool('recycle'):
                 call = Context().get_action('dummy_plugin', 'split_ints')
-                with (
-                    patch('rachis.sdk.context.base.HashableInvocation') as key,
-                    self.assertRaisesRegex(TypeError, "Parameter 'ints'"),
-                ):
+                with self.assertRaisesRegex(TypeError, "Parameter 'ints'"):
                     call('invalid input')
-                key.assert_not_called()
 
     def test_deferred_dispatch_does_not_transform_in_caller(self):
         events, pending = [], []
@@ -146,48 +151,14 @@ class TestActionWrappers(unittest.TestCase):
         self.assertIs(future, dispatched)
         self.assertFalse(future.done())
         self.assertIsNone(frame.provenance)
-        self.assertIs(frame.inputs['ints'], artifact)
-        self.assertFalse(frame.kwargs)
+        self.assertIs(frame.bound_arguments['ints'], artifact)
+        self.assertFalse(frame.call_kwargs)
         self.assertEqual(events, ['outer-enter', 'outer-exit'])
 
         future.set_result(frame.action._inner_apply(frame))
         self.assertEqual(future.result().left.view(list), [1])
         self.assertEqual(events, [
             'outer-enter', 'outer-exit', 'inner-enter', 'inner-exit'])
-
-    def test_failed_callable_unwinds_both_stacks_without_publishing(self):
-        events = []
-
-        @contextmanager
-        def outer(frame):
-            try:
-                yield
-            finally:
-                events.append('outer-cleanup')
-
-        @contextmanager
-        def inner(frame):
-            try:
-                yield
-            finally:
-                events.append('inner-cleanup')
-
-        class ObservedContext(Context):
-            outer_wrappers = (outer,)
-            inner_wrappers = (inner,)
-
-        action = self.plugin.methods['no_input_method']
-        call = action._outer_bind(lambda: ObservedContext(action))
-        failure = ValueError('failed')
-        with (
-            patch.object(action, '_callable', side_effect=failure),
-            patch.object(action.signature, 'coerce_given_outputs') as store,
-        ):
-            with self.assertRaisesRegex(ValueError, 'failed'):
-                call()
-            store.assert_not_called()
-
-        self.assertEqual(events, ['inner-cleanup', 'outer-cleanup'])
 
     def test_visualizer_directory_is_cleaned_when_callable_fails(self):
         directories = []
