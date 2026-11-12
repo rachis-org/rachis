@@ -63,6 +63,7 @@ import types
 from typing import Any, Optional, Union
 
 from rachis.core.cite import Citations, CitationRecord
+from rachis.core.axis import ForEach
 import rachis.sdk
 import rachis.core.type.grammar as grammar
 from rachis.core.validate import ValidationObject
@@ -188,6 +189,7 @@ class Plugin:
         self.type_fragments = {}
         self.transformers = {}
         self.artifact_classes = {}
+        self.axes = {}
         self.validators = {}
 
     def freeze(self):
@@ -556,7 +558,7 @@ class Plugin:
                                       examples=None)
 
     def register_artifact_class(self, semantic_type, directory_format,
-                                description=None, examples=None):
+                                description=None, examples=None, *, axes=None):
         """Register an artifact class which defines an Artifact
 
         Parameters
@@ -573,6 +575,13 @@ class Plugin:
           A dict of example name to usage example functions which take a
           single argument (the usage driver, a.k.a. ``use``). Each function
           which will demonstrate importing this data when executed.
+        axes : dict[ForEach, type]
+          Ordered coordinate patterns and their axis implementations.
+          An implementation accepts the artifact's data directory and
+          ``mode='r'``, iterates over coordinates, and returns a native view
+          when indexed by a coordinate. Its ``write(chunks)`` class method
+          accepts ``(Coord, view)`` pairs and returns a directory format.
+          An optional ``cell_type`` declares the view expected by the writer.
 
         Returns
         -------
@@ -594,8 +603,33 @@ class Plugin:
             raise TypeError("Only a single type can be registered at a time "
                             "with register_artifact_class. Registration "
                             "attempted for %s." % str(semantic_type))
+        registrations = self._axis_registrations(semantic_type, axes or {})
         self._register_artifact_class(
             semantic_type, directory_format, description, examples)
+        self.axes.update(registrations)
+
+    def register_axes(self, semantic_type, axes):
+        """Register coordinate patterns for a concrete artifact type."""
+        self.axes.update(self._axis_registrations(semantic_type, axes))
+
+    def _axis_registrations(self, semantic_type, axes):
+        if (not is_semantic_type(semantic_type)
+                or not semantic_type.is_concrete()):
+            raise TypeError('Axes require a concrete semantic type')
+        registrations = {}
+        for pattern, axis in axes.items():
+            if not isinstance(pattern, ForEach) or pattern != pattern.axis_key:
+                raise TypeError('Axis registration requires plain axis names')
+            if not isinstance(axis, type) or not all(
+                callable(getattr(axis, method, None))
+                for method in ('__iter__', '__getitem__', 'write')
+            ):
+                raise TypeError(f'{axis!r} does not implement the axis API')
+            key = (semantic_type, pattern)
+            if key in self.axes:
+                raise ValueError(f'Axis {pattern.axes!r} already registered')
+            registrations[key] = axis
+        return registrations
 
 
 class PluginActions(dict):

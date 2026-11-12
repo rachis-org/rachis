@@ -8,6 +8,7 @@
 
 from importlib import import_module
 
+from rachis.core.axis import ForEach
 from rachis.plugin import (Plugin, Bool, Int, Str, Choices, Range, List, Set,
                            Collection, Visualization, Metadata, MetadataColumn,
                            Categorical, Numeric, TypeMatch, Properties)
@@ -32,10 +33,13 @@ from .format import (
     ImportableOnlyFormat,
     ExportableOnlyFormat
 )
+from .mapped_axis import (
+    SampleMappingAxis, SampleMagMappingAxis, SampleMagMarginAxis,
+)
 
 from .type import (IntSequence1, IntSequence2, IntSequence3, Mapping, FourInts,
                    SingleInt, Kennel, Dog, Cat, C1, C2, C3, Foo, Bar, Baz,
-                   AscIntSequence, Squid, Octopus, Cuttlefish)
+                   AscIntSequence, Squid, Octopus, Cuttlefish, MagMapping)
 from .method import (concatenate_ints, split_ints, merge_mappings,
                      identity_with_metadata, identity_with_metadata_column,
                      identity_with_categorical_metadata_column,
@@ -113,7 +117,7 @@ dummy_plugin.register_semantic_types(IntSequence1, IntSequence2, IntSequence3,
                                      Mapping, FourInts, Kennel, Dog, Cat,
                                      SingleInt, C1, C2, C3, Foo, Bar, Baz,
                                      AscIntSequence, Squid, Octopus,
-                                     Cuttlefish)
+                                     Cuttlefish, MagMapping)
 
 # Register formats
 dummy_plugin.register_formats(
@@ -186,9 +190,18 @@ dummy_plugin.register_semantic_type_to_format(
     IntSequence3,
     directory_format=IntSequenceMultiFileDirectoryFormat
 )
-dummy_plugin.register_semantic_type_to_format(
+dummy_plugin.register_artifact_class(
     Mapping,
-    directory_format=MappingDirectoryFormat
+    directory_format=MappingDirectoryFormat,
+    axes={ForEach['sample']: SampleMappingAxis},
+)
+dummy_plugin.register_artifact_class(
+    MagMapping,
+    directory_format=MappingDirectoryFormat,
+    axes={
+        ForEach['sample']: SampleMagMarginAxis,
+        ForEach['sample', 'mag']: SampleMagMappingAxis,
+    },
 )
 dummy_plugin.register_semantic_type_to_format(
     FourInts,
