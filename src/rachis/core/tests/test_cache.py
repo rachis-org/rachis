@@ -20,6 +20,7 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 
+import dill
 import pytest
 from flufl.lock import LockState
 
@@ -750,3 +751,21 @@ class TestCache(unittest.TestCase):
         self.assertEqual(
             set(art1_both_annotations._archiver._annotations.keys()),
             set(['annotation-1', f'annotation-1-{Note2.id}']))
+
+
+def test_serialized_cache_preserves_the_live_default(tmp_path):
+    live_cache = get_cache()
+    live_path = live_cache.path
+    live_lock = live_cache.lock
+    named_cache = Cache(tmp_path / 'named')
+
+    with named_cache.lock:
+        restored = dill.loads(dill.dumps(named_cache))
+
+    assert restored is not live_cache
+    assert restored.path == named_cache.path
+    assert live_cache.path == live_path
+    assert live_cache.lock is live_lock
+    assert restored.lock.re_entries == 0
+    with restored.lock:
+        assert restored.lock.re_entries == 1
