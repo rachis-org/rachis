@@ -12,6 +12,7 @@ from rachis.metadata import (Metadata, MetadataColumn,
 from rachis.plugin import Citations
 from rachis.core.cache import Cache, Pool, get_cache
 from rachis.core.annotate import Note
+from rachis.core.axis import Coord, ForEach
 import rachis.util as util
 
 try:
@@ -29,4 +30,4 @@ __website__ = 'https://qiime2.org'
 __all__ = ['Artifact', 'Visualization', 'ResultCollection', 'Metadata',
            'MetadataColumn', 'CategoricalMetadataColumn',
            'NumericMetadataColumn', 'Cache', 'Pool', 'get_cache', 'Note',
-           'util']
+           'Coord', 'ForEach', 'util']
