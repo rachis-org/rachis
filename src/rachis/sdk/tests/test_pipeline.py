@@ -8,6 +8,7 @@
 
 import unittest
 import inspect
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -580,6 +581,15 @@ class TestPipeline(unittest.TestCase):
         for call in self.iter_callables('failing_pipeline'):
             with self.assertRaisesRegex(TypeError, 'Result.*objects.*None'):
                 call(self.int_sequence, break_from='return-view')
+
+    def test_failing_from_invalid_result(self):
+        pipeline = self.plugin.pipelines['pointless_pipeline']
+        for value in (7, [7]):
+            with self.subTest(value=value), patch.object(
+                pipeline, '_callable', return_value=value
+            ):
+                with self.assertRaisesRegex(TypeError, 'Result.*objects.*int'):
+                    pipeline()
 
     def test_failing_from_method(self):
         for call in self.iter_callables('failing_pipeline'):

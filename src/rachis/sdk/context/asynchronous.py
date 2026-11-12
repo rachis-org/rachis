@@ -9,19 +9,25 @@
 import concurrent.futures
 
 from .base import Context
+from rachis.sdk.action import Frame
 
 
-def _subprocess_apply(ctx, args, kwargs):
-    exe = ctx.action_obj._bind(
-        lambda: Context(ctx), {'type': 'asynchronous'})
-    with ctx.cache:
-        results = exe(*args, **kwargs)
-
-    return results
+def _subprocess_apply(frame):
+    # The worker uses synchronous dispatch for any pipeline child calls, while
+    # this application retains its asynchronous execution provenance.
+    # Activate the transported cache so the worker Context uses that cache.
+    with frame.ctx.cache:
+        ctx = Context(frame.action)
+        ctx.execution_ctx = dict(frame.ctx.execution_ctx)
+        ctx.inner_wrappers = frame.ctx.inner_wrappers
+        worker_frame = Frame(frame.action, ctx, frame.inputs)
+        return worker_frame.action._inner_apply(worker_frame)
 
 
 class AsynchronousContext(Context):
-    def _dispatch_(self, *args, **kwargs):
+    execution_ctx = {'type': 'asynchronous'}
+
+    def _dispatch_action_(self, frame):
         # x-ref for why this try except exists
         # https://github.com/qiime2/qiime2/issues/73
         try:
@@ -33,7 +39,9 @@ class AsynchronousContext(Context):
             pass
 
         pool = concurrent.futures.ProcessPoolExecutor(max_workers=1)
-        future = pool.submit(_subprocess_apply, self, args, kwargs)
+        # Only the action and bound inputs are needed by the worker.
+        worker_frame = Frame(frame.action, self, frame.inputs)
+        future = pool.submit(_subprocess_apply, worker_frame)
         # TODO: pool.shutdown(wait=False) caused the child process to
         # hang unrecoverably. This seems to be a bug in Python 3.7
         # It's probably best to gut concurrent.futures entirely, so we're
