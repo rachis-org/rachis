@@ -5,6 +5,7 @@
 #
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
+from contextlib import contextmanager
 import warnings
 
 from rachis.plugin import IContext
@@ -29,7 +30,20 @@ def _validate_collection(collection_order):
     return True
 
 
+@contextmanager
+def cache_lookup_wrapper(frame):
+    ctx = frame.ctx
+    if (frame.results is None and ctx._parent is not None
+            and ctx.cache.named_pool is not None):
+        frame.results = ctx._check_cache(frame.inputs)
+    yield
+
+
 class Context(IContext):
+    outer_wrappers = (cache_lookup_wrapper,)
+    inner_wrappers = ()
+    execution_ctx = {'type': 'synchronous'}
+
     def __init__(self, action_obj=None, parent=None):
         if parent is not None:
             self.cache = parent.cache
@@ -47,33 +61,18 @@ class Context(IContext):
 
         self.action_obj = action_obj
         self._parent = parent
+        self.execution_ctx = dict(type(self).execution_ctx)
 
-    def _dispatch_(self, args, kwargs):
-        exe = self.action_obj._bind(lambda: self)
-        results = exe(*args, **kwargs)
+    def _dispatch_action_(self, frame):
+        return frame.action._inner_apply(frame)
 
-        return results
-
-    def _callable_action_(self, *args, **kwargs):
-        # If we have a named_pool, we need to check for cached results that
-        # we can reuse.
-        if self.cache.named_pool is not None and \
-                (cached_results := self._check_cache(args, kwargs)):
-            return cached_results
-
-        # If we didn't have cached results to reuse, we need to execute
-        # the action.
-        return self._dispatch_(args, kwargs)
-
-    def _check_cache(self, args, kwargs):
+    def _check_cache(self, inputs):
         plugin = self.action_obj.plugin_id.replace('_', '-')
         plugin_action = f'{plugin}:{self.action_obj.id}'
 
-        # Type management for inputs
-        collated_inputs = self.action_obj.signature.collate_inputs(
-            *args, **kwargs)
-        callable_args = self.action_obj.signature.coerce_user_input(
-            **collated_inputs)
+        signature = self.action_obj.signature
+        signature.check_types(**inputs)
+        callable_args = signature.coerce_user_input(**inputs)
 
         # Make args and kwargs look how they do when we read them
         # out of a .yaml file (list of single value dicts of
@@ -144,14 +143,12 @@ class Context(IContext):
                 "An action named %r was not found for plugin %r"
                 % (action, plugin))
 
-        # Create a context for the new action
-        child_context = self.__class__(new_action_obj, parent=self)
+        def context_factory():
+            # Independent applications of the same callable need independent
+            # Contexts and execution metadata, including parallel workers.
+            return self.__class__(new_action_obj, parent=self)
 
-        # Return a callable for the new action
-        callable_action = child_context.action_obj._rewrite_wrapper_signature(
-            child_context._callable_action_)
-        child_context.action_obj._set_wrapper_properties(callable_action)
-        return callable_action
+        return new_action_obj._outer_bind(context_factory)
 
 
     def make_artifact(self, type, view, view_type=None):
