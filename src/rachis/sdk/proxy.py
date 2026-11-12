@@ -135,10 +135,16 @@ class ProxyArtifact(ProxyResult):
     def _view(self, view_type, recorder):
         return self.result()._view(view_type, recorder)
 
-    def view(self, view_type):
+    def view(self, view_type, **coordinate):
         """If we want to view the result we need the future to be resolved
         """
-        return self.result().view(view_type)
+        return self.result().view(view_type, **coordinate)
+
+    def axes(self):
+        return self.result().axes()
+
+    def coords(self, *axes):
+        return self.result().coords(*axes)
 
     def has_metadata(self):
         from rachis import Metadata
