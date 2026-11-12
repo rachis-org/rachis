@@ -33,11 +33,11 @@ from rachis.core.cite import CitationRecord
 class Frame:
     """State for one application, shared by its wrapper stack."""
 
-    def __init__(self, action, ctx, inputs):
+    def __init__(self, action, ctx, bound_arguments):
         self.action = action
         self.ctx = ctx
-        self.inputs = inputs
-        self.kwargs = {}
+        self.bound_arguments = bound_arguments
+        self.call_kwargs = {}
         self.results = None
         self.provenance = None
         self.captures = ()
@@ -45,7 +45,15 @@ class Frame:
     @cached_property
     def output_types(self):
         """Solve output types from the bound inputs when first needed."""
-        return self.action.signature.solve_output(**self.inputs)
+        return self.action.signature.solve_output(**self.bound_arguments)
+
+    def for_worker(self, *, ctx=None, bound_arguments=None):
+        """Create a fresh frame with the arguments needed by a worker."""
+        if ctx is None:
+            ctx = self.ctx
+        if bound_arguments is None:
+            bound_arguments = self.bound_arguments
+        return Frame(self.action, ctx, bound_arguments)
 
 
 @contextmanager
@@ -63,9 +71,9 @@ def deprecation_wrapper(frame):
 @contextmanager
 def signature_wrapper(frame):
     signature = frame.action.signature
-    signature.check_types(**frame.inputs)
-    frame.output_types = signature.solve_output(**frame.inputs)
-    frame.kwargs = signature.coerce_user_input(**frame.inputs)
+    signature.check_types(**frame.bound_arguments)
+    frame.output_types = signature.solve_output(**frame.bound_arguments)
+    frame.call_kwargs = signature.coerce_user_input(**frame.bound_arguments)
     yield
 
 
@@ -80,7 +88,7 @@ def provenance_wrapper(frame):
 @contextmanager
 def checksum_wrapper(frame):
     cache = ChecksumCache()
-    for value in frame.inputs.values():
+    for value in frame.bound_arguments.values():
         if isinstance(value, Artifact):
             cache.cache_artifact(value)
         elif isinstance(value, ResultCollection):
@@ -90,9 +98,9 @@ def checksum_wrapper(frame):
 
 @contextmanager
 def input_transform_wrapper(frame):
-    frame.kwargs, frame.captures = (
+    frame.call_kwargs, frame.captures = (
         frame.action.signature.transform_and_add_callable_args_to_prov(
-            frame.provenance, **frame.kwargs))
+            frame.provenance, **frame.call_kwargs))
     yield
 
 
@@ -135,7 +143,7 @@ def results_wrapper(frame):
 @contextmanager
 def visualization_wrapper(frame):
     with tempfile.TemporaryDirectory(prefix='rachis-temp-') as temp_dir:
-        frame.kwargs['output_dir'] = temp_dir
+        frame.call_kwargs['output_dir'] = temp_dir
         yield
         if frame.results is not None:
             raise TypeError(
@@ -191,7 +199,7 @@ def _intersect_pipeline_output_type(expected, output_type, output_name):
 
 @contextmanager
 def pipeline_wrapper(frame):
-    frame.kwargs['ctx'] = frame.ctx
+    frame.call_kwargs['ctx'] = frame.ctx
     yield
     outputs = checked_return_values(frame.results, len(frame.output_types))
     outputs = _coerce_pipeline_outputs(frame.ctx, outputs)
@@ -427,7 +435,7 @@ class Action:
         with ExitStack() as stack:
             for wrapper in wrappers:
                 stack.enter_context(wrapper(frame))
-            frame.results = self._callable(**frame.kwargs)
+            frame.results = self._callable(**frame.call_kwargs)
         return frame.results
 
     def _get_parsl_wrapper(self):

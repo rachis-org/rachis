@@ -7,9 +7,9 @@
 # ----------------------------------------------------------------------------
 
 import concurrent.futures
+from types import MappingProxyType
 
 from .base import Context
-from rachis.sdk.action import Frame
 
 
 def _subprocess_apply(frame):
@@ -20,12 +20,12 @@ def _subprocess_apply(frame):
         ctx = Context(frame.action)
         ctx.execution_ctx = dict(frame.ctx.execution_ctx)
         ctx.inner_wrappers = frame.ctx.inner_wrappers
-        worker_frame = Frame(frame.action, ctx, frame.inputs)
+        worker_frame = frame.for_worker(ctx=ctx)
         return worker_frame.action._inner_apply(worker_frame)
 
 
 class AsynchronousContext(Context):
-    execution_ctx = {'type': 'asynchronous'}
+    execution_ctx = MappingProxyType({'type': 'asynchronous'})
 
     def _dispatch_action_(self, frame):
         # x-ref for why this try except exists
@@ -40,7 +40,7 @@ class AsynchronousContext(Context):
 
         pool = concurrent.futures.ProcessPoolExecutor(max_workers=1)
         # Only the action and bound inputs are needed by the worker.
-        worker_frame = Frame(frame.action, self, frame.inputs)
+        worker_frame = frame.for_worker()
         future = pool.submit(_subprocess_apply, worker_frame)
         # TODO: pool.shutdown(wait=False) caused the child process to
         # hang unrecoverably. This seems to be a bug in Python 3.7

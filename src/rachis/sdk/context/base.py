@@ -6,6 +6,7 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 from contextlib import contextmanager
+from types import MappingProxyType
 import warnings
 
 from rachis.plugin import IContext
@@ -35,14 +36,14 @@ def cache_lookup_wrapper(frame):
     ctx = frame.ctx
     if (frame.results is None and ctx._parent is not None
             and ctx.cache.named_pool is not None):
-        frame.results = ctx._check_cache(frame.inputs)
+        frame.results = ctx._check_cache(frame.bound_arguments)
     yield
 
 
 class Context(IContext):
     outer_wrappers = (cache_lookup_wrapper,)
     inner_wrappers = ()
-    execution_ctx = {'type': 'synchronous'}
+    execution_ctx = MappingProxyType({'type': 'synchronous'})
 
     def __init__(self, action_obj=None, parent=None):
         if parent is not None:
