@@ -10,6 +10,7 @@ import inspect
 import tempfile
 import textwrap
 from contextlib import contextmanager, ExitStack
+from enum import Enum
 from functools import cached_property
 from itertools import chain
 from types import FunctionType
@@ -30,30 +31,39 @@ from rachis.core.util import (LateBindingAttribute, tuplize,
 from rachis.core.cite import CitationRecord
 
 
-class Frame:
-    """State for one application, shared by its wrapper stack."""
+class FramePhase(Enum):
+    OUTER_APPLY = 'outer_apply'
 
-    def __init__(self, action, ctx, bound_arguments):
+
+class Frame:
+    """State for one application phase, shared by its wrapper stack."""
+
+    def __init__(self, action, ctx, bound_arguments, *,
+                 phase=FramePhase.OUTER_APPLY):
         self.action = action
         self.ctx = ctx
         self.bound_arguments = bound_arguments
+        self.phase = phase
         self.call_kwargs = {}
         self.results = None
         self.provenance = None
         self.captures = ()
+
+    def __call__(self):
+        match self.phase:
+            case FramePhase.OUTER_APPLY:
+                return self.action._outer_apply(self)
+        raise ValueError(f'Unknown frame phase: {self.phase!r}')
 
     @cached_property
     def output_types(self):
         """Solve output types from the bound inputs when first needed."""
         return self.action.signature.solve_output(**self.bound_arguments)
 
-    def for_worker(self, *, ctx=None, bound_arguments=None):
-        """Create a fresh frame with the arguments needed by a worker."""
-        if ctx is None:
-            ctx = self.ctx
-        if bound_arguments is None:
-            bound_arguments = self.bound_arguments
-        return Frame(self.action, ctx, bound_arguments)
+    def for_worker(self):
+        """Copy a dispatchable phase's inputs into a fresh worker frame."""
+        return Frame(self.action, self.ctx, self.bound_arguments,
+                     phase=self.phase)
 
 
 @contextmanager
@@ -428,6 +438,9 @@ class Action:
         self._set_wrapper_properties(bound_callable)
         self._set_wrapper_name(bound_callable, name or self.id)
         return bound_callable
+
+    def _outer_apply(self, frame):
+        return self._inner_apply(frame)
 
     def _inner_apply(self, frame):
         """Execute a prepared application in its execution Context."""

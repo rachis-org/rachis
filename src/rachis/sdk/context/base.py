@@ -65,7 +65,7 @@ class Context(IContext):
         self.execution_ctx = dict(type(self).execution_ctx)
 
     def _dispatch_action_(self, frame):
-        return frame.action._inner_apply(frame)
+        return frame()
 
     def _check_cache(self, inputs):
         plugin = self.action_obj.plugin_id.replace('_', '-')

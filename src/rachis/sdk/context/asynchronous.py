@@ -20,8 +20,8 @@ def _subprocess_apply(frame):
         ctx = Context(frame.action)
         ctx.execution_ctx = dict(frame.ctx.execution_ctx)
         ctx.inner_wrappers = frame.ctx.inner_wrappers
-        worker_frame = frame.for_worker(ctx=ctx)
-        return worker_frame.action._inner_apply(worker_frame)
+        frame.ctx = ctx
+        return frame()
 
 
 class AsynchronousContext(Context):
@@ -39,7 +39,6 @@ class AsynchronousContext(Context):
             pass
 
         pool = concurrent.futures.ProcessPoolExecutor(max_workers=1)
-        # Only the action and bound inputs are needed by the worker.
         worker_frame = frame.for_worker()
         future = pool.submit(_subprocess_apply, worker_frame)
         # TODO: pool.shutdown(wait=False) caused the child process to
