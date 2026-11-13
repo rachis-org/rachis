@@ -6,7 +6,10 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+from __future__ import annotations
+
 import csv
+from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from itertools import chain, product
@@ -50,7 +53,7 @@ class PendingCell:
 
 @dataclass(frozen=True)
 class CommittedCell:
-    outcome: object
+    outcome: CellOutcome | None
     name: str
 
     def resolve(self):
@@ -61,11 +64,38 @@ class CommittedCell:
 
 @dataclass(frozen=True)
 class CellReference(PendingCell):
-    future: object
+    future: Future
     name: str
 
     def resolve(self):
         return CommittedCell(self.future.result(), self.name).resolve()
+
+
+@dataclass(frozen=True)
+class CellPrefix(PendingCell):
+    coordinate: Coord
+    writer: type
+    reader: type
+    members: tuple
+
+    def resolve(self):
+        chunks = tuple((coord, view)
+                       for coord, cell in self.members
+                       if (view := cell.resolve()) is not None)
+        return _PrefixView(self, chunks) if chunks else None
+
+
+@dataclass(frozen=True)
+class _PrefixView:
+    prefix: CellPrefix
+    chunks: tuple
+
+    @contextmanager
+    def open(self):
+        directory = self.prefix.writer.write(
+            (coord, view.load()) for coord, view in self.chunks)
+        axis = self.prefix.reader(directory.path, mode='r')
+        yield axis[self.prefix.coordinate]
 
 
 @dataclass(frozen=True)
@@ -101,7 +131,7 @@ class StoredView:
 
 @dataclass(frozen=True)
 class CellOutcome:
-    outputs: dict
+    outputs: dict[str, StoredView | None]
     transforms: tuple = ()
 
 
@@ -115,6 +145,10 @@ class CellFrame(Frame):
 
     def for_worker(self):
         return CellFrame(self, self.cell, self.axes)
+
+    @staticmethod
+    def for_batch(cells):
+        return BatchFrame(cells)
 
     def __call__(self):
         self.workspace = Path(tempfile.mkdtemp(dir=self.cell.path.parent))
@@ -169,11 +203,13 @@ class MappedProxyArtifact(ProxyArtifact):
         self._cells = cells
 
     def _mapped_cells(self, pattern):
-        if self._future_.done():
+        if (self._future_.done() and not self._future_.cancelled()
+                and self._future_.exception() is None):
             return None
         if self._pattern.axes == pattern.axes:
             return self._cells
-        return None
+        return project_cell_prefixes(
+            self.type, self._pattern, pattern, self._cells)
 
     def _with_future(self, future, qiime_type):
         return type(self)(future, None, qiime_type, self._pattern, self._cells)
@@ -207,6 +243,27 @@ class MappedProvenance(ActionProvenanceCapture):
         recorder = super().transformation_recorder(name)
         self.transformers[name].extend(previous)
         return recorder
+
+
+def project_cell_prefixes(semantic_type, source, target, cells):
+    """Group prospective cells by a registered prefix of their axis path."""
+    length = len(target.axes)
+    if source.axes[:length] != target.axes:
+        return None
+    axes = PluginManager().get_axes(semantic_type)
+    reader = axes.get(target.as_unbound())
+    if reader is None:
+        return None
+    writer = axes[source.as_unbound()]
+    groups = {}
+    for key, cell in cells.items():
+        coord = Coord(**dict(zip(source.axes, key)))
+        groups.setdefault(key[:length], []).append((coord, cell))
+    return {
+        key: CellPrefix(Coord(**dict(zip(target.axes, key))), writer, reader,
+                        tuple(members))
+        for key, members in groups.items()
+    }
 
 
 def _input_index(value, pattern):
@@ -337,17 +394,20 @@ def cell_provenance_wrapper(frame):
 
 @contextmanager
 def cell_transform_wrapper(frame):
-    _prepare_cell_views(frame)
-    yield
-    _stage_cell_outputs(frame)
+    with ExitStack() as views:
+        _prepare_cell_views(frame, views)
+        yield
+        _stage_cell_outputs(frame)
 
 
-def _prepare_cell_views(frame):
+def _prepare_cell_views(frame, views):
     signature = frame.action.signature
     for name, spec in signature.signature_order.items():
         value = frame.bound_arguments[name]
         if name in signature.input_patterns:
-            if isinstance(value, (ArtifactCell, StoredView)):
+            if isinstance(value, _PrefixView):
+                value = views.enter_context(value.open())
+            elif isinstance(value, (ArtifactCell, StoredView)):
                 value = value.load()
             if value is not None:
                 value = _as_view(

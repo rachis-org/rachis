@@ -138,7 +138,9 @@ class TestPlugin(unittest.TestCase):
                           'random_seed_method_set_twice',
                           'random_seed_method_never_set',
                           'raises_rachis_warning', 'filter_samples',
-                          'increment_samples', 'mapped_sample_pipeline'
+                          'increment_samples', 'mapped_sample_pipeline',
+                          'filter_scores', 'sum_scores',
+                          'mapped_scores_pipeline'
                           })
         for action in actions.values():
             self.assertIsInstance(action, rachis.sdk.Action)
@@ -190,7 +192,7 @@ class TestPlugin(unittest.TestCase):
                           'random_seed_method_set_twice',
                           'random_seed_method_never_set',
                           'raises_rachis_warning', 'filter_samples',
-                          'increment_samples'
+                          'increment_samples', 'filter_scores', 'sum_scores'
                           })
         for method in methods.values():
             self.assertIsInstance(method, rachis.sdk.Method)
@@ -224,7 +226,7 @@ class TestPlugin(unittest.TestCase):
                           'failing_pipeline',
                           'viz_collection_pipeline',
                           'resumable_random_seed_pipeline',
-                          'mapped_sample_pipeline'})
+                          'mapped_sample_pipeline', 'mapped_scores_pipeline'})
         for pipeline in pipelines.values():
             self.assertIsInstance(pipeline, rachis.sdk.Pipeline)
 

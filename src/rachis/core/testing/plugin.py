@@ -36,6 +36,7 @@ from .format import (
 from .mapped_axis import (
     SampleMappingAxis, AssignmentScoreAxis, StudentScoresAxis,
     filter_samples, increment_samples, mapped_sample_pipeline,
+    filter_scores, sum_scores, mapped_scores_pipeline,
 )
 
 from .type import (IntSequence1, IntSequence2, IntSequence3, Mapping, FourInts,
@@ -228,6 +229,30 @@ dummy_plugin.register_artifact_class(
         ForEach['student']: StudentScoresAxis,
         ForEach['student', 'assignment']: AssignmentScoreAxis,
     },
+)
+dummy_plugin.methods.register_function(
+    function=filter_scores,
+    inputs={'data': AssignmentScores},
+    parameters={},
+    outputs=[('retained', AssignmentScores)],
+    name='Filter scores',
+    description='Omit negative assignment scores.',
+)
+dummy_plugin.methods.register_function(
+    function=sum_scores,
+    inputs={'data': AssignmentScores},
+    parameters={},
+    outputs=[('totals', Mapping)],
+    name='Sum scores',
+    description='Sum retained assignment scores for each student.',
+)
+dummy_plugin.pipelines.register_function(
+    function=mapped_scores_pipeline,
+    inputs={'data': AssignmentScores},
+    parameters={},
+    outputs=[('filtered', AssignmentScores), ('output', Mapping)],
+    name='Mapped scores pipeline',
+    description='Filter scores, sum each sample, and increment the totals.',
 )
 dummy_plugin.register_semantic_type_to_format(
     FourInts,
