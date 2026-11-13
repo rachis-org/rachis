@@ -10,48 +10,51 @@ import unittest
 
 import pandas as pd
 import pandas.testing as pdt
+import numpy as np
 
-from rachis.core.missing import (
-    encode_and_get_missing_mask, decode_from_missing_mask
-)
-from rachis.metadata.base import CATEGORICAL_DTYPE
+from rachis.core.missing import series_encode_missing, series_extract_missing
 
 
 class RoundTripMixin:
-    def check_roundtrip(self, non_missing_values, dtype, series_dtype=None,
-                        *, extra_missing=()):
-        series = pd.Series(
-            [*non_missing_values, *extra_missing, *self.missing_terms],
-            dtype=series_dtype)
+    def check_roundtrip(self, real_value, dtype):
+        notna_exp = [real_value]
+        series = pd.Series(notna_exp + self.missing_terms)
 
-        encoded, mask = encode_and_get_missing_mask(series, self.enum)
-        decoded = decode_from_missing_mask(encoded, mask)
+        encoded = series_encode_missing(series, self.enum)
+        missing = series_extract_missing(encoded)
 
         self.assertEqual(encoded.dtype, dtype)
-        self.assertEqual(encoded.dropna().tolist(), non_missing_values)
-        pdt.assert_series_equal(decoded, series)
+        # the non-null side of the series
+        self.assertEqual(list(encoded[encoded.notna()]), notna_exp)
+        # the null end (but in the orginal vocabulary)
+        missing = missing.where(pd.notna(missing), np.nan)
+        series = series.where(pd.notna(series), np.nan)
+        pdt.assert_series_equal(missing, series[1:].astype(object))
 
     def test_roundtrip_float(self):
-        self.check_roundtrip([0.05], float)
+        self.check_roundtrip(0.05, float)
 
     def test_roundtrip_string(self):
-        self.check_roundtrip(['hello'], CATEGORICAL_DTYPE,
-                             series_dtype=CATEGORICAL_DTYPE)
+        self.check_roundtrip('hello', object)
 
     def test_roundtrip_int(self):
-        self.check_roundtrip([42], float)
+        self.check_roundtrip(42, float)
 
     def test_roundtrip_bool(self):
-        self.check_roundtrip([True], object)
+        self.check_roundtrip(True, object)
 
     def test_roundtrip_all_missing_object(self):
-        self.check_roundtrip([], object, series_dtype=object,
-                             extra_missing=(None, float('nan')))
+        expected = [None, float('nan')] + self.missing_terms
+        series = pd.Series(expected, dtype=object)
 
-    def test_roundtrip_all_missing_string(self):
-        self.check_roundtrip([], CATEGORICAL_DTYPE,
-                             series_dtype=CATEGORICAL_DTYPE,
-                             extra_missing=(None, float('nan')))
+        encoded = series_encode_missing(series, self.enum)
+        missing = series_extract_missing(encoded)
+
+        missing = missing.where(pd.notna(missing), np.nan)
+        series = series.where(pd.notna(series), np.nan)
+
+        self.assertEqual(encoded.dtype, object)
+        pdt.assert_series_equal(missing, series.astype(object))
 
 
 class TestISNDC(RoundTripMixin, unittest.TestCase):
@@ -68,8 +71,14 @@ class TestOmitted(RoundTripMixin, unittest.TestCase):
 
     # test_roundtrip_all_missing_float is not possible with other schemes
     def test_roundtrip_all_missing_float(self):
-        self.check_roundtrip([], float, series_dtype=float,
-                             extra_missing=(None, float('nan')))
+        expected = [None, float('nan')] + self.missing_terms
+        series = pd.Series(expected, dtype=float)
+
+        encoded = series_encode_missing(series, self.enum)
+        missing = series_extract_missing(encoded)
+
+        self.assertEqual(encoded.dtype, float)
+        pdt.assert_series_equal(missing, series.astype(object))
 
 
 class TestError(RoundTripMixin, unittest.TestCase):
@@ -79,15 +88,11 @@ class TestError(RoundTripMixin, unittest.TestCase):
 
     # no missing values, so bool and int are not object and float
     def test_roundtrip_bool(self):
-        self.check_roundtrip([True], bool)
+        self.check_roundtrip(True, bool)
 
     def test_roundtrip_int(self):
-        self.check_roundtrip([42], int)
+        self.check_roundtrip(42, int)
 
     def test_roundtrip_all_missing_object(self):
         with self.assertRaisesRegex(ValueError, 'Missing values.*name=None'):
             super().test_roundtrip_all_missing_object()
-
-    def test_roundtrip_all_missing_string(self):
-        with self.assertRaisesRegex(ValueError, 'Missing values.*name=None'):
-            super().test_roundtrip_all_missing_string()
