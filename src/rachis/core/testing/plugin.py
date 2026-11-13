@@ -35,6 +35,7 @@ from .format import (
 )
 from .mapped_axis import (
     SampleMappingAxis, AssignmentScoreAxis, StudentScoresAxis,
+    filter_samples, increment_samples, mapped_sample_pipeline,
 )
 
 from .type import (IntSequence1, IntSequence2, IntSequence3, Mapping, FourInts,
@@ -195,6 +196,30 @@ dummy_plugin.register_artifact_class(
     Mapping,
     directory_format=MappingDirectoryFormat,
     axes={ForEach['sample']: SampleMappingAxis},
+)
+dummy_plugin.methods.register_function(
+    function=filter_samples,
+    inputs={'data': Mapping},
+    parameters={},
+    outputs=[('retained', Mapping), ('all_samples', Mapping)],
+    name='Filter samples',
+    description='Omit negative samples from the first output.',
+)
+dummy_plugin.methods.register_function(
+    function=increment_samples,
+    inputs={'data': Mapping},
+    parameters={'amount': Int},
+    outputs=[('output', Mapping)],
+    name='Increment samples',
+    description='Increment each sample by the supplied amount.',
+)
+dummy_plugin.pipelines.register_function(
+    function=mapped_sample_pipeline,
+    inputs={'data': Mapping},
+    parameters={},
+    outputs=[('output', Mapping)],
+    name='Mapped sample pipeline',
+    description='Filter samples and apply two increments.',
 )
 dummy_plugin.register_artifact_class(
     AssignmentScores,

@@ -82,12 +82,16 @@ def deprecation_wrapper(frame):
     yield
 
 
-@contextmanager
-def signature_wrapper(frame):
+def prepare_signature(frame):
     signature = frame.action.signature
     signature.check_types(**frame.bound_arguments)
     frame.output_types = signature.solve_output(**frame.bound_arguments)
     frame.call_kwargs = signature.coerce_user_input(**frame.bound_arguments)
+
+
+@contextmanager
+def signature_wrapper(frame):
+    prepare_signature(frame)
     yield
 
 
@@ -631,8 +635,12 @@ class Method(Action):
                                           outputs, input_descriptions,
                                           parameter_descriptions,
                                           output_descriptions)
-        return super()._init(callable, signature, plugin_id, name, description,
-                             citations, deprecated, migrated, examples)
+        if cls is Method and signature.is_mapped:
+            from rachis.sdk.mapped import MappedMethod
+            cls = MappedMethod
+        return super(Method, cls)._init(
+            callable, signature, plugin_id, name, description, citations,
+            deprecated, migrated, examples)
 
 
 class Visualizer(Action):

@@ -20,6 +20,8 @@ def _subprocess_apply(frame):
         ctx = Context(frame.action)
         ctx.execution_ctx = dict(frame.ctx.execution_ctx)
         ctx.inner_wrappers = frame.ctx.inner_wrappers
+        ctx.mapped_outer_wrappers = frame.ctx.mapped_outer_wrappers
+        ctx.cell_wrappers = frame.ctx.cell_wrappers
         frame.ctx = ctx
         return frame()
 
