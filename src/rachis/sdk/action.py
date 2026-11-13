@@ -11,6 +11,7 @@ import inspect
 import tempfile
 import textwrap
 from contextlib import contextmanager, ExitStack
+from dataclasses import replace
 from enum import Enum
 from itertools import chain
 from types import FunctionType
@@ -37,7 +38,10 @@ from rachis.core.cite import CitationRecord
 
 
 class FramePhase(Enum):
+    OUTER_APPLY = 'outer_apply'
+    INNER_BIND = 'inner_bind'
     INNER_APPLY = 'inner_apply'
+    OUTER_RETURN = 'outer_return'
     FINISHED = 'finished'
 
 
@@ -49,11 +53,14 @@ class Frame:
     Live stacks and resources belong to the process applying the frame.
     """
 
-    def __init__(self, action, ctx, bound_arguments, *, phase):
+    def __init__(self, action, ctx, bound_arguments, *,
+                 phase, cells=(), axes=None):
         self.action = action
         self.ctx = ctx
         self.bound_arguments = bound_arguments
         self.phase = phase
+        self.cells = cells
+        self.axes = axes
         self.transformed_arguments = None
         self.output_types = None
         self.results = None
@@ -61,15 +68,34 @@ class Frame:
         self.ready_provenance = None
 
     def __call__(self):
-        phase = self.phase
-        self.phase = FramePhase.FINISHED
-        match phase:
+        match self.phase:
+            case FramePhase.OUTER_APPLY:
+                result = self.action._outer_apply(self)
+            case FramePhase.INNER_BIND:
+                result = self.action._inner_bind(self)
             case FramePhase.INNER_APPLY:
-                return self.action._inner_apply(self)
+                result = self.action._inner_apply(self)
+            case FramePhase.OUTER_RETURN:
+                result = self.action._outer_return(self)
             case FramePhase.FINISHED:
                 raise RuntimeError('Cannot call a finished frame')
             case _:
-                raise ValueError(f'Unknown frame phase: {phase!r}')
+                raise ValueError(f'Unknown frame phase: {self.phase!r}')
+        self.phase = FramePhase.FINISHED
+        return result
+
+    def for_batch(self, batch, axes):
+        """Prepare a batch whose cells carry their own projected inputs."""
+        return Frame(self.action, self.ctx, {}, phase=FramePhase.INNER_BIND,
+                     cells=batch, axes=axes)
+
+    def for_return(self):
+        """Prepare finalization from whole inputs and cell commit paths."""
+        cells = tuple(replace(cell, inputs={}) for cell in self.cells)
+        frame = Frame(self.action, self.ctx, self.bound_arguments,
+                      phase=FramePhase.OUTER_RETURN, cells=cells)
+        frame.output_types = self.output_types
+        return frame
 
 
 @contextmanager
@@ -345,16 +371,12 @@ class Action:
     """QIIME 2 Action"""
     type = 'action'
     _ProvCaptureCls = archive.ActionProvenanceCapture
-    _initial_frame_phase = FramePhase.INNER_APPLY
+    _initial_frame_phase = FramePhase.OUTER_APPLY
 
     # Outer wrappers run where an application is requested. Inner wrappers run
     # where its callable is evaluated. Context wrappers enter after the
     # action's wrappers in each stack.
-    outer_bind_wrappers = (
-        track_results_wrapper,
-        deprecation_wrapper,
-        bind_signature_wrapper,
-    )
+    outer_bind_wrappers = (deprecation_wrapper, bind_signature_wrapper)
     inner_apply_wrappers = (prepare_callable_arguments_wrapper,)
 
     __call__ = LateBindingAttribute('_dynamic_call')
