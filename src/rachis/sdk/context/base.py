@@ -7,6 +7,8 @@
 # ----------------------------------------------------------------------------
 from concurrent.futures import CancelledError, Future
 from contextlib import contextmanager
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import MappingProxyType
 import warnings
 
@@ -43,9 +45,19 @@ def cache_lookup_wrapper(frame):
     yield
 
 
+@contextmanager
+def mapped_invocation_wrapper(frame):
+    with TemporaryDirectory(dir=frame.ctx.cache.path) as directory:
+        frame.directory = Path(directory)
+        yield
+        frame.action._outer_return(frame)
+
+
 class Context(IContext):
     outer_bind_wrappers = (cache_lookup_wrapper,)
-    inner_apply_wrappers = ()
+    inner_wrappers = ()
+    mapped_outer_wrappers = (mapped_invocation_wrapper,)
+    cell_wrappers = ()
     execution_metadata = MappingProxyType({'type': 'synchronous'})
 
     def __init__(self, action_obj=None, parent=None):
@@ -108,6 +120,13 @@ class Context(IContext):
         state = self.__dict__.copy()
         state['_scopes'] = []
         return state
+
+    def _iter_batches_(self, cells):
+        for cell in cells:
+            yield (cell,)
+
+    def _dispatch_batch_(self, frame, batch, axes):
+        return frame.action._run_batch_(frame, batch, axes)
 
     def _check_cache(self, bound_arguments):
         plugin = self.action_obj.plugin_id.replace('_', '-')

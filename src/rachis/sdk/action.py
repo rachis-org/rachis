@@ -659,8 +659,12 @@ class Method(Action):
                                           outputs, input_descriptions,
                                           parameter_descriptions,
                                           output_descriptions)
-        return super()._init(callable, signature, plugin_id, name, description,
-                             citations, deprecated, migrated, examples)
+        if cls is Method and signature.is_mapped:
+            from rachis.sdk.mapped import MappedMethod
+            cls = MappedMethod
+        return super(Method, cls)._init(
+            callable, signature, plugin_id, name, description, citations,
+            deprecated, migrated, examples)
 
 
 class Visualizer(Action):
