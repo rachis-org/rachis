@@ -80,12 +80,11 @@ class CellOutcome:
 
 
 class CellFrame(Frame):
-    def __init__(self, parent, bound_arguments, cell, axes, workspace):
+    def __init__(self, parent, bound_arguments, cell, workspace):
         super().__init__(parent.action, parent.ctx, bound_arguments,
-                         phase=FramePhase.INNER_APPLY)
+                         phase=FramePhase.INNER_APPLY, axes=parent.axes)
         self.cell = cell
         self.coordinate = next(iter(cell.outputs.values()))
-        self.axes = axes
         self.workspace = workspace
 
 
@@ -382,22 +381,22 @@ def iter_batches(ctx, cells):
 class MappedMethod(Method):
     """A method that invokes its callable once per aligned coordinate."""
 
-    mapped_outer_wrappers = ()
-    cell_wrappers = (
+    outer_apply_wrappers = ()
+    inner_apply_wrappers = (
         cell_provenance_wrapper,
         cell_transform_wrapper,
     )
 
-    def _inner_apply(self, frame):
+    def _outer_apply(self, frame):
         """Plan and dispatch the cells for one mapped invocation."""
         ctx = frame.ctx
         with ExitStack() as stack:
-            for wrapper in chain(self.mapped_outer_wrappers,
-                                 ctx.mapped_outer_wrappers):
+            for wrapper in chain(self.outer_apply_wrappers,
+                                 ctx.outer_apply_wrappers):
                 stack.enter_context(wrapper(frame))
             frame.cells, axes = plan_cells(frame, frame.directory)
             frame.batches = [
-                (batch, ctx._dispatch_batch_(frame, batch, axes))
+                (batch, ctx._dispatch_batch_(frame.for_batch(batch, axes)))
                 for batch in iter_batches(ctx, frame.cells)
             ]
         return frame.results
@@ -408,42 +407,42 @@ class MappedMethod(Method):
         frame.results = _publish_outputs(frame, _write_outputs(frame))
         return frame.results
 
-    def _run_batch_(self, frame, batch, axes):
-        for cell in batch:
-            self._run_cell_(frame, cell, axes)
-
-    def _run_cell_(self, frame, cell, axes):
-        # A repeated batch can reuse cells committed by its first attempt.
-        if cell.path.exists():
-            return
-        workspace = Path(tempfile.mkdtemp(dir=cell.path.parent))
-        keep = False
-        try:
+    def _inner_bind(self, frame):
+        """Bind and commit each cell in a dispatched batch."""
+        for cell in frame.cells:
+            # A repeated batch can reuse cells committed by its first attempt.
+            if cell.path.exists():
+                continue
+            workspace = Path(tempfile.mkdtemp(dir=cell.path.parent))
+            keep = False
             try:
-                outcome = self._mapped_inner_apply(
-                    frame, cell, axes, workspace)
-                if not isinstance(outcome, CellOutcome):
-                    raise TypeError('Cell wrappers must produce a CellOutcome')
-            except Exception as error:
-                outcome = CellOutcome(
-                    None, error=f'{type(error).__name__}: {error}')
-            manifest = workspace / 'outcome'
-            with manifest.open('wb') as stream:
-                dill.dump(outcome, stream)
-            try:
-                # Release consumers only after every wrapper has exited.
-                os.link(manifest, cell.path)
-                keep = bool(outcome.outputs)
-            except FileExistsError:
-                pass
-        finally:
-            if not keep:
-                shutil.rmtree(workspace)
+                try:
+                    local = CellFrame(frame, cell.inputs, cell, workspace)
+                    outcome = local()
+                    if not isinstance(outcome, CellOutcome):
+                        raise TypeError(
+                            'Cell wrappers must produce a CellOutcome')
+                except Exception as error:
+                    outcome = CellOutcome(
+                        None, error=f'{type(error).__name__}: {error}')
+                manifest = workspace / 'outcome'
+                with manifest.open('wb') as stream:
+                    dill.dump(outcome, stream)
+                try:
+                    # Release consumers only after every wrapper has exited.
+                    os.link(manifest, cell.path)
+                    keep = bool(outcome.outputs)
+                except FileExistsError:
+                    pass
+            finally:
+                if not keep:
+                    shutil.rmtree(workspace)
 
-    def _mapped_inner_apply(self, frame, cell, axes, workspace):
-        local = CellFrame(frame, cell.inputs, cell, axes, workspace)
+    def _inner_apply(self, frame):
+        wrappers = chain(self.inner_apply_wrappers,
+                         frame.ctx.mapped_inner_apply_wrappers)
         with ExitStack() as stack:
-            for wrapper in chain(self.cell_wrappers, frame.ctx.cell_wrappers):
-                stack.enter_context(wrapper(local))
-            local.results = self._callable(**local.transformed_arguments)
-        return local.results
+            for wrapper in wrappers:
+                stack.enter_context(wrapper(frame))
+            frame.results = self._callable(**frame.transformed_arguments)
+        return frame.results
