@@ -419,7 +419,7 @@ class PluginManager:
 
     def get_axis(self, semantic_type, pattern):
         try:
-            return self.get_axes(semantic_type)[pattern.axis_key]
+            return self.get_axes(semantic_type)[pattern.as_unbound()]
         except KeyError:
             raise ValueError(
                 f'{semantic_type!r} has no axis {pattern.axes!r}'
