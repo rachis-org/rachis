@@ -11,12 +11,12 @@ from types import MappingProxyType
 
 from parsl.app.app import python_app
 
-from rachis.sdk.action import Pipeline
+from rachis.sdk.futures import call_future
 from rachis.sdk.result import ResultCollection
-from rachis.sdk.proxy import Proxy, ProxyResults
+from rachis.sdk.proxy import Proxy
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
 
-from .base import Context
+from .base import Context, invocation_resources_wrapper
 
 
 def _map_arg(arg, futures):
@@ -103,6 +103,8 @@ def _submit_app(frame, executor):
 
 class ParallelContext(Context):
     execution_ctx = MappingProxyType({'type': 'parsl'})
+    outer_wrappers = (invocation_resources_wrapper, *Context.outer_wrappers)
+    _defer_results = True
 
     def __init__(self, action_obj, parent=None):
         super(ParallelContext, self).__init__(action_obj, parent=parent)
@@ -126,9 +128,9 @@ class ParallelContext(Context):
     def _dispatch_action_(self, frame):
         # Pipeline bodies keep coordinating locally, as before this refactor.
         # Their child applications still pass through their own outer stacks.
-        if isinstance(frame.action, Pipeline):
+        if frame.action._driver_apply:
             self.execution_ctx = {'type': 'parsl', 'parsl_type': 'DFK'}
-            return frame()
+            return call_future(frame)
 
         if PARALLEL_CONFIG.parallel_config is None:
             raise ValueError('You must load a parallel config before '
@@ -143,6 +145,6 @@ class ParallelContext(Context):
 
         # Parsl can schedule against upstream futures. The worker validates
         # and coerces the arguments once those futures have resolved.
-        output_types = frame.output_types
         future = _submit_app(frame, executor)
-        return ProxyResults(future, output_types)
+        self._get_resources().jobs.append(future)
+        return future

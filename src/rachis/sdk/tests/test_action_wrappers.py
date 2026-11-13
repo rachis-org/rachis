@@ -14,10 +14,11 @@ import unittest
 from unittest.mock import patch
 
 from rachis.core.cache import Cache
-from rachis.core.testing.type import IntSequence1
+from rachis.core.testing.type import IntSequence1, IntSequence2
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.sdk import Artifact, Results
-from rachis.sdk.context import Context
+from rachis.sdk.context import Context, ParallelContext
+from rachis.sdk.proxy import ProxyArtifact
 
 
 class TestActionWrappers(unittest.TestCase):
@@ -136,29 +137,51 @@ class TestActionWrappers(unittest.TestCase):
         class DeferredContext(Context):
             outer_wrappers = (outer,)
             inner_wrappers = (inner,)
+            _defer_results = True
 
             def _dispatch_action_(self, frame):
                 future = Future()
-                pending.append((frame, future))
+                pending.append((frame.for_worker(), future))
                 return future
 
         action = self.plugin.methods['split_ints']
         artifact = Artifact.import_data(IntSequence1, [1, 2, 3])
         call = action._outer_bind(lambda: DeferredContext(action))
-        future = call(artifact)
+        results = call(artifact)
         frame, dispatched = pending.pop()
 
-        self.assertIs(future, dispatched)
-        self.assertFalse(future.done())
+        self.assertIs(results._future_, dispatched)
+        self.assertFalse(dispatched.done())
         self.assertIsNone(frame.provenance)
         self.assertIs(frame.bound_arguments['ints'], artifact)
         self.assertFalse(frame.call_kwargs)
         self.assertEqual(events, ['outer-enter', 'outer-exit'])
 
-        future.set_result(frame())
-        self.assertEqual(future.result().left.view(list), [1])
+        dispatched.set_result(frame())
+        self.assertEqual(results.left.view(list), [1])
         self.assertEqual(events, [
             'outer-enter', 'outer-exit', 'inner-enter', 'inner-exit'])
+
+    def test_pipeline_aliases_named_outputs_independently(self):
+        pipeline = self.plugin.pipelines['parameter_only_pipeline']
+        pending = Future()
+
+        def return_outputs(ctx, **kwargs):
+            first = ctx.make_artifact(IntSequence2, [1])
+            second = ProxyArtifact(pending, None, IntSequence1)
+            return first, second
+
+        with ParallelContext(pipeline) as ctx:
+            call = pipeline._outer_bind(lambda: ctx)
+            try:
+                with patch.object(pipeline, '_callable', return_outputs):
+                    results = call(1)
+                self.assertEqual(results[0]._future_.result(
+                    timeout=5).view(list), [1])
+                self.assertFalse(results[1]._future_.done())
+            finally:
+                pending.set_result(Artifact.import_data(IntSequence1, [2]))
+            self.assertEqual(results[1].view(list), [2])
 
     def test_visualizer_directory_is_cleaned_when_callable_fails(self):
         directories = []
