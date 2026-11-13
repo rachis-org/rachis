@@ -87,19 +87,18 @@ def parsl_worker_wrapper(frame, inputs):
         yield
 
 
-def _submit_app(frame, executor, method):
-    # Parsl serializes the worker and its arguments separately. Use the
-    # action from the transported frame as the method's receiver.
-    execute = method.__func__
+def _submit_app(frame, executor):
     futures = []
-    frame.bound_arguments = _map_arg(frame.bound_arguments, futures)
+    worker_frame = frame.for_worker()
+    worker_frame.bound_arguments = _map_arg(frame.bound_arguments, futures)
 
     def worker(frame, inputs=()):
         with parsl_worker_wrapper(frame, inputs):
-            return execute(frame.action, frame)
+            return frame()
 
     frame.action._set_wrapper_name(worker, frame.action.id)
-    return python_app(executors=[executor])(worker)(frame, inputs=futures)
+    return python_app(executors=[executor])(worker)(
+        worker_frame, inputs=futures)
 
 
 class ParallelContext(Context):
@@ -129,7 +128,7 @@ class ParallelContext(Context):
         # Their child applications still pass through their own outer stacks.
         if isinstance(frame.action, Pipeline):
             self.execution_ctx = {'type': 'parsl', 'parsl_type': 'DFK'}
-            return frame.action._inner_apply(frame)
+            return frame()
 
         if PARALLEL_CONFIG.parallel_config is None:
             raise ValueError('You must load a parallel config before '
@@ -145,6 +144,5 @@ class ParallelContext(Context):
         # Parsl can schedule against upstream futures. The worker validates
         # and coerces the arguments once those futures have resolved.
         output_types = frame.output_types
-        worker_frame = frame.for_worker()
-        future = _submit_app(worker_frame, executor, frame.action._inner_apply)
+        future = _submit_app(frame, executor)
         return ProxyResults(future, output_types)

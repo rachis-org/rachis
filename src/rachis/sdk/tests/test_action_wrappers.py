@@ -155,7 +155,7 @@ class TestActionWrappers(unittest.TestCase):
         self.assertFalse(frame.call_kwargs)
         self.assertEqual(events, ['outer-enter', 'outer-exit'])
 
-        future.set_result(frame.action._inner_apply(frame))
+        future.set_result(frame())
         self.assertEqual(future.result().left.view(list), [1])
         self.assertEqual(events, [
             'outer-enter', 'outer-exit', 'inner-enter', 'inner-exit'])
