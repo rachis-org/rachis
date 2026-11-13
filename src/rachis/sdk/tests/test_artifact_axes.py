@@ -24,13 +24,17 @@ def test_registered_axis_and_coordinate_views():
     assert data.axes() == [('sample',)]
     assert list(data.coords('sample')) == [Coord(sample='s1'),
                                             Coord(sample='s2')]
-    assert data.view(str, sample='s2', mag='ignored') == '-5'
+    assert data.view(str, sample='s2') == '-5'
+    with pytest.raises(ValueError, match='has no axis'):
+        data.view(str, sample='s2', mag='extra')
 
 
 def test_nested_coordinate_views():
     data = Artifact.import_data('AssignmentScores', {'s1/a1': '4'})
     assert data.view(dict, student='s1') == {'a1': '4'}
     assert data.view(str, student='s1', assignment='a1') == '4'
+    with pytest.raises(ValueError, match='has no axis'):
+        data.view(str, assignment='a1', student='s1')
 
 
 def test_for_each_bindings():

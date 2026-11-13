@@ -470,22 +470,13 @@ class Artifact(Result):
         return axis(self._archiver.data_dir, mode='r')
 
     def view(self, view_type, **coordinate):
-        """View the artifact or the most specific registered coordinate cell.
+        """View the artifact or a cell at a registered coordinate.
 
-        Extra coordinate names can be supplied when viewing along a subset of
-        axes. Equally specific matches are ambiguous.
+        Coordinate names must match a registered axis path in order.
         """
         if coordinate:
-            axes = self.axes()
-            matches = [names for names in axes
-                       if set(names) <= coordinate.keys()]
-            if not matches:
-                raise ValueError(f'No axis matches {coordinate!r}')
-            names = max(matches, key=len)
-            if sum(len(match) == len(names) for match in matches) > 1:
-                raise ValueError(f'Ambiguous axis selection {coordinate!r}')
-            coord = Coord(**{name: coordinate[name] for name in names})
-            cell = self._axis(ForEach[names])[coord]
+            axis = self._axis(ForEach[tuple(coordinate)])
+            cell = axis[Coord(**coordinate)]
             source = transform.ModelType.from_view_type(type(cell))
             target = transform.ModelType.from_view_type(view_type)
             return source.make_transformation(target)(cell)
