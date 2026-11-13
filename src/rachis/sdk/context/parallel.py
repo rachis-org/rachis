@@ -94,6 +94,9 @@ def _submit_app(frame, executor):
 
     def worker(frame, inputs=()):
         with parsl_worker_wrapper(frame, inputs):
+            if frame.action._mapped:
+                # This worker evaluates the complete mapped invocation.
+                frame.ctx._defer_results = False
             return frame()
 
     frame.action._set_wrapper_name(worker, frame.action.id)

@@ -10,7 +10,6 @@ import inspect
 import tempfile
 import textwrap
 from contextlib import contextmanager, ExitStack
-from dataclasses import replace
 from enum import Enum
 from functools import cached_property
 from itertools import chain
@@ -40,20 +39,17 @@ class FramePhase(Enum):
     OUTER_APPLY = 'outer_apply'
     INNER_BIND = 'inner_bind'
     INNER_APPLY = 'inner_apply'
-    OUTER_RETURN = 'outer_return'
 
 
 class Frame:
     """State for one application phase, shared by its wrapper stack."""
 
     def __init__(self, action, ctx, bound_arguments, *,
-                 phase=FramePhase.OUTER_APPLY, cells=(), axes=None):
+                 phase=FramePhase.OUTER_APPLY):
         self.action = action
         self.ctx = ctx
         self.bound_arguments = bound_arguments
         self.phase = phase
-        self.cells = cells
-        self.axes = axes
         self.call_kwargs = {}
         self.results = None
         self.provenance = None
@@ -67,8 +63,6 @@ class Frame:
                 return self.action._inner_bind(self)
             case FramePhase.INNER_APPLY:
                 return self.action._inner_apply(self)
-            case FramePhase.OUTER_RETURN:
-                return self.action._outer_return(self)
         raise ValueError(f'Unknown frame phase: {self.phase!r}')
 
     @cached_property
@@ -76,21 +70,10 @@ class Frame:
         """Solve output types from the bound inputs when first needed."""
         return self.action.signature.solve_output(**self.bound_arguments)
 
-    def for_batch(self, batch, axes):
-        """Prepare a batch whose cells carry their own projected inputs."""
-        return Frame(self.action, self.ctx, {}, phase=FramePhase.INNER_BIND,
-                     cells=batch, axes=axes)
-
-    def for_return(self):
-        """Prepare finalization from whole inputs and cell commit paths."""
-        cells = tuple(replace(cell, inputs={}) for cell in self.cells)
-        return Frame(self.action, self.ctx, self.bound_arguments,
-                     phase=FramePhase.OUTER_RETURN, cells=cells)
-
     def for_worker(self):
         """Copy a dispatchable phase's inputs into a fresh worker frame."""
         return Frame(self.action, self.ctx, self.bound_arguments,
-                     phase=self.phase, cells=self.cells, axes=self.axes)
+                     phase=self.phase)
 
 
 @contextmanager
@@ -350,6 +333,7 @@ class Action:
     type = 'action'
     _ProvCaptureCls = archive.ActionProvenanceCapture
     _driver_apply = False
+    _mapped = False
 
     # Outer wrappers run where an application is requested. Inner wrappers run
     # where its callable is evaluated. Context wrappers enclose both stacks.
@@ -517,7 +501,8 @@ class Action:
         return bound_callable
 
     def _outer_apply(self, frame):
-        return self._inner_apply(frame)
+        frame.phase = FramePhase.INNER_APPLY
+        return frame()
 
     def _inner_apply(self, frame):
         """Execute a prepared application in its execution Context."""

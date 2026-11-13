@@ -70,17 +70,15 @@ class InvocationResources(ExitStack):
 
 @contextmanager
 def mapped_invocation_wrapper(frame):
-    with TemporaryDirectory(dir=frame.ctx.cache.path) as directory:
-        frame.directory = Path(directory)
+    ctx = frame.ctx
+    directory = TemporaryDirectory(dir=ctx.cache.path)
+    if ctx._defer_results:
+        frame.directory = Path(ctx._get_resources().enter_context(directory))
         yield
-        return_frame = frame.for_return()
-        frame.results = return_frame()
-        # Enclosing wrappers can inspect the finalized invocation.
-        frame.outcomes = return_frame.outcomes
-        frame.provenance = return_frame.provenance
-        frame.transforms = return_frame.transforms
-        frame.call_kwargs = return_frame.call_kwargs
-        frame.output_types = return_frame.output_types
+    else:
+        with directory as path:
+            frame.directory = Path(path)
+            yield
 
 
 class Context(IContext):
@@ -137,12 +135,9 @@ class Context(IContext):
         state.pop('_resources', None)
         return state
 
-    def _iter_batches_(self, cells):
-        for cell in cells:
-            yield (cell,)
-
-    def _dispatch_batch_(self, frame):
-        return frame()
+    def _dispatch_cells_(self, cells):
+        """Return a future for every invocation coordinate in cells."""
+        return {coord: call_future(cell) for coord, cell in cells.items()}
 
     def _check_cache(self, inputs):
         plugin = self.action_obj.plugin_id.replace('_', '-')

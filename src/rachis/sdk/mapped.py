@@ -10,7 +10,6 @@ import csv
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from itertools import chain, product
-import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -28,6 +27,8 @@ from rachis.sdk.action import (
     Frame, FramePhase, Method, checked_return_values, prepare_signature,
 )
 from rachis.sdk.plugin_manager import PluginManager
+from rachis.sdk.futures import join
+from rachis.sdk.proxy import ProxyResults, result_future
 from rachis.sdk.result import Artifact
 from rachis.sdk.results import Results
 
@@ -75,18 +76,31 @@ class StoredView:
 
 @dataclass(frozen=True)
 class CellOutcome:
-    outputs: dict | None
+    outputs: dict
     transforms: tuple = ()
-    error: str | None = None
 
 
 class CellFrame(Frame):
-    def __init__(self, parent, bound_arguments, cell, workspace):
-        super().__init__(parent.action, parent.ctx, bound_arguments,
-                         phase=FramePhase.INNER_APPLY, axes=parent.axes)
+    def __init__(self, parent, cell, axes):
+        super().__init__(parent.action, parent.ctx, cell.inputs,
+                         phase=FramePhase.INNER_APPLY)
         self.cell = cell
         self.coordinate = next(iter(cell.outputs.values()))
-        self.workspace = workspace
+        self.axes = axes
+
+    def __call__(self):
+        self.workspace = Path(tempfile.mkdtemp(dir=self.cell.path.parent))
+        keep = False
+        try:
+            outcome = super().__call__()
+            keep = outcome is not None
+            return outcome
+        except Exception as error:
+            raise RuntimeError(f'Mapped cell {self.coordinate!r} failed: '
+                               f'{error}') from error
+        finally:
+            if not keep:
+                shutil.rmtree(self.workspace)
 
 
 class MappedProvenance(ActionProvenanceCapture):
@@ -100,11 +114,6 @@ class MappedProvenance(ActionProvenanceCapture):
         recorder = super().transformation_recorder(name)
         self.transformers[name].extend(previous)
         return recorder
-
-
-def read_outcome(path):
-    with path.open('rb') as stream:
-        return dill.load(stream)
 
 
 def _input_index(value, pattern):
@@ -184,7 +193,7 @@ def plan_cells(frame, directory):
               for rules in _groups(signature)]
     broadcast = {name: value for name, value in frame.call_kwargs.items()
                  if name not in signature.input_patterns}
-    cells = []
+    cells = {}
     for number, combination in enumerate(product(*groups)):
         bound = {}
         selections = dict(broadcast)
@@ -196,7 +205,8 @@ def plan_cells(frame, directory):
                                    (bound[b] for b in pattern.bindings))))
             for name, pattern in signature.output_patterns.items()
         }
-        cells.append(Cell(directory / f'{number}.cell', selections, outputs))
+        cells[Coord(**bound)] = Cell(
+            directory / f'{number}.cell', selections, outputs)
     return cells, output_axes(frame)
 
 
@@ -297,15 +307,6 @@ def _record_transforms(provenance, name, pairs):
                 transform.ModelType.from_view_type(target), recorder=recorder)
 
 
-def _read_cell_outcomes(frame):
-    frame.outcomes = [read_outcome(cell.path) for cell in frame.cells]
-    for cell, outcome in zip(frame.cells, frame.outcomes):
-        if outcome.error is not None:
-            raise RuntimeError(
-                f'Mapped cell {next(iter(cell.outputs.values()))!r} failed: '
-                f'{outcome.error}')
-
-
 def _prepare_mapped_provenance(frame):
     action = frame.action
     signature = action.signature
@@ -318,7 +319,9 @@ def _prepare_mapped_provenance(frame):
             provenance.add_parameter(
                 name, signature.parameters[name].qiime_type, value)
     frame.transforms = {}
-    for outcome in frame.outcomes:
+    for outcome in frame.outcomes.values():
+        if outcome is None:
+            continue
         for name, source, target in outcome.transforms:
             frame.transforms.setdefault(name, set()).add((source, target))
     for name in signature.inputs:
@@ -330,9 +333,9 @@ def _write_outputs(frame):
     outputs = []
     for name in frame.output_types:
         selected = [
-            (cell.outputs[name], outcome.outputs[name])
-            for cell, outcome in zip(frame.cells, frame.outcomes)
-            if outcome.outputs is not None
+            (frame.cells[coord].outputs[name], outcome.outputs[name])
+            for coord, outcome in frame.outcomes.items()
+            if outcome is not None
         ]
         chunks = ((coord, value.load()) for coord, value in selected
                   if value is not None)
@@ -364,18 +367,10 @@ def _publish_outputs(frame, outputs):
     return Results(frame.output_types, artifacts)
 
 
-def iter_batches(ctx, cells):
-    batches = [tuple(batch) for batch in ctx._iter_batches_(cells)]
-    expected = {cell.path for cell in cells}
-    scheduled = [cell.path for batch in batches for cell in batch]
-    if len(scheduled) != len(expected) or set(scheduled) != expected:
-        raise ValueError('Batches must partition the planned cells')
-    return (batch for batch in batches if batch)
-
-
 class MappedMethod(Method):
     """A method that invokes its callable once per aligned coordinate."""
 
+    _mapped = True
     outer_apply_wrappers = ()
     inner_apply_wrappers = (
         cell_provenance_wrapper,
@@ -389,49 +384,34 @@ class MappedMethod(Method):
             for wrapper in chain(ctx.outer_apply_wrappers,
                                  self.outer_apply_wrappers):
                 stack.enter_context(wrapper(frame))
-            frame.cells, axes = plan_cells(frame, frame.directory)
-            frame.batches = [
-                (batch, ctx._dispatch_batch_(frame.for_batch(batch, axes)))
-                for batch in iter_batches(ctx, frame.cells)
-            ]
-        return frame.results
-
-    def _outer_return(self, frame):
-        _read_cell_outcomes(frame)
-        _prepare_mapped_provenance(frame)
-        frame.results = _publish_outputs(frame, _write_outputs(frame))
+            frame.phase = FramePhase.INNER_BIND
+            frame()
         return frame.results
 
     def _inner_bind(self, frame):
-        """Bind and commit each cell in a dispatched batch."""
-        for cell in frame.cells:
-            # A repeated batch can reuse cells committed by its first attempt.
-            if cell.path.exists():
-                continue
-            workspace = Path(tempfile.mkdtemp(dir=cell.path.parent))
-            keep = False
-            try:
-                try:
-                    local = CellFrame(frame, cell.inputs, cell, workspace)
-                    outcome = local()
-                    if not isinstance(outcome, CellOutcome):
-                        raise TypeError(
-                            'Cell wrappers must produce a CellOutcome')
-                except Exception as error:
-                    outcome = CellOutcome(
-                        None, error=f'{type(error).__name__}: {error}')
-                manifest = workspace / 'outcome'
-                with manifest.open('wb') as stream:
-                    dill.dump(outcome, stream)
-                try:
-                    # Release consumers only after every wrapper has exited.
-                    os.link(manifest, cell.path)
-                    keep = bool(outcome.outputs)
-                except FileExistsError:
-                    pass
-            finally:
-                if not keep:
-                    shutil.rmtree(workspace)
+        """Align the inputs and dispatch one frame per planned coordinate."""
+        ctx = frame.ctx
+        frame.cells, axes = plan_cells(frame, frame.directory)
+        cells = {coord: CellFrame(frame, cell, axes)
+                 for coord, cell in frame.cells.items()}
+        futures = ctx._dispatch_cells_(cells)
+        if futures.keys() != cells.keys():
+            raise ValueError('Cell dispatch must return each coordinate once')
+
+        def assemble(inputs, *outcomes):
+            frame.bound_arguments = inputs
+            frame.outcomes = dict(zip(cells, outcomes, strict=True))
+            prepare_signature(frame)
+            _prepare_mapped_provenance(frame)
+            return _publish_outputs(frame, _write_outputs(frame))
+
+        future = join(
+            (result_future(frame.bound_arguments),
+             *(futures[coord] for coord in cells)), assemble, ctx=ctx)
+        if ctx._defer_results:
+            frame.results = ProxyResults(future, frame.output_types)
+        else:
+            frame.results = future.result()
 
     def _inner_apply(self, frame):
         wrappers = chain(frame.ctx.mapped_inner_apply_wrappers,
