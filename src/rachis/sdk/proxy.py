@@ -7,6 +7,7 @@
 # ----------------------------------------------------------------------------
 
 from rachis.sdk.iresult import IResult
+from rachis.sdk.futures import after_all, completed_future, join
 
 import rachis.core.transform as transform
 from rachis.core.type.util import is_visualization_type, is_collection_type
@@ -23,6 +24,26 @@ class Proxy:
         return not (self == other)
 
 
+def result_future(value):
+    """Resolve a result reference, including any prospective collection."""
+    from rachis.sdk.result import ResultCollection
+
+    if isinstance(value, (ProxyResult, ProxyResultCollection)):
+        return after_all((value._future_,), value._get_element_)
+    if isinstance(value, ResultCollection):
+        keys = tuple(value.keys())
+        return after_all(map(result_future, value.values()),
+                         lambda *items: ResultCollection(
+                             dict(zip(keys, items))))
+    if isinstance(value, list):
+        return after_all(map(result_future, value), lambda *items: list(items))
+    if isinstance(value, dict):
+        keys = tuple(value)
+        return after_all(map(result_future, value.values()),
+                         lambda *items: dict(zip(keys, items)))
+    return completed_future(value)
+
+
 class ProxyResult(Proxy, IResult):
     def __init__(self, future, selector, qiime_type=None):
         """We have a future that represents the results of some QIIME 2 action,
@@ -31,7 +52,6 @@ class ProxyResult(Proxy, IResult):
         self._future_ = future
         self._selector_ = selector
         self._qiime_type_ = qiime_type
-        self._alias_hook = None
 
     def __repr__(self):
         if self._qiime_type_ is None:
@@ -44,25 +64,19 @@ class ProxyResult(Proxy, IResult):
         return hash(self.uuid)
 
     def _alias(self, name, provenance, ctx, qiime_type=None):
-        """We don't want to alias immediately because aliasing is a blocking
-        operation. Calling alias on a Proxy adds a hook that will create the
-        alias when the result on the Proxy is requested
-        """
         if self._qiime_type_ is not None:
             self._assert_alias_type_refines_realized_type(
                 qiime_type, self._qiime_type_)
 
-        alias_type = (
-            qiime_type if qiime_type is not None else self._qiime_type_
-        )
+        future = join(
+            (result_future(self),),
+            lambda result: result._alias(name, provenance, ctx, qiime_type),
+            ctx=ctx)
+        alias_type = self._qiime_type_ if qiime_type is None else qiime_type
+        return self._with_future(future, alias_type)
 
-        def _alias_hook():
-            result = new._get_element_(new._future_.result())
-            return result._alias(name, provenance, ctx, qiime_type)
-
-        new = self.__class__(self._future_, self._selector_, alias_type)
-        new._alias_hook = _alias_hook
-        return new
+    def _with_future(self, future, qiime_type):
+        return self.__class__(future, None, qiime_type)
 
     @property
     def _archiver(self):
@@ -91,10 +105,6 @@ class ProxyResult(Proxy, IResult):
         return self._archiver.citations
 
     def result(self):
-        if self._alias_hook:
-            # Create our alias on result request if a hook has been added
-            return self._alias_hook()
-
         return self._get_element_(self._future_.result())
 
     def _get_element_(self, results):
@@ -204,6 +214,8 @@ class ProxyResultCollection(Proxy):
     def _get_element_(self, results):
         """Get the result we want off of the future we have
         """
+        if self._selector_ is None:
+            return results
         return getattr(results, self._selector_)
 
     def result(self):
@@ -219,6 +231,19 @@ class ProxyResults(Proxy):
         """
         self._future_ = future
         self._signature_ = signature
+        self._named_ = None
+
+    @classmethod
+    def from_named(cls, proxies, signature):
+        from rachis.sdk.results import Results
+
+        names = tuple(signature)
+        joined = after_all(
+            (result_future(proxies[name]) for name in names),
+            lambda *outputs: Results(names, outputs))
+        results = cls(joined, signature)
+        results._named_ = proxies
+        return results
 
     def __iter__(self):
         """Give us a ProxyArtifact for each result in the future
@@ -262,7 +287,7 @@ class ProxyResults(Proxy):
         return self._result() == other._result()
 
     def _asdict(self):
-        return self.result()._asdict()
+        return self._result()._asdict()
 
     def _result(self):
         """If you are calling an action in a try-except block in a pipeline,
@@ -287,13 +312,15 @@ class ProxyResults(Proxy):
         """Create a ProxyResult for the element of the ProxyResults being
            requested
         """
+        if self._named_ is not None:
+            return self._named_[selector]
         qiime_type = self._signature_[selector].qiime_type
+        return output_proxy(self._future_, selector, qiime_type)
 
-        if is_collection_type(qiime_type):
-            return ProxyResultCollection(
-                self._future_, selector, qiime_type)
-        elif is_visualization_type(qiime_type):
-            return ProxyVisualization(
-                self._future_, selector, qiime_type)
 
-        return ProxyArtifact(self._future_, selector, qiime_type)
+def output_proxy(future, selector, qiime_type):
+    if is_collection_type(qiime_type):
+        return ProxyResultCollection(future, selector, qiime_type)
+    if is_visualization_type(qiime_type):
+        return ProxyVisualization(future, selector, qiime_type)
+    return ProxyArtifact(future, selector, qiime_type)

@@ -581,6 +581,14 @@ class TestPipeline(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, 'Result.*objects.*None'):
                 call(self.int_sequence, break_from='return-view')
 
+    def test_failing_from_invalid_result(self):
+        for call in self.iter_callables('failing_pipeline'):
+            for mode in ('return-scalar', 'return-collection-member'):
+                with self.subTest(mode=mode), self.assertRaisesRegex(
+                    TypeError, 'Result.*objects.*int'
+                ):
+                    call(self.int_sequence, break_from=mode)
+
     def test_failing_from_method(self):
         for call in self.iter_callables('failing_pipeline'):
             with self.assertRaisesRegex(ValueError, "Key 'foo' exists"):

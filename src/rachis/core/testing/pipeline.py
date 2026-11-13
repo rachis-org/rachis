@@ -326,6 +326,10 @@ def failing_pipeline(ctx, int_sequence, break_from='arity'):
         return int_sequence, int_sequence, int_sequence
     elif break_from == 'return-view':
         return None
+    elif break_from == 'return-scalar':
+        return integer
+    elif break_from == 'return-collection-member':
+        return [integer]
     elif break_from == 'type':
         return wrong_output
     elif break_from == 'method':

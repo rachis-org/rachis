@@ -520,6 +520,7 @@ class PipelineSignature:
 
 
     def transform_and_add_callable_args_to_prov(self, provenance,
+                                                record_inputs=True, /,
                                                 **callable_args):
         """ Transform inputs to views and add all callable arguments to
             provenance. Needs to be done together so we can add transformation
@@ -534,9 +535,10 @@ class PipelineSignature:
             arg = callable_args[name]
 
             if name in self.inputs:
-                callable_args[name] = \
-                    self._transform_and_add_input_to_prov(
-                        provenance, name, spec, arg)
+                if record_inputs:
+                    callable_args[name] = \
+                        self._transform_and_add_input_to_prov(
+                            provenance, name, spec, arg)
             else:
                 if contains_generic_base(CaptureHolder, spec.view_type):
                     capture = CaptureHolder(

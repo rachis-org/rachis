@@ -5,6 +5,9 @@
 #
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import ExitStack, contextmanager
+from types import MappingProxyType
 import warnings
 
 from rachis.plugin import IContext
@@ -12,6 +15,7 @@ from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
+from rachis.sdk.futures import call_future
 
 
 def _validate_collection(collection_order):
@@ -29,7 +33,47 @@ def _validate_collection(collection_order):
     return True
 
 
+@contextmanager
+def cache_lookup_wrapper(frame):
+    ctx = frame.ctx
+    if (frame.results is None and ctx._parent is not None
+            and ctx.cache.named_pool is not None):
+        frame.results = ctx._check_cache(frame.bound_arguments)
+    yield
+
+
+@contextmanager
+def invocation_resources_wrapper(frame):
+    ctx = frame.ctx
+    if ctx._parent is None and not ctx._entered:
+        with ctx:
+            yield
+    else:
+        yield
+
+
+class InvocationResources(ExitStack):
+    """Keep driver resources alive while submitted work and joins settle."""
+
+    def __init__(self):
+        super().__init__()
+        self.jobs = []
+        self.executor = self.enter_context(ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='rachis-join'))
+
+    def close(self):
+        wait(self.jobs)
+        super().close()
+
+
 class Context(IContext):
+    outer_wrappers = (cache_lookup_wrapper,)
+    inner_wrappers = ()
+    execution_ctx = MappingProxyType({'type': 'synchronous'})
+    _defer_results = False
+    _resources = None
+    _entered = False
+
     def __init__(self, action_obj=None, parent=None):
         if parent is not None:
             self.cache = parent.cache
@@ -47,33 +91,40 @@ class Context(IContext):
 
         self.action_obj = action_obj
         self._parent = parent
+        self.execution_ctx = dict(type(self).execution_ctx)
 
-    def _dispatch_(self, args, kwargs):
-        exe = self.action_obj._bind(lambda: self)
-        results = exe(*args, **kwargs)
+    def _dispatch_action_(self, frame):
+        return call_future(frame)
 
-        return results
+    def _get_resources(self):
+        if self._parent is not None:
+            return self._parent._get_resources()
+        if self._resources is None:
+            self._resources = InvocationResources()
+        return self._resources
 
-    def _callable_action_(self, *args, **kwargs):
-        # If we have a named_pool, we need to check for cached results that
-        # we can reuse.
-        if self.cache.named_pool is not None and \
-                (cached_results := self._check_cache(args, kwargs)):
-            return cached_results
+    def __enter__(self):
+        self._entered = True
+        return self
 
-        # If we didn't have cached results to reuse, we need to execute
-        # the action.
-        return self._dispatch_(args, kwargs)
+    def __exit__(self, *exc_details):
+        if self._resources is not None:
+            self._resources.close()
+            self._resources = None
+        self._entered = False
 
-    def _check_cache(self, args, kwargs):
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop('_resources', None)
+        return state
+
+    def _check_cache(self, inputs):
         plugin = self.action_obj.plugin_id.replace('_', '-')
         plugin_action = f'{plugin}:{self.action_obj.id}'
 
-        # Type management for inputs
-        collated_inputs = self.action_obj.signature.collate_inputs(
-            *args, **kwargs)
-        callable_args = self.action_obj.signature.coerce_user_input(
-            **collated_inputs)
+        signature = self.action_obj.signature
+        signature.check_types(**inputs)
+        callable_args = signature.coerce_user_input(**inputs)
 
         # Make args and kwargs look how they do when we read them
         # out of a .yaml file (list of single value dicts of
@@ -144,14 +195,12 @@ class Context(IContext):
                 "An action named %r was not found for plugin %r"
                 % (action, plugin))
 
-        # Create a context for the new action
-        child_context = self.__class__(new_action_obj, parent=self)
+        def context_factory():
+            # Independent applications of the same callable need independent
+            # Contexts and execution metadata, including parallel workers.
+            return self.__class__(new_action_obj, parent=self)
 
-        # Return a callable for the new action
-        callable_action = child_context.action_obj._rewrite_wrapper_signature(
-            child_context._callable_action_)
-        child_context.action_obj._set_wrapper_properties(callable_action)
-        return callable_action
+        return new_action_obj._outer_bind(context_factory)
 
 
     def make_artifact(self, type, view, view_type=None):
