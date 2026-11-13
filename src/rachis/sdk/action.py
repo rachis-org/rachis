@@ -22,7 +22,10 @@ from types import MappingProxyType
 
 import rachis.sdk
 from rachis.sdk.iresult import IResult
-from rachis.sdk.proxy import ProxyResultCollection
+from rachis.sdk.proxy import (
+    ProxyResult, ProxyResultCollection, ProxyResults, output_proxy,
+    result_future,
+)
 from rachis.sdk.result import Artifact, ResultCollection, ChecksumCache
 import rachis.core.type as qtype
 import rachis.core.archive as archive
@@ -97,6 +100,9 @@ def provenance_wrapper(frame):
 
 @contextmanager
 def checksum_wrapper(frame):
+    if frame.action.type == 'pipeline':
+        yield
+        return
     cache = ChecksumCache()
     for value in frame.bound_arguments.values():
         if isinstance(value, Artifact):
@@ -111,6 +117,14 @@ def input_transform_wrapper(frame):
     frame.call_kwargs, frame.captures = (
         frame.action.signature.transform_and_add_callable_args_to_prov(
             frame.provenance, **frame.call_kwargs))
+    yield
+
+
+@contextmanager
+def pipeline_input_wrapper(frame):
+    frame.call_kwargs, frame.captures = (
+        frame.action.signature.transform_and_add_callable_args_to_prov(
+            frame.provenance, False, **frame.call_kwargs))
     yield
 
 
@@ -146,8 +160,21 @@ def capture_wrapper(frame):
 @contextmanager
 def results_wrapper(frame):
     yield
-    frame.results = rachis.sdk.Results(
-        frame.action.signature.outputs.keys(), frame.results)
+    if not isinstance(frame.results, ProxyResults):
+        frame.results = rachis.sdk.Results(
+            frame.action.signature.outputs.keys(), frame.results)
+
+
+@contextmanager
+def dispatch_result_wrapper(frame, *, return_future):
+    yield
+    future = frame.dispatched
+    if return_future:
+        frame.results = future
+    elif frame.action._driver_apply or not frame.ctx._defer_results:
+        frame.results = future.result()
+    else:
+        frame.results = ProxyResults(future, frame.output_types)
 
 
 @contextmanager
@@ -166,34 +193,18 @@ def visualization_wrapper(frame):
         frame.results = (frame.ctx.add_reference(visualization),)
 
 
-def _coerce_pipeline_outputs(ctx, outputs):
-    """Validate results, resolving them at the root pipeline boundary."""
-    resolve = ctx._parent is None
-
-    def coerce_result(value):
-        if resolve and isinstance(value, IResult):
-            value = value.result()
+def _validate_pipeline_output(output):
+    if isinstance(output, (dict, list)):
+        output = ResultCollection(output)
+    if isinstance(output, ProxyResultCollection):
+        return output
+    values = output.values() if isinstance(output, ResultCollection) else (
+        output,)
+    for value in values:
         if not isinstance(value, IResult):
             raise TypeError(f'Pipelines must return `Result` objects, '
                             f'not {type(value)}')
-        return value
-
-    coerced_outputs = []
-    for output in outputs:
-        if resolve and isinstance(output, ProxyResultCollection):
-            output = output.result()
-        if isinstance(output, (dict, list)):
-            output = ResultCollection(output)
-        if isinstance(output, ResultCollection):
-            for key, value in output.items():
-                value = coerce_result(value)
-                if resolve:
-                    output[key] = value
-        else:
-            output = coerce_result(output)
-        coerced_outputs.append(output)
-
-    return tuple(coerced_outputs)
+    return output
 
 
 def _intersect_pipeline_output_type(expected, output_type, output_name):
@@ -207,33 +218,66 @@ def _intersect_pipeline_output_type(expected, output_type, output_name):
         % (output_name, expected, output_type))
 
 
+def _alias_pipeline_output(name, qiime_type, output, provenance, ctx):
+    if qiime_type.name == 'Collection':
+        aliased = ResultCollection()
+        size = len(output)
+        for idx, (key, value) in enumerate(output.items()):
+            member = create_collection_name(name=name, key=key,
+                                            idx=idx, size=size)
+            refined_type = _intersect_pipeline_output_type(
+                qiime_type.fields[0], value.type,
+                "%r member %r" % (name, key))
+            aliased[str(key)] = value._alias(
+                member, provenance, ctx, refined_type)
+        return aliased
+    refined_type = _intersect_pipeline_output_type(
+        qiime_type, output.type, repr(name))
+    return output._alias(name, provenance, ctx, refined_type)
+
+
 @contextmanager
 def pipeline_wrapper(frame):
-    frame.call_kwargs['ctx'] = frame.ctx
+    ctx = frame.ctx
+    inputs = {name: frame.call_kwargs[name]
+              for name in frame.action.signature.inputs}
+    frame.call_kwargs['ctx'] = ctx
     yield
     outputs = checked_return_values(frame.results, len(frame.output_types))
-    outputs = _coerce_pipeline_outputs(frame.ctx, outputs)
+    outputs = tuple(map(_validate_pipeline_output, outputs))
+    provenance = frame.provenance
 
-    results = []
+    def record_inputs(*values):
+        cache = ChecksumCache()
+        for name, value in zip(inputs, values):
+            if isinstance(value, Artifact):
+                cache.cache_artifact(value)
+            elif isinstance(value, ResultCollection):
+                cache.cache_result_collection(value)
+            provenance.add_input(name, value)
+        return provenance
+
+    ready_provenance = ctx._join(
+        (result_future(value) for value in inputs.values()), record_inputs)
+
+    proxies = {}
     for output, (name, spec) in zip(outputs, frame.output_types.items()):
-        if spec.qiime_type.name == 'Collection':
-            size = len(output)
-            aliased_output = ResultCollection()
-            element_type = spec.qiime_type.fields[0]
-            for idx, (key, value) in enumerate(output.items()):
-                collection_name = create_collection_name(name=name, key=key,
-                                                         idx=idx, size=size)
-                refined_type = _intersect_pipeline_output_type(
-                    element_type, value.type, "%r member %r" % (name, key))
-                aliased_output[str(key)] = value._alias(
-                    collection_name, frame.provenance, frame.ctx, refined_type)
-            results.append(aliased_output)
-        else:
+        qiime_type = spec.qiime_type
+
+        def alias(resolved, provenance, name=name, qiime_type=qiime_type):
+            return _alias_pipeline_output(
+                name, qiime_type, resolved, provenance, ctx)
+
+        future = ctx._join((result_future(output), ready_provenance), alias)
+        if isinstance(output, ProxyResult):
             refined_type = _intersect_pipeline_output_type(
-                spec.qiime_type, output.type, repr(name))
-            results.append(output._alias(
-                name, frame.provenance, frame.ctx, refined_type))
-    frame.results = tuple(results)
+                qiime_type, output.type, repr(name))
+            proxies[name] = output._with_future(future, refined_type)
+        else:
+            proxies[name] = output_proxy(future, None, qiime_type)
+
+    results = ProxyResults.from_named(proxies, frame.output_types)
+    frame.results = results if ctx._defer_results else results._result()
 
 
 # TODO: validation on these params via data.yaml in distributions
@@ -275,6 +319,7 @@ class Action:
     """QIIME 2 Action"""
     type = 'action'
     _ProvCaptureCls = archive.ActionProvenanceCapture
+    _driver_apply = False
 
     # Outer wrappers run where an application is requested. Inner wrappers run
     # where its callable is evaluated. Context wrappers enclose both stacks.
@@ -284,7 +329,6 @@ class Action:
         provenance_wrapper,
         checksum_wrapper,
         results_wrapper,
-        capture_wrapper,
     )
 
     __call__ = LateBindingAttribute('_dynamic_call')
@@ -430,7 +474,9 @@ class Action:
                 for wrapper in chain(ctx.outer_wrappers, self.outer_wrappers):
                     wrappers.enter_context(wrapper(frame))
                 if frame.results is None:
-                    frame.results = ctx._dispatch_action_(frame)
+                    wrappers.enter_context(dispatch_result_wrapper(
+                        frame, return_future=name == 'asynchronous'))
+                    frame.dispatched = ctx._dispatch_action_(frame)
 
             # Post-processing may replace results while the stack unwinds.
             return frame.results
@@ -555,6 +601,7 @@ class Method(Action):
 
     inner_wrappers = (
         *Action.inner_wrappers,
+        capture_wrapper,
         input_transform_wrapper,
         method_wrapper,
     )
@@ -592,6 +639,7 @@ class Visualizer(Action):
 
     inner_wrappers = (
         *Action.inner_wrappers,
+        capture_wrapper,
         input_transform_wrapper,
         visualization_wrapper,
     )
@@ -611,11 +659,13 @@ class Pipeline(Action):
     """Rachis Pipeline"""
     type = 'pipeline'
     _ProvCaptureCls = archive.PipelineProvenanceCapture
+    _driver_apply = True
 
     inner_wrappers = (
         *Action.inner_wrappers,
-        input_transform_wrapper,
+        pipeline_input_wrapper,
         pipeline_wrapper,
+        capture_wrapper,
     )
 
     @classmethod

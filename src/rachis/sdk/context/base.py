@@ -5,7 +5,8 @@
 #
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import ExitStack, contextmanager
 from types import MappingProxyType
 import warnings
 
@@ -14,6 +15,7 @@ from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
+from rachis.sdk.futures import after_all, call_future
 
 
 def _validate_collection(collection_order):
@@ -40,10 +42,37 @@ def cache_lookup_wrapper(frame):
     yield
 
 
+@contextmanager
+def invocation_resources_wrapper(frame):
+    ctx = frame.ctx
+    if ctx._parent is None and not ctx._entered:
+        with ctx:
+            yield
+    else:
+        yield
+
+
+class InvocationResources(ExitStack):
+    """Keep driver resources alive while submitted work and joins settle."""
+
+    def __init__(self):
+        super().__init__()
+        self.jobs = []
+        self.executor = self.enter_context(ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='rachis-join'))
+
+    def close(self):
+        wait(self.jobs)
+        super().close()
+
+
 class Context(IContext):
     outer_wrappers = (cache_lookup_wrapper,)
     inner_wrappers = ()
     execution_ctx = MappingProxyType({'type': 'synchronous'})
+    _defer_results = False
+    _resources = None
+    _entered = False
 
     def __init__(self, action_obj=None, parent=None):
         if parent is not None:
@@ -65,7 +94,44 @@ class Context(IContext):
         self.execution_ctx = dict(type(self).execution_ctx)
 
     def _dispatch_action_(self, frame):
-        return frame()
+        return call_future(frame)
+
+    def _get_resources(self):
+        if self._parent is not None:
+            return self._parent._get_resources()
+        if self._resources is None:
+            self._resources = InvocationResources()
+        return self._resources
+
+    def __enter__(self):
+        self._entered = True
+        return self
+
+    def __exit__(self, *exc_details):
+        if self._resources is not None:
+            self._resources.close()
+            self._resources = None
+        self._entered = False
+
+    def _join(self, dependencies, combine):
+        if not self._defer_results:
+            return after_all(dependencies, combine)
+
+        resources = self._get_resources()
+
+        def run(*values):
+            with self.cache:
+                return combine(*values)
+
+        future = after_all(dependencies, run,
+                           run_local=resources.executor.submit)
+        resources.jobs.append(future)
+        return future
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop('_resources', None)
+        return state
 
     def _check_cache(self, inputs):
         plugin = self.action_obj.plugin_id.replace('_', '-')
