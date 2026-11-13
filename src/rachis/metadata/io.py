@@ -16,10 +16,7 @@ import pandas as pd
 
 from rachis.core.util import find_duplicates
 import rachis.core.missing as _missing
-from .base import (
-    CATEGORICAL_DTYPE, SUPPORTED_COLUMN_TYPES, FORMATTED_ID_HEADERS,
-    is_id_header
-)
+from .base import SUPPORTED_COLUMN_TYPES, FORMATTED_ID_HEADERS, is_id_header
 from .metadata import Metadata, MetadataColumn
 
 
@@ -120,16 +117,11 @@ class MetadataReader:
         resolved_missing.update(directives.get('missing', {}))
         resolved_missing.update(column_missing_schemes)
 
-        missing = df.copy()
         try:
             # Cast each column to the appropriate dtype based on column type.
-            df = df.apply(
-                self._cast_column,
-                axis='index',
-                column_types=resolved_column_types,
-                missing_schemes=resolved_missing,
-                missing=missing
-            )
+            df = df.apply(self._cast_column, axis='index',
+                          column_types=resolved_column_types,
+                          missing_schemes=resolved_missing)
         except MetadataFileError as e:
             # HACK: If an exception is raised within `DataFrame.apply`, pandas
             # adds an extra tuple element to `e.args`, making the original
@@ -142,12 +134,8 @@ class MetadataReader:
             raise MetadataFileError(msg, include_suffix=False)
 
         try:
-            return into(
-                df,
-                column_missing_schemes=resolved_missing,
-                default_missing_scheme=default_missing_scheme,
-                missing=missing
-            )
+            return into(df, column_missing_schemes=resolved_missing,
+                        default_missing_scheme=default_missing_scheme)
         except Exception as e:
             raise MetadataFileError(
                 "There was an issue with loading the metadata file:\n\n%s" % e)
@@ -262,13 +250,13 @@ class MetadataReader:
 
         if 'missing' in directives:
             for column_name, column_missing in directives['missing'].items():
-                if column_missing not in _missing._MISSING_ENUMS:
+                if column_missing not in _missing.BUILTIN_MISSING:
                     raise MetadataFileError(
                         "Column %r has an unrecognized missing value scheme %r"
                         " specified in its #q2:missing directive."
                         " Supported missing value schemes (case-sensitive): %s"
                         % (column_name, column_missing,
-                           list(_missing._MISSING_ENUMS))
+                           list(_missing.BUILTIN_MISSING))
                         )
 
         return directives
@@ -344,13 +332,10 @@ class MetadataReader:
     def _is_missing_directive(self, row):
         return len(row) > 0 and row[0].split(' ')[0] == '#q2:missing'
 
-    def _cast_column(self, series, column_types, missing_schemes, missing):
+    def _cast_column(self, series, column_types, missing_schemes):
         if series.name in missing_schemes:
             scheme = missing_schemes[series.name]
-            series, missing_mask = _missing.encode_and_get_missing_mask(
-                series, scheme
-            )
-            missing[series.name] = missing_mask
+            series = _missing.series_encode_missing(series, scheme)
         if series.name in column_types:
             if column_types[series.name] == 'numeric':
                 return self._to_numeric(series)
@@ -364,8 +349,17 @@ class MetadataReader:
                 return self._to_categorical(series)
 
     def _to_categorical(self, series):
-        series = series.mask(series.eq(''), np.nan)
-        return series.astype(CATEGORICAL_DTYPE)
+        # Replace empty strings with `None` to force the series to remain
+        # dtype=object (this only matters if the series consists solely of
+        # missing data). Replacing with np.nan and casting to dtype=object
+        # won't retain the correct dtype in the resulting dataframe
+        # (`DataFrame.apply` seems to force series consisting solely of np.nan
+        # to dtype=float64, even if dtype=object is specified.
+        #
+        # To replace a value with `None`, the following invocation of
+        # `Series.replace` must be used because `None` is a sentinel:
+        #     https://stackoverflow.com/a/17097397/3776794
+        return series.replace([''], [None])
 
     def _to_numeric(self, series):
         with pd.option_context('future.no_silent_downcasting', True):
@@ -421,7 +415,7 @@ class MetadataWriter:
             if self._non_default_missing(missing_directive):
                 tsv_writer.writerow(missing_directive)
 
-            df = md.to_dataframe(encode_missing=True).astype(object)
+            df = md.to_dataframe(encode_missing=True)
             df.fillna('', inplace=True)
             df = df.map(self._format)
             tsv_writer.writerows(df.itertuples(index=True))
