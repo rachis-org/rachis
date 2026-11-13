@@ -6,7 +6,7 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 from concurrent.futures import CancelledError, Future
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
@@ -17,6 +17,7 @@ from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
+from rachis.sdk.futures import as_future
 from rachis.sdk.proxy import contains_proxy
 
 
@@ -47,16 +48,14 @@ def cache_lookup_wrapper(frame):
 
 @contextmanager
 def mapped_invocation_wrapper(frame):
-    with TemporaryDirectory(dir=frame.ctx.cache.path) as directory:
-        frame.directory = Path(directory)
-        yield
-        return_frame = frame.for_return()
-        frame.results = return_frame()
-        # Enclosing wrappers can inspect the finalized invocation.
-        frame.outcomes = return_frame.outcomes
-        frame.provenance = return_frame.provenance
-        frame.transforms = return_frame.transforms
-        frame.output_types = return_frame.output_types
+    with ExitStack() as cleanup:
+        frame.workspace_cleanup = cleanup
+        frame.directory = Path(cleanup.enter_context(
+            TemporaryDirectory(dir=frame.ctx.cache.path)))
+        try:
+            yield
+        finally:
+            frame.ctx._defer_cleanup(cleanup)
 
 
 class Context(IContext):
@@ -97,7 +96,7 @@ class Context(IContext):
         if ctx is None:
             return
 
-        futures = ctx._scopes[-1]
+        futures, _ = ctx._scopes[-1]
         if isinstance(results, rachis.sdk.Results):
             futures.extend(rachis.sdk.Results._futures(results))
         elif isinstance(results, Future):
@@ -105,19 +104,22 @@ class Context(IContext):
 
     def __enter__(self):
         """Start a scope for action results tracked through this context."""
-        self._scopes.append([])
+        self._scopes.append(([], ExitStack()))
         return self
 
     def __exit__(self, exc_type, exc, traceback):
-        futures = self._scopes.pop()
+        futures, cleanup = self._scopes.pop()
         failure = None
-        for future in futures:
-            try:
-                error = future.exception()
-            except CancelledError as cancelled:
-                error = cancelled
-            if failure is None and error is not None:
-                failure = error
+        try:
+            for future in futures:
+                try:
+                    error = future.exception()
+                except CancelledError as cancelled:
+                    error = cancelled
+                if failure is None and error is not None:
+                    failure = error
+        finally:
+            cleanup.close()
 
         if exc is None and failure is not None:
             raise failure
@@ -127,12 +129,20 @@ class Context(IContext):
         state['_scopes'] = []
         return state
 
-    def _iter_batches_(self, cells):
-        for cell in cells:
-            yield (cell,)
+    def _defer_cleanup(self, cleanup):
+        """Keep resources alive for consumers outside nested scopes."""
+        owner = None
+        ctx = self
+        while ctx is not None:
+            if ctx._scopes:
+                _, owner = ctx._scopes[0]
+            ctx = ctx._parent
+        if owner is not None:
+            owner.callback(cleanup.pop_all().close)
 
-    def _dispatch_batch_(self, frame):
-        return frame()
+    def _dispatch_cells_(self, cells):
+        """Return a future for every invocation coordinate in cells."""
+        return {coord: as_future(cell) for coord, cell in cells.items()}
 
     def _check_cache(self, bound_arguments):
         plugin = self.action_obj.plugin_id.replace('_', '-')
