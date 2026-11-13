@@ -15,7 +15,7 @@ from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
-from rachis.sdk.futures import after_all, call_future
+from rachis.sdk.futures import call_future
 
 
 def _validate_collection(collection_order):
@@ -112,21 +112,6 @@ class Context(IContext):
             self._resources.close()
             self._resources = None
         self._entered = False
-
-    def _join(self, dependencies, combine):
-        if not self._defer_results:
-            return after_all(dependencies, combine)
-
-        resources = self._get_resources()
-
-        def run(*values):
-            with self.cache:
-                return combine(*values)
-
-        future = after_all(dependencies, run,
-                           run_local=resources.executor.submit)
-        resources.jobs.append(future)
-        return future
 
     def __getstate__(self):
         state = self.__dict__.copy()

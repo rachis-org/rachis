@@ -21,6 +21,7 @@ from typing import Mapping, TypedDict, Union
 from types import MappingProxyType
 
 import rachis.sdk
+from rachis.sdk.futures import join
 from rachis.sdk.iresult import IResult
 from rachis.sdk.proxy import (
     ProxyResult, ProxyResultCollection, ProxyResults, output_proxy,
@@ -257,8 +258,9 @@ def pipeline_wrapper(frame):
             provenance.add_input(name, value)
         return provenance
 
-    ready_provenance = ctx._join(
-        (result_future(value) for value in inputs.values()), record_inputs)
+    ready_provenance = join(
+        (result_future(value) for value in inputs.values()), record_inputs,
+        ctx=ctx)
 
     proxies = {}
     for output, (name, spec) in zip(outputs, frame.output_types.items()):
@@ -268,7 +270,8 @@ def pipeline_wrapper(frame):
             return _alias_pipeline_output(
                 name, qiime_type, resolved, provenance, ctx)
 
-        future = ctx._join((result_future(output), ready_provenance), alias)
+        future = join((result_future(output), ready_provenance), alias,
+                      ctx=ctx)
         if isinstance(output, ProxyResult):
             refined_type = _intersect_pipeline_output_type(
                 qiime_type, output.type, repr(name))
