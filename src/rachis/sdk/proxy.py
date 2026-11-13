@@ -7,7 +7,7 @@
 # ----------------------------------------------------------------------------
 
 from rachis.sdk.iresult import IResult
-from rachis.sdk.futures import after_all, completed_future
+from rachis.sdk.futures import after_all, completed_future, join
 
 import rachis.core.transform as transform
 from rachis.core.type.util import is_visualization_type, is_collection_type
@@ -68,9 +68,10 @@ class ProxyResult(Proxy, IResult):
             self._assert_alias_type_refines_realized_type(
                 qiime_type, self._qiime_type_)
 
-        future = ctx._join(
+        future = join(
             (result_future(self),),
-            lambda result: result._alias(name, provenance, ctx, qiime_type))
+            lambda result: result._alias(name, provenance, ctx, qiime_type),
+            ctx=ctx)
         alias_type = self._qiime_type_ if qiime_type is None else qiime_type
         return self._with_future(future, alias_type)
 

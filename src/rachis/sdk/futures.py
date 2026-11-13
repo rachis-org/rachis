@@ -26,6 +26,23 @@ def call_future(call):
         return future
 
 
+def join(dependencies, combine, *, ctx):
+    """Combine results locally and track deferred work in its invocation."""
+    if not ctx._defer_results:
+        return after_all(dependencies, combine)
+
+    resources = ctx._get_resources()
+
+    def run(*values):
+        with ctx.cache:
+            return combine(*values)
+
+    future = after_all(dependencies, run,
+                       run_local=resources.executor.submit)
+    resources.jobs.append(future)
+    return future
+
+
 def after_all(dependencies, combine, *, run_local=None):
     """Call combine with settled dependency values in their original order."""
     dependencies = tuple(dependencies)
