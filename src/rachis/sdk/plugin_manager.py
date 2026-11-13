@@ -103,6 +103,7 @@ class PluginManager:
         self.formats = {}
         self.views = {}
         self.artifact_classes = {}
+        self.axes = {}
         self._ff_to_sfdf = {}
         self.validators = {}
 
@@ -227,6 +228,11 @@ class PluginManager:
                 )
             else:
                 self.artifact_classes[name] = record
+
+        for key, axis in plugin.axes.items():
+            if key in self.axes:
+                raise ValueError(f'Duplicate axis registration for {key!r}')
+            self.axes[key] = axis
 
         for semantic_type, validation_object in plugin.validators.items():
             if semantic_type not in self.validators:
@@ -404,3 +410,17 @@ class PluginManager:
             "Semantic type %r is invalid, either because it doesn't have a "
             "compatible directory format, or because it's not registered."
             % semantic_type)
+
+    def get_axes(self, semantic_type):
+        return {
+            pattern: axis for (registered, pattern), axis in self.axes.items()
+            if semantic_type <= registered
+        }
+
+    def get_axis(self, semantic_type, pattern):
+        try:
+            return self.get_axes(semantic_type)[pattern.as_unbound()]
+        except KeyError:
+            raise ValueError(
+                f'{semantic_type!r} has no axis {pattern.axes!r}'
+            ) from None

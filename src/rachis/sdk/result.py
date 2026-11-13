@@ -18,6 +18,7 @@ import json
 from typing import Union, get_args, get_origin
 
 from rachis.core.format import report
+from rachis.core.axis import Coord, ForEach
 import rachis.plugin
 import rachis.sdk
 import rachis.core.type
@@ -457,7 +458,28 @@ class Artifact(Result):
 
         return artifact
 
-    def view(self, view_type):
+    def axes(self):
+        return [pattern.axes for pattern in
+                rachis.sdk.PluginManager().get_axes(self.type)]
+
+    def coords(self, *axes):
+        return iter(self._axis(ForEach[axes]))
+
+    def _axis(self, pattern):
+        axis = rachis.sdk.PluginManager().get_axis(self.type, pattern)
+        return axis(self._archiver.data_dir, mode='r')
+
+    def view(self, view_type, **coordinate):
+        """View the artifact or a cell at a registered coordinate.
+
+        Coordinate names must match a registered axis path in order.
+        """
+        if coordinate:
+            axis = self._axis(ForEach[tuple(coordinate)])
+            cell = axis[Coord(**coordinate)]
+            source = transform.ModelType.from_view_type(type(cell))
+            target = transform.ModelType.from_view_type(view_type)
+            return source.make_transformation(target)(cell)
         return self._view(view_type)
 
     def _view(self, view_type, recorder=None):

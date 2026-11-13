@@ -18,7 +18,7 @@ from rachis.core.testing.type import (IntSequence1, IntSequence2, IntSequence3,
                                       Mapping, FourInts, Kennel, Dog, Cat,
                                       SingleInt, C1, C2, C3, Foo, Bar, Baz,
                                       AscIntSequence, Squid, Octopus,
-                                      Cuttlefish)
+                                      Cuttlefish, AssignmentScores)
 
 from rachis.core.testing.format import (Cephalapod, IntSequenceDirectoryFormat,
                                         MappingDirectoryFormat,
@@ -124,6 +124,8 @@ class TestPluginManager(unittest.TestCase):
                                                  plugin=self.plugin),
             'Cuttlefish':     SemanticTypeRecord(semantic_type=Cuttlefish,
                                                  plugin=self.plugin),
+            'AssignmentScores': SemanticTypeRecord(
+                semantic_type=AssignmentScores, plugin=self.plugin),
         }
 
         self.assertEqual(types, exp)
