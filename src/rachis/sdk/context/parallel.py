@@ -6,12 +6,18 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+from concurrent.futures import Future
 from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from threading import Event, Thread
 from types import MappingProxyType
 
 from parsl.app.app import python_app
 
 from rachis.sdk.futures import call_future
+from rachis.sdk.mapped import (
+    BatchFrame, CellReference, CommittedCell, read_outcome,
+)
 from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
@@ -19,15 +25,74 @@ from rachis.sdk.parallel_config import PARALLEL_CONFIG
 from .base import Context, invocation_resources_wrapper
 
 
+@dataclass(frozen=True)
+class _CellDependency:
+    index: int
+    name: str
+
+
+@dataclass(frozen=True)
+class _ResultDependency:
+    index: int
+    selector: str | None
+
+
+class CellCommitWatcher:
+    """Settle each cell future as soon as its worker publishes an outcome."""
+
+    def __init__(self, pending):
+        self._pending = pending
+        self._stop = Event()
+        self._thread = Thread(target=self._watch, daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._stop.set()
+        self._thread.join()
+
+    def _watch(self):
+        pending = self._pending
+        try:
+            while pending and not self._stop.is_set():
+                for path, (cell, batch) in list(pending.items()):
+                    # Check completion before the file so a last-minute commit
+                    # can still satisfy its cell future.
+                    done = batch.done()
+                    try:
+                        if path.is_file():
+                            outcome = read_outcome(path)
+                            if isinstance(outcome, Exception):
+                                raise outcome
+                        elif done:
+                            batch.result()
+                            raise RuntimeError(
+                                f'Batch did not commit {path.name}')
+                        else:
+                            continue
+                    except Exception as error:
+                        cell.set_exception(error)
+                    else:
+                        cell.set_result(outcome)
+                    del pending[path]
+                if pending:
+                    self._stop.wait(0.01)
+        finally:
+            for cell, _ in pending.values():
+                if not cell.done():
+                    cell.set_exception(RuntimeError('Cell watcher closed'))
+
+
 def _map_arg(arg, futures):
     """ Map a proxy artifact for input to a parsl action
     """
     # We add this future to the list and create a new proxy with its index as
     # its future.
-    if isinstance(arg, Proxy):
+    if isinstance(arg, CellReference):
+        mapped = _CellDependency(len(futures), arg.name)
+        futures.append(arg.future)
+    elif isinstance(arg, Proxy):
         futures.append(arg._future_)
-        mapped = arg.__class__(len(futures) - 1, arg._selector_,
-                               getattr(arg, '_qiime_type_', None))
+        mapped = _ResultDependency(len(futures) - 1, arg._selector_)
     # We do the above but for all elements in the collection
     elif isinstance(arg, list):
         mapped = [_map_arg(proxy, futures) for proxy in arg]
@@ -48,9 +113,12 @@ def _unmap_arg(arg, inputs):
     """
     # We were hacky and set _future_ to be the index of this artifact in the
     # inputs list
-    if isinstance(arg, Proxy):
-        resolved_result = inputs[arg._future_]
-        unmapped = arg._get_element_(resolved_result)
+    if isinstance(arg, _CellDependency):
+        unmapped = CommittedCell(inputs[arg.index], arg.name)
+    elif isinstance(arg, _ResultDependency):
+        result = inputs[arg.index]
+        unmapped = (result if arg.selector is None
+                    else getattr(result, arg.selector))
     # If we got a collection of proxies as the input we were even hackier and
     # added each proxy to the inputs list individually while having a list of
     # their indices in the args.
@@ -83,20 +151,26 @@ def _contains_proxy(value):
 def parsl_worker_wrapper(frame, inputs):
     """Activate the cache and decode one app's resolved dependencies."""
     with frame.ctx.cache:
-        frame.bound_arguments = _unmap_arg(frame.bound_arguments, inputs)
+        for application in frame.cells if isinstance(frame, BatchFrame) else (
+                frame,):
+            application.bound_arguments = _unmap_arg(
+                application.bound_arguments, inputs)
         yield
 
 
 def _submit_app(frame, executor):
     futures = []
     worker_frame = frame.for_worker()
-    worker_frame.bound_arguments = _map_arg(frame.bound_arguments, futures)
+    for application in (worker_frame.cells
+                        if isinstance(worker_frame, BatchFrame)
+                        else (worker_frame,)):
+        application.bound_arguments = _map_arg(
+            application.bound_arguments, futures)
+        if isinstance(worker_frame, BatchFrame):
+            application.cell = replace(application.cell, inputs={})
 
     def worker(frame, inputs=()):
         with parsl_worker_wrapper(frame, inputs):
-            if frame.action._mapped:
-                # This worker evaluates the complete mapped invocation.
-                frame.ctx._defer_results = False
             return frame()
 
     frame.action._set_wrapper_name(worker, frame.action.id)
@@ -132,7 +206,7 @@ class ParallelContext(Context):
     def _dispatch_action_(self, frame):
         # Pipeline bodies keep coordinating locally, as before this refactor.
         # Their child applications still pass through their own outer stacks.
-        if frame.action._driver_apply:
+        if frame.action._driver_apply and not frame.action._mapped:
             self.execution_ctx = {'type': 'parsl', 'parsl_type': 'DFK'}
             return call_future(frame)
 
@@ -140,15 +214,44 @@ class ParallelContext(Context):
             raise ValueError('You must load a parallel config before '
                              'running in parallel.')
 
-        executor = self.action_executor_mapping.get(
-            frame.action.plugin_id, {}).get(frame.action.id, 'default')
+        executor = self._get_executor(frame.action)
         self.execution_ctx = {
             'type': 'parsl',
             'parsl_type': self.executor_name_type_mapping[executor],
         }
+
+        if frame.action._driver_apply:
+            return call_future(frame)
 
         # Parsl can schedule against upstream futures. The worker validates
         # and coerces the arguments once those futures have resolved.
         future = _submit_app(frame, executor)
         self._get_resources().jobs.append(future)
         return future
+
+    def _get_executor(self, action):
+        return self.action_executor_mapping.get(
+            action.plugin_id, {}).get(action.id, 'default')
+
+    def _dispatch_cells_(self, cells):
+        if not cells:
+            return {}
+        resources = self._get_resources()
+        futures = {coord: Future() for coord in cells}
+        pending = {}
+        try:
+            for batch in self._batches(cells):
+                frame = BatchFrame(cells[coord] for coord in batch)
+                job = _submit_app(frame, self._get_executor(frame.action))
+                resources.jobs.append(job)
+                pending.update((cells[coord].cell.path, (futures[coord], job))
+                               for coord in batch)
+        finally:
+            if pending:
+                watcher = CellCommitWatcher(pending)
+                resources.callback(watcher.close)
+        return futures
+
+    def _batches(self, cells):
+        for coord in cells:
+            yield (coord,)

@@ -39,6 +39,7 @@ class FramePhase(Enum):
     OUTER_APPLY = 'outer_apply'
     INNER_BIND = 'inner_bind'
     INNER_APPLY = 'inner_apply'
+    BATCH = 'batch'
 
 
 class Frame:
@@ -63,6 +64,8 @@ class Frame:
                 return self.action._inner_bind(self)
             case FramePhase.INNER_APPLY:
                 return self.action._inner_apply(self)
+            case FramePhase.BATCH:
+                return self.action._run_batch(self)
         raise ValueError(f'Unknown frame phase: {self.phase!r}')
 
     @cached_property

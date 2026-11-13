@@ -10,6 +10,7 @@ import csv
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from itertools import chain, product
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -28,7 +29,7 @@ from rachis.sdk.action import (
 )
 from rachis.sdk.plugin_manager import PluginManager
 from rachis.sdk.futures import join
-from rachis.sdk.proxy import ProxyResults, result_future
+from rachis.sdk.proxy import ProxyArtifact, ProxyResults, result_future
 from rachis.sdk.result import Artifact
 from rachis.sdk.results import Results
 
@@ -41,6 +42,30 @@ class ArtifactCell:
 
     def load(self):
         return self.artifact._axis(self.pattern)[self.coord]
+
+
+class PendingCell:
+    """A prospective input whose presence is determined at execution."""
+
+
+@dataclass(frozen=True)
+class CommittedCell:
+    outcome: object
+    name: str
+
+    def resolve(self):
+        if self.outcome is None:
+            return None
+        return self.outcome.outputs[self.name]
+
+
+@dataclass(frozen=True)
+class CellReference(PendingCell):
+    future: object
+    name: str
+
+    def resolve(self):
+        return CommittedCell(self.future.result(), self.name).resolve()
 
 
 @dataclass(frozen=True)
@@ -88,6 +113,9 @@ class CellFrame(Frame):
         self.coordinate = next(iter(cell.outputs.values()))
         self.axes = axes
 
+    def for_worker(self):
+        return CellFrame(self, self.cell, self.axes)
+
     def __call__(self):
         self.workspace = Path(tempfile.mkdtemp(dir=self.cell.path.parent))
         keep = False
@@ -101,6 +129,71 @@ class CellFrame(Frame):
         finally:
             if not keep:
                 shutil.rmtree(self.workspace)
+
+
+class BatchFrame(Frame):
+    """Convenience frame for a backend running several cells in one worker."""
+
+    def __init__(self, cells):
+        self.cells = tuple(cells)
+        first = self.cells[0]
+        super().__init__(first.action, first.ctx, {}, phase=FramePhase.BATCH)
+
+    def for_worker(self):
+        return BatchFrame(cell.for_worker() for cell in self.cells)
+
+
+def read_outcome(path):
+    with path.open('rb') as stream:
+        return dill.load(stream)
+
+
+def commit_outcome(frame, outcome):
+    """Publish a cell result atomically for readers outside the batch."""
+    path = frame.cell.path
+    with tempfile.TemporaryDirectory(dir=path.parent) as directory:
+        manifest = Path(directory) / 'outcome'
+        with manifest.open('wb') as stream:
+            dill.dump(outcome, stream)
+        try:
+            os.link(manifest, path)
+        except FileExistsError:
+            if isinstance(outcome, CellOutcome):
+                shutil.rmtree(frame.workspace)
+
+
+class MappedProxyArtifact(ProxyArtifact):
+    def __init__(self, future, selector, qiime_type, pattern, cells):
+        super().__init__(future, selector, qiime_type)
+        self._pattern = pattern
+        self._cells = cells
+
+    def _mapped_cells(self, pattern):
+        if self._future_.done():
+            return None
+        if self._pattern.axes == pattern.axes:
+            return self._cells
+        return None
+
+    def _with_future(self, future, qiime_type):
+        return type(self)(future, None, qiime_type, self._pattern, self._cells)
+
+
+class MappedProxyResults(ProxyResults):
+    def __init__(self, future, signature, patterns, cells, readiness):
+        super().__init__(future, signature)
+        self._patterns = patterns
+        self._cells_by_output = {
+            name: {tuple(cell.outputs[name].values()):
+                   CellReference(readiness[coord], name)
+                   for coord, cell in cells.items()}
+            for name in patterns
+        }
+
+    def _create_proxy(self, selector):
+        return MappedProxyArtifact(
+            self._future_, selector, self._signature_[selector].qiime_type,
+            self._patterns[selector], self._cells_by_output[selector])
 
 
 class MappedProvenance(ActionProvenanceCapture):
@@ -123,6 +216,10 @@ def _input_index(value, pattern):
         if value < 0:
             raise ValueError('A mapped integer must be nonnegative')
         return {(i,): i for i in range(value)}
+    if hasattr(value, '_mapped_cells'):
+        cells = value._mapped_cells(pattern)
+        if cells is not None:
+            return cells
     artifact = value.result()
     if not isinstance(artifact, Artifact):
         raise TypeError('ForEach requires an artifact with registered axes')
@@ -180,7 +277,11 @@ def _group_plan(signature, inputs, rules):
         present = {name: value is not None for name, value in selected.items()}
         if not _includes(rules, present):
             continue
-        _check_required(rules, present, key)
+        # Check concrete groups before dispatch. Prospective groups are checked
+        # again once their input outcomes have settled.
+        if not any(isinstance(value, PendingCell)
+                   for value in selected.values()):
+            _check_required(rules, present, key)
         plan.append((dict(zip(bindings, key)), selected))
     return plan
 
@@ -246,7 +347,7 @@ def _prepare_cell_views(frame):
     for name, spec in signature.signature_order.items():
         value = frame.bound_arguments[name]
         if name in signature.input_patterns:
-            if isinstance(value, ArtifactCell):
+            if isinstance(value, (ArtifactCell, StoredView)):
                 value = value.load()
             if value is not None:
                 value = _as_view(
@@ -371,6 +472,7 @@ class MappedMethod(Method):
     """A method that invokes its callable once per aligned coordinate."""
 
     _mapped = True
+    _driver_apply = True
     outer_apply_wrappers = ()
     inner_apply_wrappers = (
         cell_provenance_wrapper,
@@ -399,21 +501,39 @@ class MappedMethod(Method):
             raise ValueError('Cell dispatch must return each coordinate once')
 
         def assemble(inputs, *outcomes):
+            signature = frame.action.signature
             frame.bound_arguments = inputs
             frame.outcomes = dict(zip(cells, outcomes, strict=True))
             prepare_signature(frame)
+            # A prospective coverage check can remain even for an empty plan.
+            for rules in _groups(signature):
+                _group_plan(signature, inputs, rules)
             _prepare_mapped_provenance(frame)
             return _publish_outputs(frame, _write_outputs(frame))
 
+        output_types = frame.output_types
         future = join(
             (result_future(frame.bound_arguments),
              *(futures[coord] for coord in cells)), assemble, ctx=ctx)
         if ctx._defer_results:
-            frame.results = ProxyResults(future, frame.output_types)
+            frame.results = MappedProxyResults(
+                future, output_types, self.signature.output_patterns,
+                frame.cells, futures)
         else:
             frame.results = future.result()
 
     def _inner_apply(self, frame):
+        inputs = {
+            name: value.resolve()
+            if isinstance(value, (PendingCell, CommittedCell)) else value
+            for name, value in frame.bound_arguments.items()
+        }
+        for rules in _groups(self.signature):
+            present = {name: inputs[name] is not None for name in rules}
+            if not _includes(rules, present):
+                return None
+            _check_required(rules, present, frame.coordinate)
+        frame.bound_arguments = inputs
         wrappers = chain(frame.ctx.mapped_inner_apply_wrappers,
                          self.inner_apply_wrappers)
         with ExitStack() as stack:
@@ -421,3 +541,13 @@ class MappedMethod(Method):
                 stack.enter_context(wrapper(frame))
             frame.results = self._callable(**frame.call_kwargs)
         return frame.results
+
+    def _run_batch(self, frame):
+        for cell in frame.cells:
+            if cell.cell.path.is_file():
+                continue
+            try:
+                outcome = cell()
+            except Exception as error:
+                outcome = error
+            commit_outcome(cell, outcome)
