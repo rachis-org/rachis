@@ -34,12 +34,13 @@ from .format import (
     ExportableOnlyFormat
 )
 from .mapped_axis import (
-    SampleMappingAxis, SampleMagMappingAxis, SampleMagMarginAxis,
+    SampleMappingAxis, AssignmentScoreAxis, StudentScoresAxis,
 )
 
 from .type import (IntSequence1, IntSequence2, IntSequence3, Mapping, FourInts,
                    SingleInt, Kennel, Dog, Cat, C1, C2, C3, Foo, Bar, Baz,
-                   AscIntSequence, Squid, Octopus, Cuttlefish, MagMapping)
+                   AscIntSequence, Squid, Octopus, Cuttlefish,
+                   AssignmentScores)
 from .method import (concatenate_ints, split_ints, merge_mappings,
                      identity_with_metadata, identity_with_metadata_column,
                      identity_with_categorical_metadata_column,
@@ -117,7 +118,7 @@ dummy_plugin.register_semantic_types(IntSequence1, IntSequence2, IntSequence3,
                                      Mapping, FourInts, Kennel, Dog, Cat,
                                      SingleInt, C1, C2, C3, Foo, Bar, Baz,
                                      AscIntSequence, Squid, Octopus,
-                                     Cuttlefish, MagMapping)
+                                     Cuttlefish, AssignmentScores)
 
 # Register formats
 dummy_plugin.register_formats(
@@ -196,11 +197,11 @@ dummy_plugin.register_artifact_class(
     axes={ForEach['sample']: SampleMappingAxis},
 )
 dummy_plugin.register_artifact_class(
-    MagMapping,
+    AssignmentScores,
     directory_format=MappingDirectoryFormat,
     axes={
-        ForEach['sample']: SampleMagMarginAxis,
-        ForEach['sample', 'mag']: SampleMagMappingAxis,
+        ForEach['student']: StudentScoresAxis,
+        ForEach['student', 'assignment']: AssignmentScoreAxis,
     },
 )
 dummy_plugin.register_semantic_type_to_format(

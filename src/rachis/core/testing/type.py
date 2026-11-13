@@ -14,7 +14,7 @@ IntSequence2 = plugin.SemanticType('IntSequence2')
 IntSequence3 = plugin.SemanticType('IntSequence3')
 AscIntSequence = plugin.SemanticType('AscIntSequence')
 Mapping = plugin.SemanticType('Mapping')
-MagMapping = plugin.SemanticType('MagMapping')
+AssignmentScores = plugin.SemanticType('AssignmentScores')
 FourInts = plugin.SemanticType('FourInts')
 SingleInt = plugin.SemanticType('SingleInt')
 

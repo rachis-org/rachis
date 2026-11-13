@@ -63,7 +63,7 @@ import types
 from typing import Any, Optional, Union
 
 from rachis.core.cite import Citations, CitationRecord
-from rachis.core.axis import ForEach
+from rachis.core.axis import ForEach, validate_axis_protocol
 import rachis.sdk
 import rachis.core.type.grammar as grammar
 from rachis.core.validate import ValidationObject
@@ -581,7 +581,8 @@ class Plugin:
           ``mode='r'``, iterates over coordinates, and returns a native view
           when indexed by a coordinate. Its ``write(chunks)`` class method
           accepts ``(Coord, view)`` pairs and returns a directory format.
-          An optional ``cell_type`` declares the view expected by the writer.
+          Annotate the coordinate and view types consistently across these
+          methods.
 
         Returns
         -------
@@ -618,13 +619,10 @@ class Plugin:
             raise TypeError('Axes require a concrete semantic type')
         registrations = {}
         for pattern, axis in axes.items():
-            if not isinstance(pattern, ForEach) or pattern != pattern.axis_key:
+            if (not isinstance(pattern, ForEach)
+                    or pattern != pattern.as_unbound()):
                 raise TypeError('Axis registration requires plain axis names')
-            if not isinstance(axis, type) or not all(
-                callable(getattr(axis, method, None))
-                for method in ('__iter__', '__getitem__', 'write')
-            ):
-                raise TypeError(f'{axis!r} does not implement the axis API')
+            validate_axis_protocol(axis)
             key = (semantic_type, pattern)
             if key in self.axes:
                 raise ValueError(f'Axis {pattern.axes!r} already registered')
