@@ -61,6 +61,9 @@ def _submit_app(frame, executor):
     def worker(frame, inputs=()):
         with frame.ctx.cache:
             frame.bound_arguments = _unmap_arguments(frame, inputs)
+            if frame.action._mapped:
+                # This worker evaluates the complete mapped invocation.
+                return Context._dispatch_action_(frame.ctx, frame)
             return frame()
 
     frame.action._set_wrapper_name(worker, frame.action.id)
