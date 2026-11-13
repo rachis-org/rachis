@@ -12,10 +12,12 @@ import copy
 import itertools
 import tempfile
 import typing
+import types
 
 import rachis.sdk
 import rachis.core.type as qtype
 from rachis.core.archive.provenance import MetadataInfo
+from rachis.core.axis import ForEach
 from .grammar import TypeExp, UnionExp
 from .meta import TypeVarExp
 from .collection import List, Set, Collection
@@ -95,6 +97,8 @@ class ParameterSpec(ImmutableBase):
 
 class PipelineSignature:
     builtin_args = ('ctx',)
+    is_mapped = False
+    supports_mapping = False
 
     def __init__(self, callable, inputs, parameters, outputs,
                  input_descriptions=None, parameter_descriptions=None,
@@ -145,6 +149,85 @@ class PipelineSignature:
         self.parameters = parameters
         self.outputs = outputs
         self.signature_order = signature_order
+        self._configure_mapping()
+
+    def _configure_mapping(self):
+        self.input_patterns = {}
+        self.output_patterns = {}
+        self.input_coverage = {}
+        for specs, patterns, output in (
+            (self.signature_order, self.input_patterns, False),
+            (self.outputs, self.output_patterns, True),
+        ):
+            for name, spec in specs.items():
+                view = spec.view_type
+                if typing.get_origin(view) is not typing.Annotated:
+                    continue
+                view, *metadata = typing.get_args(view)
+                found = [m for m in metadata if isinstance(m, ForEach)]
+                if not found:
+                    continue
+                if not self.supports_mapping or len(found) != 1:
+                    raise TypeError('Use one ForEach per mapped method view')
+                pattern = patterns[name] = found[0].normalize()
+                rules = set(pattern.coverage)
+                if output:
+                    if rules != {'matched'}:
+                        raise TypeError(
+                            'Output axis coverage must be matched')
+                else:
+                    if len(rules) != 1:
+                        raise TypeError(
+                            'A composite input axis needs uniform coverage')
+                    rule = self.input_coverage[name] = rules.pop()
+                    if (rule == 'optional' and
+                            type(None) not in typing.get_args(view)):
+                        raise TypeError(f'Optional input {name!r} needs None')
+                    if name in self.parameters and (
+                        view is not int or len(pattern.axes) != 1
+                    ):
+                        raise TypeError(
+                            'A mapped parameter requires one integer axis')
+                specs[name] = spec = spec.duplicate(view_type=view)
+                if name in self.inputs and not output:
+                    self.inputs[name] = spec
+                if name in self.parameters and not output:
+                    self.parameters[name] = spec
+
+        self.is_mapped = bool(self.input_patterns or self.output_patterns)
+        if not self.is_mapped:
+            return
+        for name, spec in self.parameters.items():
+            if contains_generic_base(CaptureHolder, spec.view_type):
+                raise TypeError(
+                    f'Mapped methods do not support CaptureHolder '
+                    f'parameters: {name!r}')
+        bindings = set()
+        groups = set()
+        for pattern in self.input_patterns.values():
+            group = frozenset(pattern.bindings)
+            if group not in groups and bindings.intersection(group):
+                raise TypeError(
+                    'Mapped inputs require shared or disjoint axis patterns')
+            groups.add(group)
+            bindings.update(group)
+        if not bindings or self.output_patterns.keys() != self.outputs.keys():
+            raise TypeError('Mapped methods need mapped inputs and outputs')
+        for name, pattern in self.output_patterns.items():
+            output_bindings = set(pattern.bindings)
+            if output_bindings != bindings:
+                missing = sorted(bindings - output_bindings)
+                unknown = sorted(output_bindings - bindings)
+                raise TypeError(
+                    f'Output {name!r} must bind all mapped axes. '
+                    f'Missing bindings: {missing!r}. '
+                    f'Unknown bindings: {unknown!r}.'
+                )
+            view = self.outputs[name].view_type
+            if typing.get_origin(view) in (typing.Union, types.UnionType):
+                args = typing.get_args(view)
+                if len(args) != 2 or type(None) not in args:
+                    raise TypeError('Mapped output unions must be optional')
 
     def _parse_signature(self, callable, inputs, parameters, outputs,
                          input_descriptions=None, parameter_descriptions=None,
@@ -169,6 +252,11 @@ class PipelineSignature:
         annotated_parameters = collections.OrderedDict()
         annotated_outputs = collections.OrderedDict()
         signature_order = collections.OrderedDict()
+        annotations = callable.__annotations__
+        if self.supports_mapping and any(
+            isinstance(value, str) for value in annotations.values()
+        ):
+            annotations = typing.get_type_hints(callable, include_extras=True)
 
         for name, parameter in inspect.signature(callable).parameters.items():
             if (parameter.kind == parameter.VAR_POSITIONAL or
@@ -202,7 +290,7 @@ class PipelineSignature:
 
             view_type = ParameterSpec.NOVALUE
             if parameter.annotation is not parameter.empty:
-                view_type = parameter.annotation
+                view_type = annotations.get(name, parameter.annotation)
             default = ParameterSpec.NOVALUE
             if parameter.default is not parameter.empty:
                 default = parameter.default
@@ -231,9 +319,8 @@ class PipelineSignature:
             raise TypeError("Callable does not have parameter(s): %r"
                             % (list(inputs) + list(parameters)))
 
-        if 'return' in callable.__annotations__:
-            output_views = rachis.core.util.tuplize(
-                callable.__annotations__['return'])
+        if 'return' in annotations:
+            output_views = rachis.core.util.tuplize(annotations['return'])
 
             if len(output_views) != len(outputs):
                 raise TypeError("Number of registered outputs (%r) does not"
@@ -807,6 +894,7 @@ class PipelineSignature:
 
 class MethodSignature(PipelineSignature):
     builtin_args = ()
+    supports_mapping = True
 
     def _assert_valid_outputs(self, outputs):
         super()._assert_valid_outputs(outputs)

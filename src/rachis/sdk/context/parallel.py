@@ -94,6 +94,9 @@ def _submit_app(frame, executor):
 
     def worker(frame, inputs=()):
         with parsl_worker_wrapper(frame, inputs):
+            if frame.action._mapped:
+                # This worker evaluates the complete mapped invocation.
+                frame.ctx._defer_results = False
             return frame()
 
     frame.action._set_wrapper_name(worker, frame.action.id)
@@ -103,7 +106,8 @@ def _submit_app(frame, executor):
 
 class ParallelContext(Context):
     execution_ctx = MappingProxyType({'type': 'parsl'})
-    outer_wrappers = (invocation_resources_wrapper, *Context.outer_wrappers)
+    outer_bind_wrappers = (invocation_resources_wrapper,
+                           *Context.outer_bind_wrappers)
     _defer_results = True
 
     def __init__(self, action_obj, parent=None):

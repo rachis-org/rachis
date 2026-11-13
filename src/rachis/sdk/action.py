@@ -37,6 +37,8 @@ from rachis.core.cite import CitationRecord
 
 class FramePhase(Enum):
     OUTER_APPLY = 'outer_apply'
+    INNER_BIND = 'inner_bind'
+    INNER_APPLY = 'inner_apply'
 
 
 class Frame:
@@ -57,6 +59,10 @@ class Frame:
         match self.phase:
             case FramePhase.OUTER_APPLY:
                 return self.action._outer_apply(self)
+            case FramePhase.INNER_BIND:
+                return self.action._inner_bind(self)
+            case FramePhase.INNER_APPLY:
+                return self.action._inner_apply(self)
         raise ValueError(f'Unknown frame phase: {self.phase!r}')
 
     @cached_property
@@ -82,12 +88,16 @@ def deprecation_wrapper(frame):
     yield
 
 
-@contextmanager
-def signature_wrapper(frame):
+def prepare_signature(frame):
     signature = frame.action.signature
     signature.check_types(**frame.bound_arguments)
     frame.output_types = signature.solve_output(**frame.bound_arguments)
     frame.call_kwargs = signature.coerce_user_input(**frame.bound_arguments)
+
+
+@contextmanager
+def signature_wrapper(frame):
+    prepare_signature(frame)
     yield
 
 
@@ -323,11 +333,12 @@ class Action:
     type = 'action'
     _ProvCaptureCls = archive.ActionProvenanceCapture
     _driver_apply = False
+    _mapped = False
 
     # Outer wrappers run where an application is requested. Inner wrappers run
     # where its callable is evaluated. Context wrappers enclose both stacks.
-    outer_wrappers = (deprecation_wrapper,)
-    inner_wrappers = (
+    outer_bind_wrappers = (deprecation_wrapper,)
+    inner_apply_wrappers = (
         signature_wrapper,
         provenance_wrapper,
         checksum_wrapper,
@@ -474,7 +485,8 @@ class Action:
             frame = Frame(self, ctx, bound.arguments)
 
             with ExitStack() as wrappers:
-                for wrapper in chain(ctx.outer_wrappers, self.outer_wrappers):
+                for wrapper in chain(ctx.outer_bind_wrappers,
+                                     self.outer_bind_wrappers):
                     wrappers.enter_context(wrapper(frame))
                 if frame.results is None:
                     wrappers.enter_context(dispatch_result_wrapper(
@@ -489,11 +501,13 @@ class Action:
         return bound_callable
 
     def _outer_apply(self, frame):
-        return self._inner_apply(frame)
+        frame.phase = FramePhase.INNER_APPLY
+        return frame()
 
     def _inner_apply(self, frame):
         """Execute a prepared application in its execution Context."""
-        wrappers = chain(frame.ctx.inner_wrappers, self.inner_wrappers)
+        wrappers = chain(frame.ctx.inner_apply_wrappers,
+                         self.inner_apply_wrappers)
         with ExitStack() as stack:
             for wrapper in wrappers:
                 stack.enter_context(wrapper(frame))
@@ -602,8 +616,8 @@ class Method(Action):
 
     type = 'method'
 
-    inner_wrappers = (
-        *Action.inner_wrappers,
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
         capture_wrapper,
         input_transform_wrapper,
         method_wrapper,
@@ -631,8 +645,12 @@ class Method(Action):
                                           outputs, input_descriptions,
                                           parameter_descriptions,
                                           output_descriptions)
-        return super()._init(callable, signature, plugin_id, name, description,
-                             citations, deprecated, migrated, examples)
+        if cls is Method and signature.is_mapped:
+            from rachis.sdk.mapped import MappedMethod
+            cls = MappedMethod
+        return super(Method, cls)._init(
+            callable, signature, plugin_id, name, description, citations,
+            deprecated, migrated, examples)
 
 
 class Visualizer(Action):
@@ -640,8 +658,8 @@ class Visualizer(Action):
 
     type = 'visualizer'
 
-    inner_wrappers = (
-        *Action.inner_wrappers,
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
         capture_wrapper,
         input_transform_wrapper,
         visualization_wrapper,
@@ -664,8 +682,8 @@ class Pipeline(Action):
     _ProvCaptureCls = archive.PipelineProvenanceCapture
     _driver_apply = True
 
-    inner_wrappers = (
-        *Action.inner_wrappers,
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
         pipeline_input_wrapper,
         pipeline_wrapper,
         capture_wrapper,

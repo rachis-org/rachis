@@ -7,6 +7,8 @@
 # ----------------------------------------------------------------------------
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import MappingProxyType
 import warnings
 
@@ -66,9 +68,24 @@ class InvocationResources(ExitStack):
         super().close()
 
 
+@contextmanager
+def mapped_invocation_wrapper(frame):
+    ctx = frame.ctx
+    directory = TemporaryDirectory(dir=ctx.cache.path)
+    if ctx._defer_results:
+        frame.directory = Path(ctx._get_resources().enter_context(directory))
+        yield
+    else:
+        with directory as path:
+            frame.directory = Path(path)
+            yield
+
+
 class Context(IContext):
-    outer_wrappers = (cache_lookup_wrapper,)
-    inner_wrappers = ()
+    outer_bind_wrappers = (cache_lookup_wrapper,)
+    inner_apply_wrappers = ()
+    outer_apply_wrappers = (mapped_invocation_wrapper,)
+    mapped_inner_apply_wrappers = ()
     execution_ctx = MappingProxyType({'type': 'synchronous'})
     _defer_results = False
     _resources = None
@@ -117,6 +134,10 @@ class Context(IContext):
         state = self.__dict__.copy()
         state.pop('_resources', None)
         return state
+
+    def _dispatch_cells_(self, cells):
+        """Return a future for every invocation coordinate in cells."""
+        return {coord: call_future(cell) for coord, cell in cells.items()}
 
     def _check_cache(self, inputs):
         plugin = self.action_obj.plugin_id.replace('_', '-')

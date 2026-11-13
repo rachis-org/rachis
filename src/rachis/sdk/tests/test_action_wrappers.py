@@ -48,8 +48,8 @@ class TestActionWrappers(unittest.TestCase):
             events.append('inner-exit')
 
         class ObservedContext(Context):
-            outer_wrappers = (outer,)
-            inner_wrappers = (inner,)
+            outer_bind_wrappers = (outer,)
+            inner_apply_wrappers = (inner,)
 
         action = self.plugin.methods['no_input_method']
         call = action._outer_bind(lambda: ObservedContext(action))
@@ -69,7 +69,7 @@ class TestActionWrappers(unittest.TestCase):
             frame.results = replacement
 
         class ReplacingContext(Context):
-            outer_wrappers = (replace_results,)
+            outer_bind_wrappers = (replace_results,)
 
         action = self.plugin.methods['no_input_method']
         call = action._outer_bind(lambda: ReplacingContext(action))
@@ -84,7 +84,7 @@ class TestActionWrappers(unittest.TestCase):
             observed.append(frame.results)
 
         class ObservedContext(Context):
-            outer_wrappers = (observe, *Context.outer_wrappers)
+            outer_bind_wrappers = (observe, *Context.outer_bind_wrappers)
 
             def __init__(self, action, parent, *, expect_dispatch):
                 super().__init__(action, parent=parent)
@@ -105,7 +105,7 @@ class TestActionWrappers(unittest.TestCase):
                 self.assertTrue(miss.dispatched)
 
                 hit = ObservedContext(action, Context(), expect_dispatch=False)
-                with patch.object(action, 'outer_wrappers', (observe,)):
+                with patch.object(action, 'outer_bind_wrappers', (observe,)):
                     second = action._outer_bind(lambda: hit)()
 
                 self.assertEqual(first.out.uuid, second.out.uuid)
@@ -135,8 +135,8 @@ class TestActionWrappers(unittest.TestCase):
             events.append('inner-exit')
 
         class DeferredContext(Context):
-            outer_wrappers = (outer,)
-            inner_wrappers = (inner,)
+            outer_bind_wrappers = (outer,)
+            inner_apply_wrappers = (inner,)
             _defer_results = True
 
             def _dispatch_action_(self, frame):
