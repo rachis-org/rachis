@@ -470,6 +470,11 @@ class Artifact(Result):
         return axis(self._archiver.data_dir, mode='r')
 
     def view(self, view_type, **coordinate):
+        """View the artifact or the most specific registered coordinate cell.
+
+        Extra coordinate names can be supplied when viewing along a subset of
+        axes. Equally specific matches are ambiguous.
+        """
         if coordinate:
             axes = self.axes()
             matches = [names for names in axes
