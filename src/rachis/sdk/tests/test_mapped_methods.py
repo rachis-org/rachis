@@ -182,6 +182,54 @@ def test_parsl_resolves_a_coordinate_through_the_dag_before_batch_exit():
     assert result.view(dict) == {'s1': '7'}
 
 
+def test_pipeline_alias_preserves_pending_mapped_cells():
+    plugin = get_dummy_plugin()
+    pipeline = plugin.pipelines['mapped_sample_pipeline']
+    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
+    consumer_committed = Event()
+    inner_apply = MappedMethod._inner_apply
+
+    def return_mapped(ctx, data):
+        retained, _ = ctx.get_action('dummy_plugin', 'filter_samples')(data)
+        return retained
+
+    def batches(ctx, cells):
+        if ctx.action_obj.id == 'filter_samples':
+            yield tuple(cells)
+        else:
+            for coord in cells:
+                yield (coord,)
+
+    def observe(self, frame):
+        if self.id == 'filter_samples' and frame.coordinate.sample == 's2':
+            assert consumer_committed.wait(timeout=10)
+        return inner_apply(self, frame)
+
+    with TemporaryDirectory() as run_dir:
+        config = Config(
+            executors=[SerializingExecutor(label='default', max_threads=2)],
+            run_dir=run_dir,
+        )
+        with (patch.object(pipeline, '_callable', return_mapped),
+              patch.object(ParallelContext, '_batches', batches),
+              patch.object(MappedMethod, '_inner_apply', observe),
+              ParallelConfig(config), ParallelContext(None) as ctx):
+            first = ctx.get_action('dummy_plugin', pipeline.id)
+            increment = ctx.get_action('dummy_plugin', 'increment_samples')
+            alias = first(data).output
+            assert not alias._future_.done()
+            result = increment(alias, 1).output
+            try:
+                cell = result._cells['s1',].future
+                assert cell.result(timeout=5).outputs['output'].load() == '5'
+                assert not alias._future_.done()
+            finally:
+                consumer_committed.set()
+            assert result.view(dict) == {'s1': '5', 's2': '6'}
+            assert result._archiver.provenance_dir.joinpath(
+                'artifacts', str(alias.uuid)).is_dir()
+
+
 def test_parsl_resolves_nested_axis_prefixes_before_batch_exit():
     pipeline = get_dummy_plugin().pipelines['mapped_scores_pipeline']
     data = Artifact.import_data('AssignmentScores', {

@@ -16,7 +16,8 @@ from parsl.app.app import python_app
 
 from rachis.sdk.futures import call_future
 from rachis.sdk.mapped import (
-    BatchFrame, CellPrefix, CellReference, CommittedCell, read_outcome,
+    BatchFrame, CellFrame, CellPrefix, CellReference, CommittedCell,
+    read_outcome,
 )
 from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy
@@ -83,10 +84,7 @@ class CellCommitWatcher:
 
 
 def _map_arg(arg, futures):
-    """ Map a proxy artifact for input to a parsl action
-    """
-    # We add this future to the list and create a new proxy with its index as
-    # its future.
+    """Encode references as indexes into the app's dependency list."""
     if isinstance(arg, CellReference):
         mapped = _CellDependency(len(futures), arg.name)
         futures.append(arg.future)
@@ -96,7 +94,6 @@ def _map_arg(arg, futures):
     elif isinstance(arg, Proxy):
         futures.append(arg._future_)
         mapped = _ResultDependency(len(futures) - 1, arg._selector_)
-    # We do the above but for all elements in the collection
     elif isinstance(arg, list):
         mapped = [_map_arg(proxy, futures) for proxy in arg]
     elif isinstance(arg, ResultCollection):
@@ -104,7 +101,6 @@ def _map_arg(arg, futures):
             key: _map_arg(value, futures) for key, value in arg.items()})
     elif isinstance(arg, dict):
         mapped = {key: _map_arg(proxy, futures) for key, proxy in arg.items()}
-    # We just have a real artifact and don't need to map
     else:
         mapped = arg
 
@@ -112,10 +108,7 @@ def _map_arg(arg, futures):
 
 
 def _unmap_arg(arg, inputs):
-    """ Unmap a proxy artifact given to a parsl action
-    """
-    # We were hacky and set _future_ to be the index of this artifact in the
-    # inputs list
+    """Select the worker's inputs from Parsl's resolved dependencies."""
     if isinstance(arg, _CellDependency):
         unmapped = CommittedCell(inputs[arg.index], arg.name)
     elif isinstance(arg, CellPrefix):
@@ -125,9 +118,6 @@ def _unmap_arg(arg, inputs):
         result = inputs[arg.index]
         unmapped = (result if arg.selector is None
                     else getattr(result, arg.selector))
-    # If we got a collection of proxies as the input we were even hackier and
-    # added each proxy to the inputs list individually while having a list of
-    # their indices in the args.
     elif isinstance(arg, list):
         unmapped = [_unmap_arg(proxy, inputs) for proxy in arg]
     elif isinstance(arg, ResultCollection):
@@ -136,7 +126,6 @@ def _unmap_arg(arg, inputs):
     elif isinstance(arg, dict):
         unmapped = {key: _unmap_arg(proxy, inputs) for
                     key, proxy in arg.items()}
-    # We didn't have a proxy at all
     else:
         unmapped = arg
 
@@ -242,12 +231,18 @@ class ParallelContext(Context):
     def _dispatch_cells_(self, cells):
         if not cells:
             return {}
+        batches = tuple(tuple(batch) for batch in self._batches(cells))
+        scheduled = [coord for batch in batches for coord in batch]
+        if len(scheduled) != len(cells) or set(scheduled) != cells.keys():
+            raise ValueError('Batches must partition the planned cells')
         resources = self._get_resources()
         futures = {coord: Future() for coord in cells}
         pending = {}
         try:
-            for batch in self._batches(cells):
-                frame = BatchFrame(cells[coord] for coord in batch)
+            for batch in batches:
+                if not batch:
+                    continue
+                frame = CellFrame.for_batch(cells[coord] for coord in batch)
                 job = _submit_app(frame, self._get_executor(frame.action))
                 resources.jobs.append(job)
                 pending.update((cells[coord].cell.path, (futures[coord], job))

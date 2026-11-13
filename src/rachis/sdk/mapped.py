@@ -6,7 +6,10 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+from __future__ import annotations
+
 import csv
+from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from itertools import chain, product
@@ -50,7 +53,7 @@ class PendingCell:
 
 @dataclass(frozen=True)
 class CommittedCell:
-    outcome: object
+    outcome: CellOutcome | None
     name: str
 
     def resolve(self):
@@ -61,7 +64,7 @@ class CommittedCell:
 
 @dataclass(frozen=True)
 class CellReference(PendingCell):
-    future: object
+    future: Future
     name: str
 
     def resolve(self):
@@ -128,7 +131,7 @@ class StoredView:
 
 @dataclass(frozen=True)
 class CellOutcome:
-    outputs: dict
+    outputs: dict[str, StoredView | None]
     transforms: tuple = ()
 
 
@@ -142,6 +145,10 @@ class CellFrame(Frame):
 
     def for_worker(self):
         return CellFrame(self, self.cell, self.axes)
+
+    @staticmethod
+    def for_batch(cells):
+        return BatchFrame(cells)
 
     def __call__(self):
         self.workspace = Path(tempfile.mkdtemp(dir=self.cell.path.parent))
@@ -196,7 +203,8 @@ class MappedProxyArtifact(ProxyArtifact):
         self._cells = cells
 
     def _mapped_cells(self, pattern):
-        if self._future_.done():
+        if (self._future_.done() and not self._future_.cancelled()
+                and self._future_.exception() is None):
             return None
         if self._pattern.axes == pattern.axes:
             return self._cells
