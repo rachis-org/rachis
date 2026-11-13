@@ -8,7 +8,9 @@
 
 from collections.abc import Iterable, Iterator
 
-from rachis import Coord
+from typing import Annotated
+
+from rachis import Coord, ForEach
 from .format import MappingDirectoryFormat
 
 
@@ -70,3 +72,28 @@ class StudentScoresAxis(AssignmentScoreAxis):
         return _write_mapping((f'{coord.student}/{assignment}', value)
                               for coord, scores in chunks
                               for assignment, value in scores.items())
+
+
+def filter_samples(
+    data: Annotated[str, ForEach['sample']],
+) -> tuple[
+    Annotated[str | None, ForEach['sample']],
+    Annotated[str, ForEach['sample']],
+]:
+    return (data if int(data) >= 0 else None), data
+
+
+def increment_samples(
+    data: Annotated[str, ForEach['sample']],
+    amount: int,
+) -> Annotated[str, ForEach['sample']]:
+    return str(int(data) + amount)
+
+
+def mapped_sample_pipeline(ctx, data):
+    filter_samples = ctx.get_action('dummy_plugin', 'filter_samples')
+    increment = ctx.get_action('dummy_plugin', 'increment_samples')
+    retained, _ = filter_samples(data)
+    intermediate, = increment(retained, 1)
+    final, = increment(intermediate, 2)
+    return final
