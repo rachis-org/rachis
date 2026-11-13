@@ -103,7 +103,8 @@ def _submit_app(frame, executor):
 
 class ParallelContext(Context):
     execution_ctx = MappingProxyType({'type': 'parsl'})
-    outer_wrappers = (invocation_resources_wrapper, *Context.outer_wrappers)
+    outer_bind_wrappers = (invocation_resources_wrapper,
+                           *Context.outer_bind_wrappers)
     _defer_results = True
 
     def __init__(self, action_obj, parent=None):

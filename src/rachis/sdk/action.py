@@ -10,6 +10,7 @@ import inspect
 import tempfile
 import textwrap
 from contextlib import contextmanager, ExitStack
+from dataclasses import replace
 from enum import Enum
 from functools import cached_property
 from itertools import chain
@@ -37,17 +38,22 @@ from rachis.core.cite import CitationRecord
 
 class FramePhase(Enum):
     OUTER_APPLY = 'outer_apply'
+    INNER_BIND = 'inner_bind'
+    INNER_APPLY = 'inner_apply'
+    OUTER_RETURN = 'outer_return'
 
 
 class Frame:
     """State for one application phase, shared by its wrapper stack."""
 
     def __init__(self, action, ctx, bound_arguments, *,
-                 phase=FramePhase.OUTER_APPLY):
+                 phase=FramePhase.OUTER_APPLY, cells=(), axes=None):
         self.action = action
         self.ctx = ctx
         self.bound_arguments = bound_arguments
         self.phase = phase
+        self.cells = cells
+        self.axes = axes
         self.call_kwargs = {}
         self.results = None
         self.provenance = None
@@ -57,6 +63,12 @@ class Frame:
         match self.phase:
             case FramePhase.OUTER_APPLY:
                 return self.action._outer_apply(self)
+            case FramePhase.INNER_BIND:
+                return self.action._inner_bind(self)
+            case FramePhase.INNER_APPLY:
+                return self.action._inner_apply(self)
+            case FramePhase.OUTER_RETURN:
+                return self.action._outer_return(self)
         raise ValueError(f'Unknown frame phase: {self.phase!r}')
 
     @cached_property
@@ -64,10 +76,21 @@ class Frame:
         """Solve output types from the bound inputs when first needed."""
         return self.action.signature.solve_output(**self.bound_arguments)
 
+    def for_batch(self, batch, axes):
+        """Prepare a batch whose cells carry their own projected inputs."""
+        return Frame(self.action, self.ctx, {}, phase=FramePhase.INNER_BIND,
+                     cells=batch, axes=axes)
+
+    def for_return(self):
+        """Prepare finalization from whole inputs and cell commit paths."""
+        cells = tuple(replace(cell, inputs={}) for cell in self.cells)
+        return Frame(self.action, self.ctx, self.bound_arguments,
+                     phase=FramePhase.OUTER_RETURN, cells=cells)
+
     def for_worker(self):
         """Copy a dispatchable phase's inputs into a fresh worker frame."""
         return Frame(self.action, self.ctx, self.bound_arguments,
-                     phase=self.phase)
+                     phase=self.phase, cells=self.cells, axes=self.axes)
 
 
 @contextmanager
@@ -330,8 +353,8 @@ class Action:
 
     # Outer wrappers run where an application is requested. Inner wrappers run
     # where its callable is evaluated. Context wrappers enclose both stacks.
-    outer_wrappers = (deprecation_wrapper,)
-    inner_wrappers = (
+    outer_bind_wrappers = (deprecation_wrapper,)
+    inner_apply_wrappers = (
         signature_wrapper,
         provenance_wrapper,
         checksum_wrapper,
@@ -478,7 +501,8 @@ class Action:
             frame = Frame(self, ctx, bound.arguments)
 
             with ExitStack() as wrappers:
-                for wrapper in chain(ctx.outer_wrappers, self.outer_wrappers):
+                for wrapper in chain(ctx.outer_bind_wrappers,
+                                     self.outer_bind_wrappers):
                     wrappers.enter_context(wrapper(frame))
                 if frame.results is None:
                     wrappers.enter_context(dispatch_result_wrapper(
@@ -497,7 +521,8 @@ class Action:
 
     def _inner_apply(self, frame):
         """Execute a prepared application in its execution Context."""
-        wrappers = chain(frame.ctx.inner_wrappers, self.inner_wrappers)
+        wrappers = chain(frame.ctx.inner_apply_wrappers,
+                         self.inner_apply_wrappers)
         with ExitStack() as stack:
             for wrapper in wrappers:
                 stack.enter_context(wrapper(frame))
@@ -606,8 +631,8 @@ class Method(Action):
 
     type = 'method'
 
-    inner_wrappers = (
-        *Action.inner_wrappers,
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
         capture_wrapper,
         input_transform_wrapper,
         method_wrapper,
@@ -648,8 +673,8 @@ class Visualizer(Action):
 
     type = 'visualizer'
 
-    inner_wrappers = (
-        *Action.inner_wrappers,
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
         capture_wrapper,
         input_transform_wrapper,
         visualization_wrapper,
@@ -672,8 +697,8 @@ class Pipeline(Action):
     _ProvCaptureCls = archive.PipelineProvenanceCapture
     _driver_apply = True
 
-    inner_wrappers = (
-        *Action.inner_wrappers,
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
         pipeline_input_wrapper,
         pipeline_wrapper,
         capture_wrapper,

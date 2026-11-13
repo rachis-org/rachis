@@ -97,10 +97,10 @@ def test_cell_wrappers_stage_outputs_before_the_context_exits():
         yield
 
     class ObservedContext(Context):
-        inner_wrappers = (observe_inner,)
-        mapped_outer_wrappers = (
-            observe_invocation, *Context.mapped_outer_wrappers)
-        cell_wrappers = (observe,)
+        inner_apply_wrappers = (observe_inner,)
+        outer_apply_wrappers = (
+            observe_invocation, *Context.outer_apply_wrappers)
+        mapped_inner_apply_wrappers = (observe,)
 
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
     call = method._outer_bind(lambda: ObservedContext(method))

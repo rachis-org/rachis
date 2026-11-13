@@ -73,14 +73,21 @@ def mapped_invocation_wrapper(frame):
     with TemporaryDirectory(dir=frame.ctx.cache.path) as directory:
         frame.directory = Path(directory)
         yield
-        frame.action._outer_return(frame)
+        return_frame = frame.for_return()
+        frame.results = return_frame()
+        # Enclosing wrappers can inspect the finalized invocation.
+        frame.outcomes = return_frame.outcomes
+        frame.provenance = return_frame.provenance
+        frame.transforms = return_frame.transforms
+        frame.call_kwargs = return_frame.call_kwargs
+        frame.output_types = return_frame.output_types
 
 
 class Context(IContext):
-    outer_wrappers = (cache_lookup_wrapper,)
-    inner_wrappers = ()
-    mapped_outer_wrappers = (mapped_invocation_wrapper,)
-    cell_wrappers = ()
+    outer_bind_wrappers = (cache_lookup_wrapper,)
+    inner_apply_wrappers = ()
+    outer_apply_wrappers = (mapped_invocation_wrapper,)
+    mapped_inner_apply_wrappers = ()
     execution_ctx = MappingProxyType({'type': 'synchronous'})
     _defer_results = False
     _resources = None
@@ -134,8 +141,8 @@ class Context(IContext):
         for cell in cells:
             yield (cell,)
 
-    def _dispatch_batch_(self, frame, batch, axes):
-        return frame.action._run_batch_(frame, batch, axes)
+    def _dispatch_batch_(self, frame):
+        return frame()
 
     def _check_cache(self, inputs):
         plugin = self.action_obj.plugin_id.replace('_', '-')
