@@ -386,8 +386,10 @@ class MEGALock(tm):
 
         del lockless_dict['thread_lock']
         del lockless_dict['flufl_lock']
-        del lockless_dict['_thread']
-        del lockless_dict['_thread_is_done']
+        lockless_dict.pop('_thread', None)
+        lockless_dict.pop('_thread_is_done', None)
+        # A deserialized lock starts unlocked in the receiving process.
+        lockless_dict['re_entries'] = 0
 
         return lockless_dict
 
@@ -620,6 +622,11 @@ class Cache:
             del threadless_dict['_thread']
 
         return threadless_dict
+
+    def __reduce_ex__(self, protocol):
+        # Cache.__new__ can return an active cache from USED_CACHES.
+        # Restoring worker state must not overwrite that cache or its lock.
+        return object.__new__, (type(self),), self.__getstate__()
 
     def __setstate__(self, state):
         self.__dict__.update(state)
