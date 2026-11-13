@@ -17,7 +17,7 @@ from parsl.executors import ThreadPoolExecutor
 from parsl.serialize import pack_apply_message, unpack_apply_message
 import pytest
 
-from rachis import Artifact, ForEach
+from rachis import Artifact, Coord, ForEach
 from rachis.core.testing.type import Mapping
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.plugin import CaptureHolder, Int
@@ -180,6 +180,98 @@ def test_parsl_resolves_a_coordinate_through_the_dag_before_batch_exit():
     assert invocations == [
         'filter_samples', 'increment_samples', 'increment_samples']
     assert result.view(dict) == {'s1': '7'}
+
+
+def test_parsl_resolves_nested_axis_prefixes_before_batch_exit():
+    pipeline = get_dummy_plugin().pipelines['mapped_scores_pipeline']
+    data = Artifact.import_data('AssignmentScores', {
+        's1/a1': '4', 's1/a2': '5', 's1/a3': '-1',
+        's2/a1': '7', 's3/a1': '-4',
+    })
+    sample_planned = Event()
+    sample_started = Event()
+    sample_committed = Event()
+    inner_apply = MappedMethod._inner_apply
+    score_commits = {}
+    resource_stacks = set()
+    order = []
+    s1_assignments = {
+        Coord(student='s1', assignment=assignment)
+        for assignment in ('a1', 'a2', 'a3')
+    }
+    s2_assignment = Coord(student='s2', assignment='a1')
+
+    def batches(ctx, cells):
+        resource_stacks.add(ctx._get_resources())
+        if ctx.action_obj.id == 'filter_scores':
+            score_commits.update((cell.outputs['retained'], cell.path)
+                               for cell in (frame.cell
+                                            for frame in cells.values()))
+            yield tuple(cells)
+            return
+        if ctx.action_obj.id == 'sum_scores':
+            s1 = next(frame.cell for frame in cells.values()
+                      if frame.coordinate.sample == 's1')
+            planned = {coord for coord, _ in s1.inputs['data'].members}
+            assert planned == s1_assignments
+            sample_planned.set()
+        for cell in cells:
+            yield (cell,)
+
+    def observe_cell(self, frame):
+        coord = frame.coordinate
+        if self.id == 'filter_scores':
+            if coord == Coord(student='s1', assignment='a2'):
+                # Force the sample to be planned while suffixes are pending.
+                assert sample_planned.wait(timeout=10)
+                assert not sample_started.is_set()
+            if coord == s2_assignment:
+                assert sample_committed.wait(timeout=10), (
+                    'downstream s1 waited for another sample or assembly')
+                order.append('producer s2')
+        if self.id == 'sum_scores' and coord.sample == 's1':
+            assert all(score_commits[cell].is_file()
+                       for cell in s1_assignments)
+            assert not score_commits[s2_assignment].exists()
+            sample_started.set()
+        return inner_apply(self, frame)
+
+    @contextmanager
+    def observe_invocation(frame):
+        yield
+        if frame.action.id == 'increment_samples':
+            cell = frame.results.output._cells['s1',]
+            cell.future.add_done_callback(mark_committed)
+
+    def mark_committed(future):
+        future.result()
+        order.append('third-stage s1')
+        sample_committed.set()
+
+
+    with TemporaryDirectory() as run_dir:
+        config = Config(
+            executors=[SerializingExecutor(label='default', max_threads=3)],
+            run_dir=run_dir,
+        )
+        with (patch.object(ParallelContext, '_batches', batches),
+              patch.object(ParallelContext, 'outer_apply_wrappers',
+                           (observe_invocation,
+                            *ParallelContext.outer_apply_wrappers)),
+              patch.object(MappedMethod, '_inner_apply', observe_cell),
+              ParallelConfig(config)):
+            filtered, output = pipeline.parallel(data)
+            assert all(not path.parent.exists()
+                       for path in score_commits.values())
+
+    assert len(resource_stacks) == 1
+    assert order == ['third-stage s1', 'producer s2']
+    assert set(filtered.coords('student')) == {
+        Coord(student=coord.student)
+        for coord in filtered.coords('student', 'assignment')
+    }
+    assert filtered.view(dict, student='s1') == {'a1': '4', 'a2': '5'}
+    assert output.view(dict) == {'s1': '10', 's2': '8'}
 
 
 def test_parallel_root_cleans_up_mapped_work_after_pipeline_error(tmp_path):

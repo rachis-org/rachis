@@ -16,7 +16,7 @@ from parsl.app.app import python_app
 
 from rachis.sdk.futures import call_future
 from rachis.sdk.mapped import (
-    BatchFrame, CellReference, CommittedCell, read_outcome,
+    BatchFrame, CellPrefix, CellReference, CommittedCell, read_outcome,
 )
 from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy
@@ -90,6 +90,9 @@ def _map_arg(arg, futures):
     if isinstance(arg, CellReference):
         mapped = _CellDependency(len(futures), arg.name)
         futures.append(arg.future)
+    elif isinstance(arg, CellPrefix):
+        mapped = replace(arg, members=tuple(
+            (coord, _map_arg(cell, futures)) for coord, cell in arg.members))
     elif isinstance(arg, Proxy):
         futures.append(arg._future_)
         mapped = _ResultDependency(len(futures) - 1, arg._selector_)
@@ -115,6 +118,9 @@ def _unmap_arg(arg, inputs):
     # inputs list
     if isinstance(arg, _CellDependency):
         unmapped = CommittedCell(inputs[arg.index], arg.name)
+    elif isinstance(arg, CellPrefix):
+        unmapped = replace(arg, members=tuple(
+            (coord, _unmap_arg(cell, inputs)) for coord, cell in arg.members))
     elif isinstance(arg, _ResultDependency):
         result = inputs[arg.index]
         unmapped = (result if arg.selector is None
