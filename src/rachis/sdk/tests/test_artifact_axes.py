@@ -39,21 +39,47 @@ def test_nested_coordinate_views():
 
 def test_for_each_bindings():
     pattern = ForEach['student', 'assignment']
-    assert pattern.coverage == ('matched', 'matched')
-    assert pattern.bindings[0] == ForEach['student'].bindings[0]
-    matched = ForEach['student'::'matched']
-    assert matched.coverage == ('matched',)
-    assert matched.declares_coverage
-    assert matched != matched.as_unbound()
-    binding = ForEach.variable()
-    explicit = ForEach['student':binding]
-    assert explicit.bindings[0] is binding
-    assert explicit != ForEach['student':ForEach.variable()]
+    bare = ForEach['student']
+    matched = ForEach['student'::]
+    expanded = ForEach['student':'student':'matched']
+    assert repr(bare) == "ForEach['student']"
+    assert repr(matched) == "ForEach['student':'student':'matched']"
+    assert bare.bindings == matched.bindings == ('student',)
+    assert bare.coverage == matched.coverage == ('matched',)
+    assert bare.normalize() == ForEach['student':] == matched == expanded
+    assert matched.as_unbound() == bare
+    lookup = {bare: 'axis', expanded: 'pattern'}
+    assert lookup[bare] == 'axis'
+    assert lookup[matched.normalize()] == 'pattern'
+    explicit = ForEach['student':'learner']
+    assert explicit.bindings == ('learner',)
+    assert explicit.bindings == ForEach['sample':'learner'].bindings
+    assert explicit != ForEach['student':'other']
     assert explicit.as_unbound() == ForEach['student']
-    with pytest.raises(ValueError, match='unique variables'):
-        ForEach['student':binding, 'assignment':binding]
+    mixed = ForEach['student':'learner', 'assignment']
+    assert repr(mixed) == (
+        "ForEach['student':'learner':'matched', 'assignment']"
+    )
+    normalized = mixed.normalize()
+    assert normalized.entries == (slice('student', 'learner', 'matched'),
+                                  slice('assignment', 'assignment', 'matched'))
+    assert normalized.normalize() == normalized
+    assert normalized.as_unbound() == pattern
+    with pytest.raises(ValueError, match='unique bindings'):
+        ForEach['student':'assignment', 'assignment'].normalize()
+    with pytest.raises(TypeError, match='bindings must be strings'):
+        ForEach['student':1]
     with pytest.raises(TypeError, match='Invalid axis name'):
         ForEach['_items']
+
+
+@pytest.mark.parametrize('pattern', [
+    ForEach['sample'::],
+    ForEach['sample':'other'],
+])
+def test_axis_registration_rejects_bound_keys(pattern):
+    with pytest.raises(TypeError, match='requires plain axis names'):
+        get_dummy_plugin().register_axes(Mapping, {pattern: SampleMappingAxis})
 
 
 def test_axis_registration_rejects_inconsistent_cell_annotations():
