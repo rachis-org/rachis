@@ -49,29 +49,10 @@ class Coord(Mapping):
         return 'Coord(' + ', '.join(f'{k}={v!r}' for k, v in self._items) + ')'
 
 
-@dataclass(frozen=True, eq=False)
-class _AxisBinding:
-    """Constructive bindings compare by name, nominal bindings by identity."""
-
-    name: str | None = None
-
-    def __eq__(self, other):
-        if not isinstance(other, _AxisBinding):
-            return NotImplemented
-        return self is other or (
-            self.name is not None and self.name == other.name)
-
-    def __hash__(self):
-        return object.__hash__(self) if self.name is None else hash(self.name)
-
-
 class _ForEachMeta(type):
-    def variable(cls):
-        return _AxisBinding()
-
     def __getitem__(cls, entries):
-        axes, bindings, coverage = [], [], []
-        declares_coverage = False
+        axes = []
+        pattern = []
         for entry in tuplize(entries):
             if isinstance(entry, slice):
                 name, binding, rule = entry.start, entry.stop, entry.step
@@ -80,33 +61,67 @@ class _ForEachMeta(type):
             if (not isinstance(name, str) or not name.isidentifier()
                     or name.startswith('_')):
                 raise TypeError(f'Invalid axis name {name!r}')
-            if binding is not None and not isinstance(binding, _AxisBinding):
-                raise TypeError('Use ForEach.variable() for explicit bindings')
+            if binding is not None and not isinstance(binding, str):
+                raise TypeError('ForEach bindings must be strings')
             if rule not in (None, 'matched', 'required', 'optional'):
                 raise ValueError(f'Invalid axis coverage {rule!r}')
+            if isinstance(entry, slice):
+                entry = slice(name, name if binding is None else binding,
+                              'matched' if rule is None else rule)
+            pattern.append(entry)
             axes.append(name)
-            bindings.append(_AxisBinding(name) if binding is None else binding)
-            coverage.append('matched' if rule is None else rule)
-            declares_coverage |= rule is not None
         if not axes or len(set(axes)) != len(axes):
             raise ValueError('ForEach requires distinct axis names')
-        if len(set(bindings)) != len(bindings):
-            raise ValueError(
-                'ForEach must use unique variables in each pattern')
-        return cls(tuple(axes), tuple(bindings), tuple(coverage),
-                   declares_coverage)
+        return cls(tuple(pattern))
 
 
 @dataclass(frozen=True)
 class ForEach(metaclass=_ForEachMeta):
     """An ordered axis pattern for an artifact or method annotation."""
 
-    axes: tuple
-    bindings: tuple
-    coverage: tuple
-    declares_coverage: bool = False
+    entries: tuple[str | slice, ...]
+
+    def __repr__(self):
+        entries = ', '.join(
+            f'{entry.start!r}:{entry.stop!r}:{entry.step!r}'
+            if isinstance(entry, slice) else repr(entry)
+            for entry in self.entries
+        )
+        return f'ForEach[{entries}]'
+
+    def __hash__(self):
+        # Python 3.10 and 3.11 slices are unhashable.
+        return hash(tuple(
+            (entry.start, entry.stop, entry.step)
+            if isinstance(entry, slice) else entry
+            for entry in self.entries
+        ))
+
+    @property
+    def axes(self):
+        return tuple(entry.start if isinstance(entry, slice) else entry
+                     for entry in self.entries)
+
+    @property
+    def bindings(self):
+        return tuple(entry.stop if isinstance(entry, slice) else entry
+                     for entry in self.entries)
+
+    @property
+    def coverage(self):
+        return tuple(entry.step if isinstance(entry, slice) else 'matched'
+                     for entry in self.entries)
+
+    def normalize(self):
+        """Expand all entries to slices and fill in their defaults."""
+        bindings = self.bindings
+        if len(set(bindings)) != len(bindings):
+            raise ValueError(
+                'ForEach must use unique bindings in each pattern')
+        return ForEach(tuple(map(slice, self.axes, bindings, self.coverage)))
 
     def as_unbound(self):
+        """Return the pattern of bare axis names used for axis registration."""
         return ForEach[self.axes]
 
 
