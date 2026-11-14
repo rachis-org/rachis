@@ -161,8 +161,16 @@ class _ZipArchive(_Archive):
         return zipfile.is_zipfile(str(path))
 
     @classmethod
-    def save(cls, source, destination):
+    def save(cls, source, destination, result_format=None):
+        """Write an archive, applying declared compression to data files.
+
+        Use the result format's ZIP write options for paths under data/ when
+        the format provides them. Otherwise use the ZIP writer's defaults.
+        """
+        get_compression_options = getattr(
+            result_format, '_get_compression_options', None)
         parent_dir = os.path.split(source)[0]
+        data_dir = pathlib.Path(source) / 'data'
         with zipfile.ZipFile(str(destination), mode='w',
                              compression=zipfile.ZIP_DEFLATED,
                              allowZip64=True) as zf:
@@ -177,8 +185,14 @@ class _ZipArchive(_Archive):
 
                     abspath = pathlib.Path(root) / file
                     relpath = abspath.relative_to(parent_dir)
+                    write_options = {}
+                    if (get_compression_options is not None
+                            and abspath.is_relative_to(data_dir)):
+                        data_relpath = abspath.relative_to(data_dir).as_posix()
+                        write_options = get_compression_options(data_relpath)
 
-                    zf.write(str(abspath), arcname=cls._as_zip_path(relpath))
+                    zf.write(str(abspath), arcname=cls._as_zip_path(relpath),
+                             **write_options)
 
     def relative_iterdir(self, relpath=''):
         relpath = self._as_zip_path(relpath)
@@ -503,7 +517,7 @@ class Archiver:
         return getattr(self._fmt, 'citations', cite.Citations())
 
     def save(self, filepath):
-        _ZipArchive.save(self.path, filepath)
+        _ZipArchive.save(self.path, filepath, self.format)
 
     def get_checksums(self):
         with open(self.root_dir / self._fmt.CHECKSUM_FILE) as fh:
