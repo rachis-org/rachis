@@ -49,7 +49,7 @@ class TestActionWrappers(unittest.TestCase):
             events.append('inner-exit')
 
         class ObservedContext(Context):
-            outer_wrappers = (outer,)
+            outer_wrappers = (outer, *Context.outer_wrappers)
             inner_wrappers = (inner,)
 
         action = self.plugin.methods['no_input_method']
@@ -70,7 +70,7 @@ class TestActionWrappers(unittest.TestCase):
             frame.results = replacement
 
         class ReplacingContext(Context):
-            outer_wrappers = (replace_results,)
+            outer_wrappers = (replace_results, *Context.outer_wrappers)
 
         action = self.plugin.methods['no_input_method']
         call = action._outer_bind(lambda: ReplacingContext(action))
@@ -102,7 +102,11 @@ class TestActionWrappers(unittest.TestCase):
             with cache.create_pool('recycle'):
                 action = self.plugin.methods['no_input_method']
                 miss = ObservedContext(action, Context(), expect_dispatch=True)
-                first = action._outer_bind(lambda: miss)()
+                with patch.object(
+                        action.signature, 'coerce_user_input',
+                        wraps=action.signature.coerce_user_input) as coerce:
+                    first = action._outer_bind(lambda: miss)()
+                coerce.assert_called_once_with()
                 self.assertTrue(miss.dispatched)
 
                 hit = ObservedContext(action, Context(), expect_dispatch=False)
@@ -136,7 +140,7 @@ class TestActionWrappers(unittest.TestCase):
             events.append('inner-exit')
 
         class DeferredContext(ParallelContext):
-            outer_wrappers = (outer,)
+            outer_wrappers = (outer, *ParallelContext.outer_wrappers)
             inner_wrappers = (inner,)
 
             def _dispatch_action_(self, frame):

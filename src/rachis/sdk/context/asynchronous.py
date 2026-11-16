@@ -9,7 +9,7 @@
 import concurrent.futures
 from types import MappingProxyType
 
-from .base import Context
+from .base import Context, cache_lookup_wrapper
 
 
 def _subprocess_apply(frame):
@@ -26,7 +26,7 @@ def _subprocess_apply(frame):
 
 class AsynchronousContext(Context):
     execution_ctx = MappingProxyType({'type': 'asynchronous'})
-    dispatch_result_wrappers = ()
+    outer_wrappers = (cache_lookup_wrapper,)
 
     def _dispatch_action_(self, frame):
         # x-ref for why this try except exists

@@ -11,7 +11,6 @@ import tempfile
 import textwrap
 from contextlib import contextmanager, ExitStack
 from enum import Enum
-from functools import partial
 from itertools import chain
 from types import FunctionType
 
@@ -50,6 +49,7 @@ class Frame:
         self.ctx = ctx
         self.bound_arguments = bound_arguments
         self.phase = phase
+        self.coerced_arguments = None
         self.transformed_arguments = {}
         self.output_types = None
         self.results = None
@@ -67,10 +67,20 @@ class Frame:
         self.phase = FramePhase.FINISHED
         return result
 
+    def coerce_arguments(self):
+        if self.coerced_arguments is None:
+            signature = self.action.signature
+            signature.check_types(**self.bound_arguments)
+            self.coerced_arguments = signature.coerce_user_input(
+                **self.bound_arguments)
+        return self.coerced_arguments
+
     def for_worker(self):
         """Copy a dispatchable phase's inputs into a fresh worker frame."""
-        return Frame(self.action, self.ctx, self.bound_arguments,
-                     phase=self.phase)
+        frame = Frame(self.action, self.ctx, self.bound_arguments,
+                      phase=self.phase)
+        frame.coerced_arguments = self.coerced_arguments
+        return frame
 
 
 @contextmanager
@@ -88,10 +98,9 @@ def deprecation_wrapper(frame):
 @contextmanager
 def signature_wrapper(frame):
     signature = frame.action.signature
-    signature.check_types(**frame.bound_arguments)
+    arguments = frame.coerce_arguments()
     frame.output_types = signature.solve_output(**frame.bound_arguments)
-    frame.transformed_arguments = signature.coerce_user_input(
-        **frame.bound_arguments)
+    frame.transformed_arguments = arguments.copy()
     yield
 
 
@@ -132,9 +141,9 @@ def input_transform_wrapper(frame):
 
         return record
 
-    for name, spec in signature.inputs.items():
+    for name in signature.inputs:
         arguments[name] = signature._transform_input(
-            spec, arguments[name], partial(recorder_for, name))
+            name, arguments[name], recorder_for)
     yield
 
 
@@ -492,8 +501,6 @@ class Action:
                 for wrapper in chain(ctx.outer_wrappers, self.outer_wrappers):
                     wrappers.enter_context(wrapper(frame))
                 if frame.results is None:
-                    for wrapper in ctx.dispatch_result_wrappers:
-                        wrappers.enter_context(wrapper(frame))
                     frame.results = ctx._dispatch_action_(frame)
 
             # Post-processing may replace results while the stack unwinds.

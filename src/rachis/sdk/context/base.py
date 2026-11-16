@@ -5,7 +5,7 @@
 #
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
 from types import MappingProxyType
 import warnings
@@ -36,16 +36,16 @@ def _validate_collection(collection_order):
 @contextmanager
 def cache_lookup_wrapper(frame):
     ctx = frame.ctx
-    if (frame.results is None and ctx._parent is not None
-            and ctx.cache.named_pool is not None):
-        frame.results = ctx._check_cache(frame.bound_arguments)
+    if ctx._can_check_cache(frame):
+        frame.results = ctx._check_cache(frame.coerce_arguments())
     yield
 
 
 @contextmanager
 def resolve_dispatch_result_wrapper(frame):
     yield
-    frame.results = frame.results.result()
+    if isinstance(frame.results, Future):
+        frame.results = frame.results.result()
 
 
 @contextmanager
@@ -73,9 +73,8 @@ class InvocationResources(ExitStack):
 
 
 class Context(IContext):
-    outer_wrappers = (cache_lookup_wrapper,)
+    outer_wrappers = (cache_lookup_wrapper, resolve_dispatch_result_wrapper)
     inner_wrappers = ()
-    dispatch_result_wrappers = (resolve_dispatch_result_wrapper,)
     execution_ctx = MappingProxyType({'type': 'synchronous'})
     _defer_results = False
     _resources = None
@@ -125,20 +124,19 @@ class Context(IContext):
         state.pop('_resources', None)
         return state
 
-    def _check_cache(self, inputs):
+    def _can_check_cache(self, frame):
+        return (frame.results is None and self._parent is not None
+                and self.cache.named_pool is not None)
+
+    def _check_cache(self, coerced_arguments):
         plugin = self.action_obj.plugin_id.replace('_', '-')
         plugin_action = f'{plugin}:{self.action_obj.id}'
-
-        signature = self.action_obj.signature
-        signature.check_types(**inputs)
-        callable_args = signature.coerce_user_input(**inputs)
 
         # Make args and kwargs look how they do when we read them
         # out of a .yaml file (list of single value dicts of
         # input_name: value)
-        arguments = []
-        for k, v in callable_args.items():
-            arguments.append({k: v})
+        arguments = [{name: value}
+                     for name, value in coerced_arguments.items()]
 
         invocation = HashableInvocation(plugin_action, arguments)
         if invocation in self.cache.named_pool.index:

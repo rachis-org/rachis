@@ -6,6 +6,7 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+from concurrent.futures import Future
 from contextlib import contextmanager
 from types import MappingProxyType
 
@@ -17,7 +18,7 @@ from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy, ProxyResults
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
 
-from .base import Context, invocation_resources_wrapper
+from .base import Context, cache_lookup_wrapper, invocation_resources_wrapper
 
 
 def _map_arg(arg, futures):
@@ -98,6 +99,8 @@ def _submit_app(frame, executor):
 @contextmanager
 def parallel_dispatch_result_wrapper(frame):
     yield
+    if not isinstance(frame.results, Future):
+        return
     if frame.ctx._runs_on_driver(frame):
         frame.results = frame.results.result()
     else:
@@ -108,8 +111,11 @@ def parallel_dispatch_result_wrapper(frame):
 
 class ParallelContext(Context):
     execution_ctx = MappingProxyType({'type': 'parsl'})
-    outer_wrappers = (invocation_resources_wrapper, *Context.outer_wrappers)
-    dispatch_result_wrappers = (parallel_dispatch_result_wrapper,)
+    outer_wrappers = (
+        invocation_resources_wrapper,
+        cache_lookup_wrapper,
+        parallel_dispatch_result_wrapper,
+    )
     _defer_results = True
 
     def __init__(self, action_obj, parent=None):
@@ -126,10 +132,10 @@ class ParallelContext(Context):
                 else {v.label: v.__class__.__name__
                       for v in PARALLEL_CONFIG.parallel_config.executors}
 
-    def _check_cache(self, inputs):
+    def _can_check_cache(self, frame):
         # Hashing an unresolved proxy would block the driver on its artifact.
-        if not any(_contains_proxy(value) for value in inputs.values()):
-            return super()._check_cache(inputs)
+        return (super()._can_check_cache(frame)
+                and not _contains_proxy(frame.bound_arguments))
 
     def _runs_on_driver(self, frame):
         return isinstance(frame.action, Pipeline)

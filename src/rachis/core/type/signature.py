@@ -519,11 +519,12 @@ class PipelineSignature:
         return param
 
 
-    def _transform_input(self, spec, _input, transformation_recorder):
+    def _transform_input(self, name, _input, transformation_recorder):
+        spec = self.inputs[name]
         if _input is None or not spec.has_view_type():
             return _input
 
-        recorder = transformation_recorder()
+        recorder = transformation_recorder(name)
         qiime_type, _ = self._get_qiime_type_and_name(spec)
         if qtype.is_collection_type(qiime_type):
             if isinstance(_input, rachis.sdk.result.ResultCollection):
