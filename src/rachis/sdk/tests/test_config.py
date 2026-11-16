@@ -6,9 +6,7 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
-import collections
 import importlib
-import inspect
 import os
 import pathlib
 import pkgutil
@@ -24,7 +22,6 @@ import parsl.monitoring.radios
 import parsl.providers
 import tomlkit
 from parsl.executors.threads import ThreadPoolExecutor
-from parsl.monitoring.radios.base import RadioConfig
 
 from rachis import Artifact, Cache
 
