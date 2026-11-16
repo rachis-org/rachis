@@ -54,6 +54,7 @@ class Frame:
         self.output_types = None
         self.results = None
         self.provenance = None
+        self.input_transformations = {}
 
     def __call__(self):
         match self.phase:
@@ -95,30 +96,59 @@ def signature_wrapper(frame):
 
 
 @contextmanager
-def provenance_wrapper(frame, *, defer_inputs=False, publish=None):
+def provenance_wrapper(frame, *, defer_inputs=False):
     action = frame.action
     provenance = frame.provenance = action._ProvCaptureCls(
         action.type, action.plugin_id, action.id, frame.ctx.execution_ctx)
     signature = action.signature
     arguments = frame.transformed_arguments
-    captures = []
     for name, spec in signature.signature_order.items():
         value = arguments[name]
         if name in signature.inputs:
             if not defer_inputs:
                 provenance.add_input(name, value)
-                arguments[name] = signature._transform_input(
-                    spec, value, partial(provenance.transformation_recorder,
-                                         name))
         else:
             provenance.add_parameter(name, spec.qiime_type, value)
-            if contains_generic_base(qtype.CaptureHolder, spec.view_type):
-                capture = qtype.CaptureHolder(
-                    name, value, spec.qiime_type, provenance)
-                arguments[name] = capture
-                captures.append(capture)
 
     yield provenance
+
+    for name, records in frame.input_transformations.items():
+        record = provenance.transformation_recorder(name)
+        for args, kwargs in records:
+            record(*args, **kwargs)
+
+
+@contextmanager
+def input_transform_wrapper(frame):
+    signature = frame.action.signature
+    arguments = frame.transformed_arguments
+
+    def recorder_for(name):
+        records = frame.input_transformations[name] = []
+
+        def record(*args, **kwargs):
+            records.append((args, kwargs))
+
+        return record
+
+    for name, spec in signature.inputs.items():
+        arguments[name] = signature._transform_input(
+            spec, arguments[name], partial(recorder_for, name))
+    yield
+
+
+@contextmanager
+def capture_wrapper(frame):
+    arguments = frame.transformed_arguments
+    captures = []
+    for name, spec in frame.action.signature.parameters.items():
+        if contains_generic_base(qtype.CaptureHolder, spec.view_type):
+            capture = qtype.CaptureHolder(
+                name, arguments[name], spec.qiime_type, frame.provenance)
+            arguments[name] = capture
+            captures.append(capture)
+
+    yield
 
     for capture in captures:
         if not capture.is_set:
@@ -126,8 +156,6 @@ def provenance_wrapper(frame, *, defer_inputs=False, publish=None):
                 f"The capture parameter '{capture._name}' never had a "
                 "value set for it"
             )
-    if publish is not None:
-        frame.results = publish(frame, provenance.fork)
 
 
 @contextmanager
@@ -151,10 +179,12 @@ def checked_return_values(value, expected):
     return values
 
 
-def _publish_method(frame, fork_provenance):
+@contextmanager
+def method_output_wrapper(frame):
+    yield
     views = checked_return_values(frame.results, len(frame.output_types))
-    return frame.action.signature.coerce_given_outputs(
-        views, frame.output_types, frame.ctx, fork_provenance)
+    frame.results = frame.action.signature.coerce_given_outputs(
+        views, frame.output_types, frame.ctx, frame.provenance.fork)
 
 
 @contextmanager
@@ -165,24 +195,19 @@ def results_wrapper(frame):
             frame.action.signature.outputs.keys(), frame.results)
 
 
-def _publish_visualization(frame, fork_provenance):
-    if frame.results is not None:
-        raise TypeError(
-            "Visualizer %r should not return anything. "
-            "Received %r as a return value."
-            % (frame.action, frame.results))
-    visualization = rachis.sdk.Visualization._from_data_dir(
-        frame.transformed_arguments['output_dir'],
-        fork_provenance('visualization'))
-    return (frame.ctx.add_reference(visualization),)
-
-
 @contextmanager
 def visualization_wrapper(frame):
     with tempfile.TemporaryDirectory(prefix='rachis-temp-') as temp_dir:
         frame.transformed_arguments['output_dir'] = temp_dir
-        with provenance_wrapper(frame, publish=_publish_visualization):
-            yield
+        yield
+        if frame.results is not None:
+            raise TypeError(
+                "Visualizer %r should not return anything. "
+                "Received %r as a return value."
+                % (frame.action, frame.results))
+        visualization = rachis.sdk.Visualization._from_data_dir(
+            temp_dir, frame.provenance.fork('visualization'))
+        frame.results = (frame.ctx.add_reference(visualization),)
 
 
 def _validate_pipeline_output(output):
@@ -594,7 +619,10 @@ class Method(Action):
     inner_wrappers = (
         *Action.inner_wrappers,
         checksum_wrapper,
-        partial(provenance_wrapper, publish=_publish_method),
+        method_output_wrapper,
+        provenance_wrapper,
+        input_transform_wrapper,
+        capture_wrapper,
     )
 
     @classmethod
@@ -632,6 +660,9 @@ class Visualizer(Action):
         *Action.inner_wrappers,
         checksum_wrapper,
         visualization_wrapper,
+        provenance_wrapper,
+        input_transform_wrapper,
+        capture_wrapper,
     )
 
     @classmethod
@@ -654,6 +685,7 @@ class Pipeline(Action):
     inner_wrappers = (
         *Action.inner_wrappers,
         pipeline_provenance_wrapper,
+        capture_wrapper,
     )
 
     @classmethod
