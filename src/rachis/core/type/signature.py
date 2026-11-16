@@ -725,7 +725,8 @@ class PipelineSignature:
                 (self._infer_type(key, v) for v in value.values()))
             return Collection[inner.normalize()]
         if isinstance(
-                value, (rachis.sdk.Artifact, rachis.sdk.proxy.ProxyArtifact)):
+                value, (rachis.sdk.Artifact, rachis.sdk.proxy.ProxyArtifact,
+                        rachis.sdk.proxy.ProxyResultCollection)):
             return value.type
         else:
             return infer_primitive_type(value)

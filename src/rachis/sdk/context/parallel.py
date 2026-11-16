@@ -12,7 +12,7 @@ from types import MappingProxyType
 
 from parsl.app.app import python_app
 
-from rachis.sdk.action import Pipeline
+from rachis.sdk.action import Pipeline, prepare_signature
 from rachis.sdk.futures import call_future
 from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy, ProxyResults
@@ -97,6 +97,18 @@ def _submit_app(frame, executor):
 
 
 @contextmanager
+def parallel_signature_wrapper(frame):
+    if not _contains_proxy(frame.bound_arguments):
+        prepare_signature(frame)
+    elif not frame.ctx._runs_on_driver(frame):
+        # The driver needs output types to expose proxies. The worker validates
+        # and normalizes values once Parsl resolves the inputs.
+        frame.output_types = frame.action.signature.solve_output(
+            **frame.bound_arguments)
+    yield
+
+
+@contextmanager
 def parallel_dispatch_result_wrapper(frame):
     yield
     if not isinstance(frame.results, Future):
@@ -104,8 +116,6 @@ def parallel_dispatch_result_wrapper(frame):
     if frame.ctx._runs_on_driver(frame):
         frame.results = frame.results.result()
     else:
-        frame.output_types = frame.action.signature.solve_output(
-            **frame.bound_arguments)
         frame.results = ProxyResults(frame.results, frame.output_types)
 
 
@@ -113,6 +123,7 @@ class ParallelContext(Context):
     execution_ctx = MappingProxyType({'type': 'parsl'})
     outer_wrappers = (
         invocation_resources_wrapper,
+        parallel_signature_wrapper,
         cache_lookup_wrapper,
         parallel_dispatch_result_wrapper,
     )
@@ -131,11 +142,6 @@ class ParallelContext(Context):
                 None if PARALLEL_CONFIG.parallel_config is None \
                 else {v.label: v.__class__.__name__
                       for v in PARALLEL_CONFIG.parallel_config.executors}
-
-    def _can_check_cache(self, frame):
-        # Hashing an unresolved proxy would block the driver on its artifact.
-        return (super()._can_check_cache(frame)
-                and not _contains_proxy(frame.bound_arguments))
 
     def _runs_on_driver(self, frame):
         return isinstance(frame.action, Pipeline)
@@ -158,8 +164,6 @@ class ParallelContext(Context):
             'parsl_type': self.executor_name_type_mapping[executor],
         }
 
-        # Parsl can schedule against upstream futures. The worker validates
-        # and coerces the arguments once those futures have resolved.
         future = _submit_app(frame, executor)
         self._get_resources().jobs.append(future)
         return future

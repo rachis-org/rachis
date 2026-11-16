@@ -9,6 +9,8 @@
 import concurrent.futures
 from types import MappingProxyType
 
+from rachis.sdk.action import signature_wrapper
+
 from .base import Context, cache_lookup_wrapper
 
 
@@ -26,7 +28,7 @@ def _subprocess_apply(frame):
 
 class AsynchronousContext(Context):
     execution_ctx = MappingProxyType({'type': 'asynchronous'})
-    outer_wrappers = (cache_lookup_wrapper,)
+    outer_wrappers = (signature_wrapper, cache_lookup_wrapper)
 
     def _dispatch_action_(self, frame):
         # x-ref for why this try except exists

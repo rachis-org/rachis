@@ -49,8 +49,7 @@ class Frame:
         self.ctx = ctx
         self.bound_arguments = bound_arguments
         self.phase = phase
-        self.coerced_arguments = None
-        self.transformed_arguments = {}
+        self.transformed_arguments = None
         self.output_types = None
         self.results = None
         self.provenance = None
@@ -67,19 +66,13 @@ class Frame:
         self.phase = FramePhase.FINISHED
         return result
 
-    def coerce_arguments(self):
-        if self.coerced_arguments is None:
-            signature = self.action.signature
-            signature.check_types(**self.bound_arguments)
-            self.coerced_arguments = signature.coerce_user_input(
-                **self.bound_arguments)
-        return self.coerced_arguments
-
     def for_worker(self):
         """Copy a dispatchable phase's inputs into a fresh worker frame."""
         frame = Frame(self.action, self.ctx, self.bound_arguments,
                       phase=self.phase)
-        frame.coerced_arguments = self.coerced_arguments
+        if self.transformed_arguments is not None:
+            frame.transformed_arguments = self.transformed_arguments.copy()
+            frame.output_types = self.output_types
         return frame
 
 
@@ -95,12 +88,18 @@ def deprecation_wrapper(frame):
     yield
 
 
+def prepare_signature(frame):
+    signature = frame.action.signature
+    signature.check_types(**frame.bound_arguments)
+    frame.output_types = signature.solve_output(**frame.bound_arguments)
+    frame.transformed_arguments = signature.coerce_user_input(
+        **frame.bound_arguments)
+
+
 @contextmanager
 def signature_wrapper(frame):
-    signature = frame.action.signature
-    arguments = frame.coerce_arguments()
-    frame.output_types = signature.solve_output(**frame.bound_arguments)
-    frame.transformed_arguments = arguments.copy()
+    if frame.transformed_arguments is None:
+        prepare_signature(frame)
     yield
 
 

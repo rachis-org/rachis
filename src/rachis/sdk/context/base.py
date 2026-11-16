@@ -15,6 +15,7 @@ from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
+from rachis.sdk.action import signature_wrapper
 from rachis.sdk.futures import call_future
 
 
@@ -36,8 +37,9 @@ def _validate_collection(collection_order):
 @contextmanager
 def cache_lookup_wrapper(frame):
     ctx = frame.ctx
-    if ctx._can_check_cache(frame):
-        frame.results = ctx._check_cache(frame.coerce_arguments())
+    if (frame.results is None and frame.transformed_arguments is not None
+            and ctx._parent is not None and ctx.cache.named_pool is not None):
+        frame.results = ctx._check_cache(frame.transformed_arguments)
     yield
 
 
@@ -73,7 +75,11 @@ class InvocationResources(ExitStack):
 
 
 class Context(IContext):
-    outer_wrappers = (cache_lookup_wrapper, resolve_dispatch_result_wrapper)
+    outer_wrappers = (
+        signature_wrapper,
+        cache_lookup_wrapper,
+        resolve_dispatch_result_wrapper,
+    )
     inner_wrappers = ()
     execution_ctx = MappingProxyType({'type': 'synchronous'})
     _defer_results = False
@@ -124,19 +130,14 @@ class Context(IContext):
         state.pop('_resources', None)
         return state
 
-    def _can_check_cache(self, frame):
-        return (frame.results is None and self._parent is not None
-                and self.cache.named_pool is not None)
-
-    def _check_cache(self, coerced_arguments):
+    def _check_cache(self, arguments):
         plugin = self.action_obj.plugin_id.replace('_', '-')
         plugin_action = f'{plugin}:{self.action_obj.id}'
 
         # Make args and kwargs look how they do when we read them
         # out of a .yaml file (list of single value dicts of
         # input_name: value)
-        arguments = [{name: value}
-                     for name, value in coerced_arguments.items()]
+        arguments = [{name: value} for name, value in arguments.items()]
 
         invocation = HashableInvocation(plugin_action, arguments)
         if invocation in self.cache.named_pool.index:

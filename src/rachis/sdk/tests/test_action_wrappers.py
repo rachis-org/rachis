@@ -158,7 +158,9 @@ class TestActionWrappers(unittest.TestCase):
         self.assertFalse(dispatched.done())
         self.assertIsNone(frame.provenance)
         self.assertIs(frame.bound_arguments['ints'], artifact)
-        self.assertFalse(frame.transformed_arguments)
+        self.assertIs(frame.transformed_arguments['ints'], artifact)
+        self.assertEqual(frame.output_types['left'].qiime_type, IntSequence1)
+        self.assertEqual(results.left.type, IntSequence1)
         self.assertEqual(events, ['outer-enter', 'outer-exit'])
 
         dispatched.set_result(frame())
