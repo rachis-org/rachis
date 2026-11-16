@@ -96,26 +96,27 @@ def signature_wrapper(frame):
 
 
 @contextmanager
-def provenance_wrapper(frame, *, defer_inputs=False):
+def provenance_wrapper(frame):
     action = frame.action
     provenance = frame.provenance = action._ProvCaptureCls(
         action.type, action.plugin_id, action.id, frame.ctx.execution_ctx)
-    signature = action.signature
     arguments = frame.transformed_arguments
-    for name, spec in signature.signature_order.items():
-        value = arguments[name]
-        if name in signature.inputs:
-            if not defer_inputs:
-                provenance.add_input(name, value)
-        else:
-            provenance.add_parameter(name, spec.qiime_type, value)
+    for name, spec in action.signature.parameters.items():
+        provenance.add_parameter(name, spec.qiime_type, arguments[name])
 
-    yield provenance
+    yield
 
     for name, records in frame.input_transformations.items():
         record = provenance.transformation_recorder(name)
         for args, kwargs in records:
             record(*args, **kwargs)
+
+
+@contextmanager
+def input_provenance_wrapper(frame):
+    for name in frame.action.signature.inputs:
+        frame.provenance.add_input(name, frame.transformed_arguments[name])
+    yield
 
 
 @contextmanager
@@ -258,9 +259,10 @@ def pipeline_provenance_wrapper(frame):
     ctx = frame.ctx
     inputs = {name: frame.transformed_arguments[name]
               for name in frame.action.signature.inputs}
-    with provenance_wrapper(frame, defer_inputs=True) as provenance:
-        frame.transformed_arguments['ctx'] = ctx
-        yield
+    frame.transformed_arguments['ctx'] = ctx
+    yield
+
+    provenance = frame.provenance
     outputs = checked_return_values(frame.results, len(frame.output_types))
     outputs = tuple(map(_validate_pipeline_output, outputs))
 
@@ -620,6 +622,7 @@ class Method(Action):
         checksum_wrapper,
         method_output_wrapper,
         provenance_wrapper,
+        input_provenance_wrapper,
         input_transform_wrapper,
         capture_wrapper,
     )
@@ -660,6 +663,7 @@ class Visualizer(Action):
         checksum_wrapper,
         visualization_wrapper,
         provenance_wrapper,
+        input_provenance_wrapper,
         input_transform_wrapper,
         capture_wrapper,
     )
@@ -683,6 +687,7 @@ class Pipeline(Action):
     inner_wrappers = (
         *Action.inner_wrappers,
         pipeline_provenance_wrapper,
+        provenance_wrapper,
         capture_wrapper,
     )
 
