@@ -111,9 +111,11 @@ class Results(tuple):
     def _asdict(self):
         return dict(zip(self._fields, self))
 
-    def _result(self):
+    def result(self):
         """ This exists to provide a standardized interface with ProxyResults.
             Check the 'result' method on ProxyResults for a full
             explanation.
         """
         return self
+
+    _result = result

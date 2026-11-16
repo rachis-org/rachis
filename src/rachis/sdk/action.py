@@ -11,7 +11,7 @@ import tempfile
 import textwrap
 from contextlib import contextmanager, ExitStack
 from enum import Enum
-from functools import cached_property
+from functools import partial
 from itertools import chain
 from types import FunctionType
 
@@ -29,6 +29,7 @@ from rachis.sdk.proxy import (
 )
 from rachis.sdk.result import Artifact, ResultCollection, ChecksumCache
 import rachis.core.type as qtype
+from rachis.core.type.util import contains_generic_base
 import rachis.core.archive as archive
 from rachis.core.util import (LateBindingAttribute, tuplize,
                               create_collection_name)
@@ -37,6 +38,7 @@ from rachis.core.cite import CitationRecord
 
 class FramePhase(Enum):
     OUTER_APPLY = 'outer_apply'
+    FINISHED = 'finished'
 
 
 class Frame:
@@ -48,21 +50,21 @@ class Frame:
         self.ctx = ctx
         self.bound_arguments = bound_arguments
         self.phase = phase
-        self.call_kwargs = {}
+        self.transformed_arguments = {}
+        self.output_types = None
         self.results = None
         self.provenance = None
-        self.captures = ()
 
     def __call__(self):
         match self.phase:
             case FramePhase.OUTER_APPLY:
-                return self.action._outer_apply(self)
-        raise ValueError(f'Unknown frame phase: {self.phase!r}')
-
-    @cached_property
-    def output_types(self):
-        """Solve output types from the bound inputs when first needed."""
-        return self.action.signature.solve_output(**self.bound_arguments)
+                result = self.action._outer_apply(self)
+            case FramePhase.FINISHED:
+                raise RuntimeError('Cannot call a finished frame')
+            case _:
+                raise ValueError(f'Unknown frame phase: {self.phase!r}')
+        self.phase = FramePhase.FINISHED
+        return result
 
     def for_worker(self):
         """Copy a dispatchable phase's inputs into a fresh worker frame."""
@@ -87,45 +89,55 @@ def signature_wrapper(frame):
     signature = frame.action.signature
     signature.check_types(**frame.bound_arguments)
     frame.output_types = signature.solve_output(**frame.bound_arguments)
-    frame.call_kwargs = signature.coerce_user_input(**frame.bound_arguments)
+    frame.transformed_arguments = signature.coerce_user_input(
+        **frame.bound_arguments)
     yield
 
 
 @contextmanager
-def provenance_wrapper(frame):
+def provenance_wrapper(frame, *, defer_inputs=False, publish=None):
     action = frame.action
-    frame.provenance = action._ProvCaptureCls(
+    provenance = frame.provenance = action._ProvCaptureCls(
         action.type, action.plugin_id, action.id, frame.ctx.execution_ctx)
-    yield
+    signature = action.signature
+    arguments = frame.transformed_arguments
+    captures = []
+    for name, spec in signature.signature_order.items():
+        value = arguments[name]
+        if name in signature.inputs:
+            if not defer_inputs:
+                provenance.add_input(name, value)
+                arguments[name] = signature._transform_input(
+                    spec, value, partial(provenance.transformation_recorder,
+                                         name))
+        else:
+            provenance.add_parameter(name, spec.qiime_type, value)
+            if contains_generic_base(qtype.CaptureHolder, spec.view_type):
+                capture = qtype.CaptureHolder(
+                    name, value, spec.qiime_type, provenance)
+                arguments[name] = capture
+                captures.append(capture)
+
+    yield provenance
+
+    for capture in captures:
+        if not capture.is_set:
+            raise ValueError(
+                f"The capture parameter '{capture._name}' never had a "
+                "value set for it"
+            )
+    if publish is not None:
+        frame.results = publish(frame, provenance.fork)
 
 
 @contextmanager
 def checksum_wrapper(frame):
-    if frame.action.type == 'pipeline':
-        yield
-        return
     cache = ChecksumCache()
     for value in frame.bound_arguments.values():
         if isinstance(value, Artifact):
             cache.cache_artifact(value)
         elif isinstance(value, ResultCollection):
             cache.cache_result_collection(value)
-    yield
-
-
-@contextmanager
-def input_transform_wrapper(frame):
-    frame.call_kwargs, frame.captures = (
-        frame.action.signature.transform_and_add_callable_args_to_prov(
-            frame.provenance, **frame.call_kwargs))
-    yield
-
-
-@contextmanager
-def pipeline_input_wrapper(frame):
-    frame.call_kwargs, frame.captures = (
-        frame.action.signature.transform_and_add_callable_args_to_prov(
-            frame.provenance, False, **frame.call_kwargs))
     yield
 
 
@@ -139,23 +151,10 @@ def checked_return_values(value, expected):
     return values
 
 
-@contextmanager
-def method_wrapper(frame):
-    yield
+def _publish_method(frame, fork_provenance):
     views = checked_return_values(frame.results, len(frame.output_types))
-    frame.results = tuple(frame.action.signature.coerce_given_outputs(
-        views, frame.output_types, frame.ctx, frame.provenance))
-
-
-@contextmanager
-def capture_wrapper(frame):
-    yield
-    for capture in frame.captures:
-        if not capture.is_set:
-            raise ValueError(
-                f"The capture parameter '{capture._name}' never had a "
-                "value set for it"
-            )
+    return frame.action.signature.coerce_given_outputs(
+        views, frame.output_types, frame.ctx, fork_provenance)
 
 
 @contextmanager
@@ -166,32 +165,24 @@ def results_wrapper(frame):
             frame.action.signature.outputs.keys(), frame.results)
 
 
-@contextmanager
-def dispatch_result_wrapper(frame, *, return_future):
-    yield
-    future = frame.dispatched
-    if return_future:
-        frame.results = future
-    elif frame.action._driver_apply or not frame.ctx._defer_results:
-        frame.results = future.result()
-    else:
-        frame.results = ProxyResults(future, frame.output_types)
+def _publish_visualization(frame, fork_provenance):
+    if frame.results is not None:
+        raise TypeError(
+            "Visualizer %r should not return anything. "
+            "Received %r as a return value."
+            % (frame.action, frame.results))
+    visualization = rachis.sdk.Visualization._from_data_dir(
+        frame.transformed_arguments['output_dir'],
+        fork_provenance('visualization'))
+    return (frame.ctx.add_reference(visualization),)
 
 
 @contextmanager
 def visualization_wrapper(frame):
     with tempfile.TemporaryDirectory(prefix='rachis-temp-') as temp_dir:
-        frame.call_kwargs['output_dir'] = temp_dir
-        yield
-        if frame.results is not None:
-            raise TypeError(
-                "Visualizer %r should not return anything. "
-                "Received %r as a return value."
-                % (frame.action, frame.results))
-        frame.provenance.output_name = 'visualization'
-        visualization = rachis.sdk.Visualization._from_data_dir(
-            temp_dir, frame.provenance)
-        frame.results = (frame.ctx.add_reference(visualization),)
+        frame.transformed_arguments['output_dir'] = temp_dir
+        with provenance_wrapper(frame, publish=_publish_visualization):
+            yield
 
 
 def _validate_pipeline_output(output):
@@ -238,15 +229,15 @@ def _alias_pipeline_output(name, qiime_type, output, provenance, ctx):
 
 
 @contextmanager
-def pipeline_wrapper(frame):
+def pipeline_provenance_wrapper(frame):
     ctx = frame.ctx
-    inputs = {name: frame.call_kwargs[name]
+    inputs = {name: frame.transformed_arguments[name]
               for name in frame.action.signature.inputs}
-    frame.call_kwargs['ctx'] = ctx
-    yield
+    with provenance_wrapper(frame, defer_inputs=True) as provenance:
+        frame.transformed_arguments['ctx'] = ctx
+        yield
     outputs = checked_return_values(frame.results, len(frame.output_types))
     outputs = tuple(map(_validate_pipeline_output, outputs))
-    provenance = frame.provenance
 
     def record_inputs(*values):
         cache = ChecksumCache()
@@ -329,8 +320,6 @@ class Action:
     outer_wrappers = (deprecation_wrapper,)
     inner_wrappers = (
         signature_wrapper,
-        provenance_wrapper,
-        checksum_wrapper,
         results_wrapper,
     )
 
@@ -477,9 +466,9 @@ class Action:
                 for wrapper in chain(ctx.outer_wrappers, self.outer_wrappers):
                     wrappers.enter_context(wrapper(frame))
                 if frame.results is None:
-                    wrappers.enter_context(dispatch_result_wrapper(
-                        frame, return_future=name == 'asynchronous'))
-                    frame.dispatched = ctx._dispatch_action_(frame)
+                    for wrapper in ctx.dispatch_result_wrappers:
+                        wrappers.enter_context(wrapper(frame))
+                    frame.results = ctx._dispatch_action_(frame)
 
             # Post-processing may replace results while the stack unwinds.
             return frame.results
@@ -497,7 +486,7 @@ class Action:
         with ExitStack() as stack:
             for wrapper in wrappers:
                 stack.enter_context(wrapper(frame))
-            frame.results = self._callable(**frame.call_kwargs)
+            frame.results = self._callable(**frame.transformed_arguments)
         return frame.results
 
     def _get_parsl_wrapper(self):
@@ -604,9 +593,8 @@ class Method(Action):
 
     inner_wrappers = (
         *Action.inner_wrappers,
-        capture_wrapper,
-        input_transform_wrapper,
-        method_wrapper,
+        checksum_wrapper,
+        partial(provenance_wrapper, publish=_publish_method),
     )
 
     @classmethod
@@ -642,8 +630,7 @@ class Visualizer(Action):
 
     inner_wrappers = (
         *Action.inner_wrappers,
-        capture_wrapper,
-        input_transform_wrapper,
+        checksum_wrapper,
         visualization_wrapper,
     )
 
@@ -666,9 +653,7 @@ class Pipeline(Action):
 
     inner_wrappers = (
         *Action.inner_wrappers,
-        pipeline_input_wrapper,
-        pipeline_wrapper,
-        capture_wrapper,
+        pipeline_provenance_wrapper,
     )
 
     @classmethod

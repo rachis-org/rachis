@@ -13,7 +13,7 @@ from parsl.app.app import python_app
 
 from rachis.sdk.futures import call_future
 from rachis.sdk.result import ResultCollection
-from rachis.sdk.proxy import Proxy
+from rachis.sdk.proxy import Proxy, ProxyResults
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
 
 from .base import Context, invocation_resources_wrapper
@@ -79,21 +79,14 @@ def _contains_proxy(value):
     return False
 
 
-@contextmanager
-def parsl_worker_wrapper(frame, inputs):
-    """Activate the cache and decode one app's resolved dependencies."""
-    with frame.ctx.cache:
-        frame.bound_arguments = _unmap_arg(frame.bound_arguments, inputs)
-        yield
-
-
 def _submit_app(frame, executor):
     futures = []
     worker_frame = frame.for_worker()
     worker_frame.bound_arguments = _map_arg(frame.bound_arguments, futures)
 
     def worker(frame, inputs=()):
-        with parsl_worker_wrapper(frame, inputs):
+        with frame.ctx.cache:
+            frame.bound_arguments = _unmap_arg(frame.bound_arguments, inputs)
             return frame()
 
     frame.action._set_wrapper_name(worker, frame.action.id)
@@ -101,9 +94,21 @@ def _submit_app(frame, executor):
         worker_frame, inputs=futures)
 
 
+@contextmanager
+def parallel_dispatch_result_wrapper(frame):
+    yield
+    if frame.action._driver_apply:
+        frame.results = frame.results.result()
+    else:
+        frame.output_types = frame.action.signature.solve_output(
+            **frame.bound_arguments)
+        frame.results = ProxyResults(frame.results, frame.output_types)
+
+
 class ParallelContext(Context):
     execution_ctx = MappingProxyType({'type': 'parsl'})
     outer_wrappers = (invocation_resources_wrapper, *Context.outer_wrappers)
+    dispatch_result_wrappers = (parallel_dispatch_result_wrapper,)
     _defer_results = True
 
     def __init__(self, action_obj, parent=None):

@@ -43,6 +43,12 @@ def cache_lookup_wrapper(frame):
 
 
 @contextmanager
+def resolve_dispatch_result_wrapper(frame):
+    yield
+    frame.results = frame.results.result()
+
+
+@contextmanager
 def invocation_resources_wrapper(frame):
     ctx = frame.ctx
     if ctx._parent is None and not ctx._entered:
@@ -69,6 +75,7 @@ class InvocationResources(ExitStack):
 class Context(IContext):
     outer_wrappers = (cache_lookup_wrapper,)
     inner_wrappers = ()
+    dispatch_result_wrappers = (resolve_dispatch_result_wrapper,)
     execution_ctx = MappingProxyType({'type': 'synchronous'})
     _defer_results = False
     _resources = None

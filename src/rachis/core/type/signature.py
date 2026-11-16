@@ -23,7 +23,7 @@ from .primitive import infer_primitive_type
 from .visualization import Visualization
 from . import meta
 from .util import (is_semantic_type, is_collection_type, is_primitive_type,
-                   parse_primitive, contains_generic_base)
+                   parse_primitive)
 from ..util import ImmutableBase, checksum, create_collection_name
 from rachis.plugin.context import IContext
 
@@ -519,75 +519,20 @@ class PipelineSignature:
         return param
 
 
-    def transform_and_add_callable_args_to_prov(self, provenance,
-                                                record_inputs=True, /,
-                                                **callable_args):
-        """ Transform inputs to views and add all callable arguments to
-            provenance. Needs to be done together so we can add transformation
-            records to provenance and because we want transformers to run
-            outside the DFK in parsl
-        """
-        # Keep track of all CaptureHolders so we can error if they do not have
-        # a value set after execution
-        captures = []
-
-        for name, spec in self.signature_order.items():
-            arg = callable_args[name]
-
-            if name in self.inputs:
-                if record_inputs:
-                    callable_args[name] = \
-                        self._transform_and_add_input_to_prov(
-                            provenance, name, spec, arg)
-            else:
-                if contains_generic_base(CaptureHolder, spec.view_type):
-                    capture = CaptureHolder(
-                        name, arg, spec.qiime_type, provenance
-                    )
-                    callable_args[name] = capture
-                    captures.append(capture)
-
-                provenance.add_parameter(name, spec.qiime_type, arg)
-
-        return callable_args, captures
-
-    def _transform_and_add_input_to_prov(self, provenance, name, spec, _input):
-        """ Transform the input and add both the input and the transformation
-            record to provenance
-        """
-        transformed_input = None
-
-        # Add input to provenance after creating the correct collection
-        # type
-        provenance.add_input(name, _input)
-        qiime_type, _ = self._get_qiime_type_and_name(spec)
-
-        if type(self) is PipelineSignature:
-            # We do not transform Artifacts to view type for Pipeline inputs.
-            # view type annotations are purely informational for
-            # whoever/whatever is looking at the pipeline signature
+    def _transform_input(self, spec, _input, transformation_recorder):
+        if _input is None or not spec.has_view_type():
             return _input
 
-        # Transform artifacts to view types as necessary
-        if _input is None:
-            transformed_input = None
-        elif spec.has_view_type():
-            recorder = provenance.transformation_recorder(name)
-            # Transform all members of collection into view type
-            if qtype.is_collection_type(qiime_type):
-                if isinstance(_input, rachis.sdk.result.ResultCollection):
-                    transformed_input = rachis.sdk.result.ResultCollection(
-                        {k: v._view(spec.view_type,
-                                    recorder) for k, v in _input.items()})
-                else:
-                    transformed_input = [
-                        i._view(spec.view_type, recorder) for i in _input]
-            else:
-                transformed_input = _input._view(spec.view_type, recorder)
-        else:
-            transformed_input = _input
-
-        return transformed_input
+        recorder = transformation_recorder()
+        qiime_type, _ = self._get_qiime_type_and_name(spec)
+        if qtype.is_collection_type(qiime_type):
+            if isinstance(_input, rachis.sdk.result.ResultCollection):
+                return rachis.sdk.result.ResultCollection({
+                    k: v._view(spec.view_type, recorder)
+                    for k, v in _input.items()
+                })
+            return [i._view(spec.view_type, recorder) for i in _input]
+        return _input._view(spec.view_type, recorder)
 
     def _get_qiime_type_and_name(self, spec):
         """ Get concrete qiime type and name from nested spec
@@ -612,7 +557,7 @@ class PipelineSignature:
         return qiime_type, qiime_name
 
     def coerce_given_outputs(self, output_views, output_types, ctx,
-                             provenance):
+                             fork_provenance):
         """ Coerce the outputs produced by the method into the desired types if
             possible. Primarily useful to create collections of outputs
         """
@@ -641,23 +586,22 @@ class PipelineSignature:
                     collection_name = create_collection_name(
                         name=name, key=key, idx=idx, size=size)
                     output[key] = self._create_output_artifact(
-                        provenance, collection_name, ctx, spec, view)
+                        fork_provenance(collection_name), ctx, spec, view)
             elif type(output_view) is not spec.view_type:
                 raise TypeError(
                     "Expected output view type %r, received %r" %
                     (spec.view_type.__name__, type(output_view).__name__))
             else:
                 output = self._create_output_artifact(
-                    provenance, name, ctx, spec, output_view)
+                    fork_provenance(name), ctx, spec, output_view)
 
             outputs.append(output)
 
         return outputs
 
-    def _create_output_artifact(self, provenance, name, ctx, spec, view):
+    def _create_output_artifact(self, provenance, ctx, spec, view):
         """ Create an output artifact from a view and add it to provenance
         """
-        prov = provenance.fork(name)
         qiime_type = spec.qiime_type
 
         # If we have a collection we need to get a concrete qiime_type to
@@ -670,7 +614,7 @@ class PipelineSignature:
             qiime_type = qiime_type.fields[0]
 
         artifact = rachis.sdk.Artifact._from_view(
-            qiime_type, view, spec.view_type, prov)
+            qiime_type, view, spec.view_type, provenance)
         artifact = ctx.add_reference(artifact)
 
         return artifact

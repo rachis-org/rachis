@@ -214,6 +214,7 @@ class ProxyResultCollection(Proxy):
     def _get_element_(self, results):
         """Get the result we want off of the future we have
         """
+        # Pipeline aliases have their own future for the collection.
         if self._selector_ is None:
             return results
         return getattr(results, self._selector_)
@@ -289,7 +290,7 @@ class ProxyResults(Proxy):
     def _asdict(self):
         return self._result()._asdict()
 
-    def _result(self):
+    def result(self):
         """If you are calling an action in a try-except block in a pipeline,
            you need to call this method on the Results object returned by the
            action.
@@ -307,6 +308,8 @@ class ProxyResults(Proxy):
            different cache/pool/whatever before your future resolves.
         """
         return self._future_.result()
+
+    _result = result
 
     def _create_proxy(self, selector):
         """Create a ProxyResult for the element of the ProxyResults being

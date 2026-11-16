@@ -26,6 +26,7 @@ def _subprocess_apply(frame):
 
 class AsynchronousContext(Context):
     execution_ctx = MappingProxyType({'type': 'asynchronous'})
+    dispatch_result_wrappers = ()
 
     def _dispatch_action_(self, frame):
         # x-ref for why this try except exists

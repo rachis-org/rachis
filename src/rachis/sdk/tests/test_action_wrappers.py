@@ -30,10 +30,11 @@ class TestActionWrappers(unittest.TestCase):
 
         @contextmanager
         def outer(frame):
-            self.assertEqual(frame.output_types,
-                             frame.action.signature.outputs)
+            self.assertIsNone(frame.output_types)
             events.append('outer-enter')
             yield
+            self.assertEqual(frame.output_types,
+                             frame.action.signature.outputs)
             self.assertIsInstance(frame.results, Results)
             self.assertIsInstance(frame.results.out, Artifact)
             events.append('outer-exit')
@@ -137,6 +138,7 @@ class TestActionWrappers(unittest.TestCase):
         class DeferredContext(Context):
             outer_wrappers = (outer,)
             inner_wrappers = (inner,)
+            dispatch_result_wrappers = ParallelContext.dispatch_result_wrappers
             _defer_results = True
 
             def _dispatch_action_(self, frame):
@@ -154,11 +156,13 @@ class TestActionWrappers(unittest.TestCase):
         self.assertFalse(dispatched.done())
         self.assertIsNone(frame.provenance)
         self.assertIs(frame.bound_arguments['ints'], artifact)
-        self.assertFalse(frame.call_kwargs)
+        self.assertFalse(frame.transformed_arguments)
         self.assertEqual(events, ['outer-enter', 'outer-exit'])
 
         dispatched.set_result(frame())
         self.assertEqual(results.left.view(list), [1])
+        with self.assertRaisesRegex(RuntimeError, 'finished frame'):
+            frame()
         self.assertEqual(events, [
             'outer-enter', 'outer-exit', 'inner-enter', 'inner-exit'])
 
