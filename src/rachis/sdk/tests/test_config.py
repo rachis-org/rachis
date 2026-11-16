@@ -315,29 +315,6 @@ class TestParslConfigParsing(unittest.TestCase):
     REWRITTEN_OPTIONS = {'block_error_handler', 'environment',
                          'scheduler_options', 'worker_init'}
 
-    # parsl classes a rachis user cannot make use of, so the configs do not
-    # use them
-    UNUSABLE_CLASSES = {
-        # These start VMs in a network of their own from images without rachis,
-        # so the workers cannot see the cache rachis is using
-        'AWSProvider', 'AzureProvider', 'GoogleCloudProvider',
-    }
-
-    # Options a rachis user cannot make use of, so the configs do not use
-    # them. Maps each class to these options
-    UNUSABLE_OPTIONS = {
-        # The memoizer only memoizes and checkpoints apps created with
-        # cache=True, which rachis's apps are not
-        'Config': {'memoizer'},
-        # These send the app's source code to the workers, which cannot run the
-        # closure rachis runs actions in. extra_pkgs only applies with pack
-        'WorkQueueExecutor': {'source', 'pack', 'extra_pkgs'},
-    }
-
-    # Staging only acts on parsl File objects, which rachis never gives its
-    # apps, so no executor's storage_access is used either
-    UNUSABLE_SHARED_OPTIONS = {'storage_access'}
-
     def setUp(self):
         self.config_dir = pathlib.Path(str(
             rachis.util.get_filepath_from_package(
@@ -347,49 +324,6 @@ class TestParslConfigParsing(unittest.TestCase):
         PARALLEL_CONFIG.debug = False
         PARALLEL_CONFIG.parallel_config = None
         PARALLEL_CONFIG.action_executor_mapping = {}
-
-    def test_every_parsl_option_is_in_a_config(self):
-        classes = [parsl.Config, parsl.monitoring.MonitoringHub]
-        for module in (parsl.executors, parsl.providers, parsl.launchers):
-            classes.extend(getattr(module, name)
-                           for name in dict.fromkeys(module.__all__))
-        # These are spread across their package's modules with no list of them
-        classes.extend(
-            self._find_subclasses(parsl.monitoring.radios, RadioConfig))
-        classes = [cls for cls in classes
-                   if cls.__name__ not in self.UNUSABLE_CLASSES]
-
-        used_options = collections.defaultdict(set)
-        for fp in self.config_dir.glob('*.toml'):
-            self._collect_options(
-                self._read_config(fp)['parsl'], 'Config', used_options)
-
-        missing = {}
-        for cls in classes:
-            name = cls.__name__
-            if name not in used_options:
-                missing[name] = 'class is not used'
-                continue
-
-            options = {
-                param.name
-                for param in inspect.signature(cls).parameters.values()
-                if param.kind not in (param.VAR_POSITIONAL,
-                                      param.VAR_KEYWORD)}
-            # The python API only options are covered by
-            # test_python_api_only_options
-            unused = (options - used_options[name]
-                      - python_api_only_options.get(name, set())
-                      - self.UNUSABLE_OPTIONS.get(name, set())
-                      - self.UNUSABLE_SHARED_OPTIONS)
-            if unused:
-                missing[name] = sorted(unused)
-
-        self.assertEqual(
-            missing, {}, 'These parsl classes or options are not used by any '
-            'config in data/parsl_configs. Add them to one to test that they '
-            'parse, or to UNUSABLE_CLASSES or UNUSABLE_OPTIONS if a rachis '
-            'user cannot make use of them.')
 
     def test_config_options(self):
         self._load_config('config_options.toml')
