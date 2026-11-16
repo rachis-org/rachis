@@ -27,6 +27,7 @@ requirements:
   - platformdirs
   - tomlkit
   - lxml
+  - truststore
   build:
   - python {{ python }}
   - setuptools
