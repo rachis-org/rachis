@@ -12,7 +12,7 @@ from types import MappingProxyType
 
 from parsl.app.app import python_app
 
-from rachis.sdk.action import Pipeline, prepare_signature
+from rachis.sdk.action import Pipeline
 from rachis.sdk.futures import call_future
 from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy, ProxyResults
@@ -71,16 +71,6 @@ def _unmap_arg(arg, inputs):
     return unmapped
 
 
-def _contains_proxy(value):
-    if isinstance(value, Proxy):
-        return True
-    if isinstance(value, (dict, ResultCollection)):
-        return any(_contains_proxy(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_contains_proxy(item) for item in value)
-    return False
-
-
 def _submit_app(frame, executor):
     futures = []
     worker_frame = frame.for_worker()
@@ -97,33 +87,28 @@ def _submit_app(frame, executor):
 
 
 @contextmanager
-def parallel_signature_wrapper(frame):
-    if not _contains_proxy(frame.bound_arguments):
-        prepare_signature(frame)
-    elif not frame.ctx._runs_on_driver(frame):
-        # The driver needs output types to expose proxies. The worker validates
-        # and normalizes values once Parsl resolves the inputs.
-        frame.output_types = frame.action.signature.solve_output(
-            **frame.bound_arguments)
-    yield
-
-
-@contextmanager
 def parallel_dispatch_result_wrapper(frame):
+    runs_on_driver = frame.ctx._runs_on_driver(frame)
+    output_types = frame.output_types
+    if frame.results is None and output_types is None and not runs_on_driver:
+        # Use declared proxy types for the driver. The worker prepares its own
+        # arguments and output types after Parsl resolves those inputs.
+        output_types = frame.action.signature.solve_output(
+            **frame.bound_arguments)
     yield
     if not isinstance(frame.results, Future):
         return
-    if frame.ctx._runs_on_driver(frame):
+    if runs_on_driver:
         frame.results = frame.results.result()
     else:
-        frame.results = ProxyResults(frame.results, frame.output_types)
+        frame.output_types = output_types
+        frame.results = ProxyResults(frame.results, output_types)
 
 
 class ParallelContext(Context):
     execution_ctx = MappingProxyType({'type': 'parsl'})
     outer_wrappers = (
         invocation_resources_wrapper,
-        parallel_signature_wrapper,
         cache_lookup_wrapper,
         parallel_dispatch_result_wrapper,
     )

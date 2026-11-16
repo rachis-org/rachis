@@ -24,6 +24,18 @@ class Proxy:
         return not (self == other)
 
 
+def contains_proxy(value):
+    from rachis.sdk.result import ResultCollection
+
+    if isinstance(value, Proxy):
+        return True
+    if isinstance(value, (dict, ResultCollection)):
+        return any(contains_proxy(item) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_proxy(item) for item in value)
+    return False
+
+
 def result_future(value):
     """Resolve a result reference, including any prospective collection."""
     from rachis.sdk.result import ResultCollection

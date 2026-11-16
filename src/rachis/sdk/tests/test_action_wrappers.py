@@ -25,12 +25,14 @@ class TestActionWrappers(unittest.TestCase):
     def setUp(self):
         self.plugin = get_dummy_plugin()
 
-    def test_context_wrappers_enclose_output_publication(self):
+    def test_context_wrappers_enter_after_action_wrappers(self):
         events = []
 
         @contextmanager
         def outer(frame):
-            self.assertIsNone(frame.output_types)
+            self.assertEqual(frame.output_types,
+                             frame.action.signature.outputs)
+            self.assertIsNone(frame.transformed_arguments)
             events.append('outer-enter')
             yield
             self.assertEqual(frame.output_types,
@@ -41,11 +43,10 @@ class TestActionWrappers(unittest.TestCase):
 
         @contextmanager
         def inner(frame):
-            self.assertIsNone(frame.provenance)
+            self.assertIsNotNone(frame.provenance)
             events.append('inner-enter')
             yield
-            self.assertIsInstance(frame.results, Results)
-            self.assertIsInstance(frame.results.out, Artifact)
+            self.assertEqual(frame.results, {'foo': 42})
             events.append('inner-exit')
 
         class ObservedContext(Context):
@@ -102,15 +103,18 @@ class TestActionWrappers(unittest.TestCase):
             with cache.create_pool('recycle'):
                 action = self.plugin.methods['no_input_method']
                 miss = ObservedContext(action, Context(), expect_dispatch=True)
+                normalize_arguments = action.signature.normalize_arguments
                 with patch.object(
-                        action.signature, 'coerce_user_input',
-                        wraps=action.signature.coerce_user_input) as coerce:
+                        action.signature, 'normalize_arguments',
+                        wraps=normalize_arguments) as normalize:
                     first = action._outer_bind(lambda: miss)()
-                coerce.assert_called_once_with()
+                normalize.assert_called_once_with()
                 self.assertTrue(miss.dispatched)
 
                 hit = ObservedContext(action, Context(), expect_dispatch=False)
-                with patch.object(action, 'outer_wrappers', (observe,)):
+                with patch.object(
+                        action, 'outer_wrappers',
+                        (*action.outer_wrappers, observe)):
                     second = action._outer_bind(lambda: hit)()
 
                 self.assertEqual(first.out.uuid, second.out.uuid)
@@ -158,7 +162,7 @@ class TestActionWrappers(unittest.TestCase):
         self.assertFalse(dispatched.done())
         self.assertIsNone(frame.provenance)
         self.assertIs(frame.bound_arguments['ints'], artifact)
-        self.assertIs(frame.transformed_arguments['ints'], artifact)
+        self.assertIsNone(frame.transformed_arguments)
         self.assertEqual(frame.output_types['left'].qiime_type, IntSequence1)
         self.assertEqual(results.left.type, IntSequence1)
         self.assertEqual(events, ['outer-enter', 'outer-exit'])

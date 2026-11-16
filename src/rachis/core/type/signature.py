@@ -466,27 +466,23 @@ class PipelineSignature:
                 " parameters, and outputs or no annotations."
             )
 
-    def coerce_user_input(self, **user_input):
-        """ Coerce user inputs to be appropriate for callable
-        """
-        callable_args = {}
+    def normalize_arguments(self, **arguments):
+        """Normalize bound arguments to the signature's expected shapes."""
+        normalized = {}
 
         for name, spec in self.signature_order.items():
             # Some arguments may be optional and won't be present here. Whether
             # they passed all mandatory arguments or not is validated elsewhere
-            if name in user_input:
-                arg = user_input[name]
+            if name in arguments:
+                arg = arguments[name]
                 if name in self.inputs:
-                    callable_args[name] = self._coerce_given_input(arg, spec)
+                    normalized[name] = self._normalize_input(arg, spec)
                 else:
-                    callable_args[name] = \
-                        self._coerce_given_parameter(arg, spec)
+                    normalized[name] = self._normalize_parameter(arg, spec)
 
-        return callable_args
+        return normalized
 
-    def _coerce_given_input(self, _input, spec):
-        """ Coerce input to be appropriate for callable
-        """
+    def _normalize_input(self, _input, spec):
         _, qiime_name = self._get_qiime_type_and_name(spec)
 
         # Transform collection from list to dict and vice versa if needed
@@ -502,9 +498,7 @@ class PipelineSignature:
 
         return _input
 
-    def _coerce_given_parameter(self, param, spec):
-        """ Coerce parameter to be appropriate for callable
-        """
+    def _normalize_parameter(self, param, spec):
         view_type = spec.view_type
         qiime_type = spec.qiime_type
 

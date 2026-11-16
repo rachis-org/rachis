@@ -23,8 +23,8 @@ import rachis.sdk
 from rachis.sdk.futures import join
 from rachis.sdk.iresult import IResult
 from rachis.sdk.proxy import (
-    ProxyResult, ProxyResultCollection, ProxyResults, output_proxy,
-    result_future,
+    ProxyResult, ProxyResultCollection, ProxyResults, contains_proxy,
+    output_proxy, result_future,
 )
 from rachis.sdk.result import Artifact, ResultCollection, ChecksumCache
 import rachis.core.type as qtype
@@ -70,9 +70,7 @@ class Frame:
         """Copy a dispatchable phase's inputs into a fresh worker frame."""
         frame = Frame(self.action, self.ctx, self.bound_arguments,
                       phase=self.phase)
-        if self.transformed_arguments is not None:
-            frame.transformed_arguments = self.transformed_arguments.copy()
-            frame.output_types = self.output_types
+        frame.output_types = self.output_types
         return frame
 
 
@@ -88,18 +86,26 @@ def deprecation_wrapper(frame):
     yield
 
 
-def prepare_signature(frame):
+def normalize_arguments(frame):
     signature = frame.action.signature
     signature.check_types(**frame.bound_arguments)
     frame.output_types = signature.solve_output(**frame.bound_arguments)
-    frame.transformed_arguments = signature.coerce_user_input(
+    frame.bound_arguments = signature.normalize_arguments(
         **frame.bound_arguments)
 
 
 @contextmanager
-def signature_wrapper(frame):
-    if frame.transformed_arguments is None:
-        prepare_signature(frame)
+def normalize_arguments_wrapper(frame):
+    if not contains_proxy(frame.bound_arguments):
+        normalize_arguments(frame)
+    yield
+
+
+@contextmanager
+def callable_arguments_wrapper(frame):
+    if frame.output_types is None:
+        normalize_arguments(frame)
+    frame.transformed_arguments = frame.bound_arguments.copy()
     yield
 
 
@@ -108,9 +114,9 @@ def provenance_wrapper(frame):
     action = frame.action
     provenance = frame.provenance = action._ProvCaptureCls(
         action.type, action.plugin_id, action.id, frame.ctx.execution_ctx)
-    arguments = frame.transformed_arguments
     for name, spec in action.signature.parameters.items():
-        provenance.add_parameter(name, spec.qiime_type, arguments[name])
+        provenance.add_parameter(name, spec.qiime_type,
+                                 frame.bound_arguments[name])
 
     yield
 
@@ -123,7 +129,7 @@ def provenance_wrapper(frame):
 @contextmanager
 def input_provenance_wrapper(frame):
     for name in frame.action.signature.inputs:
-        frame.provenance.add_input(name, frame.transformed_arguments[name])
+        frame.provenance.add_input(name, frame.bound_arguments[name])
     yield
 
 
@@ -175,6 +181,10 @@ def checksum_wrapper(frame):
             cache.cache_artifact(value)
         elif isinstance(value, ResultCollection):
             cache.cache_result_collection(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, Artifact):
+                    cache.cache_artifact(item)
     yield
 
 
@@ -265,7 +275,7 @@ def _alias_pipeline_output(name, qiime_type, output, provenance, ctx):
 @contextmanager
 def pipeline_provenance_wrapper(frame):
     ctx = frame.ctx
-    inputs = {name: frame.transformed_arguments[name]
+    inputs = {name: frame.bound_arguments[name]
               for name in frame.action.signature.inputs}
     frame.transformed_arguments['ctx'] = ctx
     yield
@@ -350,10 +360,11 @@ class Action:
     _ProvCaptureCls = archive.ActionProvenanceCapture
 
     # Outer wrappers run where an application is requested. Inner wrappers run
-    # where its callable is evaluated. Context wrappers enclose both stacks.
-    outer_wrappers = (deprecation_wrapper,)
+    # where its callable is evaluated. Context wrappers enter after the
+    # action's wrappers in each stack.
+    outer_wrappers = (deprecation_wrapper, normalize_arguments_wrapper)
     inner_wrappers = (
-        signature_wrapper,
+        callable_arguments_wrapper,
         results_wrapper,
     )
 
@@ -497,7 +508,7 @@ class Action:
             frame = Frame(self, ctx, bound.arguments)
 
             with ExitStack() as wrappers:
-                for wrapper in chain(ctx.outer_wrappers, self.outer_wrappers):
+                for wrapper in chain(self.outer_wrappers, ctx.outer_wrappers):
                     wrappers.enter_context(wrapper(frame))
                 if frame.results is None:
                     frame.results = ctx._dispatch_action_(frame)
@@ -514,7 +525,7 @@ class Action:
 
     def _inner_apply(self, frame):
         """Execute a prepared application in its execution Context."""
-        wrappers = chain(frame.ctx.inner_wrappers, self.inner_wrappers)
+        wrappers = chain(self.inner_wrappers, frame.ctx.inner_wrappers)
         with ExitStack() as stack:
             for wrapper in wrappers:
                 stack.enter_context(wrapper(frame))
