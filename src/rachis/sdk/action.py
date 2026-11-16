@@ -338,7 +338,6 @@ class Action:
     """QIIME 2 Action"""
     type = 'action'
     _ProvCaptureCls = archive.ActionProvenanceCapture
-    _driver_apply = False
 
     # Outer wrappers run where an application is requested. Inner wrappers run
     # where its callable is evaluated. Context wrappers enclose both stacks.
@@ -680,7 +679,6 @@ class Pipeline(Action):
     """Rachis Pipeline"""
     type = 'pipeline'
     _ProvCaptureCls = archive.PipelineProvenanceCapture
-    _driver_apply = True
 
     inner_wrappers = (
         *Action.inner_wrappers,

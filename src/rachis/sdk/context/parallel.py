@@ -11,6 +11,7 @@ from types import MappingProxyType
 
 from parsl.app.app import python_app
 
+from rachis.sdk.action import Pipeline
 from rachis.sdk.futures import call_future
 from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy, ProxyResults
@@ -97,7 +98,7 @@ def _submit_app(frame, executor):
 @contextmanager
 def parallel_dispatch_result_wrapper(frame):
     yield
-    if frame.action._driver_apply:
+    if frame.ctx._runs_on_driver(frame):
         frame.results = frame.results.result()
     else:
         frame.output_types = frame.action.signature.solve_output(
@@ -130,10 +131,13 @@ class ParallelContext(Context):
         if not any(_contains_proxy(value) for value in inputs.values()):
             return super()._check_cache(inputs)
 
+    def _runs_on_driver(self, frame):
+        return isinstance(frame.action, Pipeline)
+
     def _dispatch_action_(self, frame):
         # Pipeline bodies keep coordinating locally, as before this refactor.
         # Their child applications still pass through their own outer stacks.
-        if frame.action._driver_apply:
+        if self._runs_on_driver(frame):
             self.execution_ctx = {'type': 'parsl', 'parsl_type': 'DFK'}
             return call_future(frame)
 

@@ -135,11 +135,9 @@ class TestActionWrappers(unittest.TestCase):
             yield
             events.append('inner-exit')
 
-        class DeferredContext(Context):
+        class DeferredContext(ParallelContext):
             outer_wrappers = (outer,)
             inner_wrappers = (inner,)
-            dispatch_result_wrappers = ParallelContext.dispatch_result_wrappers
-            _defer_results = True
 
             def _dispatch_action_(self, frame):
                 future = Future()
