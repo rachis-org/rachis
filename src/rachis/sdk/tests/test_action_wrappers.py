@@ -414,7 +414,20 @@ class TestActionWrappers(unittest.TestCase):
         self.assertIsNot(contexts[0].execution_ctx, contexts[1].execution_ctx)
 
     def test_serialized_frame_resumes_application_without_rebinding(self):
+        @contextmanager
+        def bind_state(frame):
+            frame.request_label = 'bound in the caller'
+            yield
+
+        @contextmanager
+        def consume_state(frame):
+            assert frame.request_label == 'bound in the caller'
+            yield
+
         class SerializingContext(Context):
+            outer_bind_wrappers = (bind_state, *Context.outer_bind_wrappers)
+            inner_apply_wrappers = (consume_state,)
+
             def _dispatch_action_(self, frame):
                 worker = dill.loads(dill.dumps(frame.for_worker()))
                 return as_future(worker)

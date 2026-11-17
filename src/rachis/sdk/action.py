@@ -6,6 +6,7 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+import copy
 import inspect
 import tempfile
 import textwrap
@@ -72,11 +73,12 @@ class Frame:
                 raise ValueError(f'Unknown frame phase: {phase!r}')
 
     def for_worker(self):
-        """Copy a dispatchable phase's inputs into a fresh worker frame."""
-        frame = Frame(self.action, self.ctx, self.bound_arguments,
-                      phase=self.phase)
-        frame.output_types = self.output_types
-        return frame
+        """Copy the continuation, including state established by wrappers.
+
+        Transport adapters replace arguments on this copy. Serialization
+        hydrates its state in the worker without transporting entered stacks.
+        """
+        return copy.copy(self)
 
 
 @contextmanager
