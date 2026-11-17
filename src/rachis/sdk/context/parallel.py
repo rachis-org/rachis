@@ -101,7 +101,7 @@ def parallel_dispatch_result_wrapper(frame):
 
 class ParallelContext(Context):
     execution_ctx = MappingProxyType({'type': 'parsl'})
-    outer_wrappers = (
+    outer_bind_wrappers = (
         invocation_resources_wrapper,
         cache_lookup_wrapper,
         parallel_dispatch_result_wrapper,

@@ -77,11 +77,11 @@ class InvocationResources(ExitStack):
 
 
 class Context(IContext):
-    outer_wrappers = (
+    outer_bind_wrappers = (
         cache_lookup_wrapper,
         resolve_dispatch_result_wrapper,
     )
-    inner_wrappers = ()
+    inner_apply_wrappers = ()
     execution_ctx = MappingProxyType({'type': 'synchronous'})
     _defer_results = False
     _resources = None

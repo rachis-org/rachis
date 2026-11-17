@@ -13,6 +13,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import dill
+
 from rachis.core.cache import Cache
 from rachis.core.testing.type import IntSequence1, IntSequence2, Mapping
 from rachis.core.testing.type import SingleInt
@@ -21,6 +23,7 @@ from rachis.core.util import load_action_yaml
 from rachis.plugin import Collection
 from rachis.sdk import Artifact, ResultCollection, Results
 from rachis.sdk.context import Context, ParallelContext
+from rachis.sdk.futures import as_future
 from rachis.sdk.parallel_config import ParallelConfig
 from rachis.sdk.proxy import ProxyArtifact, ProxyResultCollection
 
@@ -54,8 +57,8 @@ class TestActionWrappers(unittest.TestCase):
             events.append('inner-exit')
 
         class ObservedContext(Context):
-            outer_wrappers = (outer, *Context.outer_wrappers)
-            inner_wrappers = (inner,)
+            outer_bind_wrappers = (outer, *Context.outer_bind_wrappers)
+            inner_apply_wrappers = (inner,)
 
         action = self.plugin.methods['no_input_method']
         call = action._outer_bind(lambda: ObservedContext(action))
@@ -75,13 +78,14 @@ class TestActionWrappers(unittest.TestCase):
             frame.results = replacement
 
         class ReplacingContext(Context):
-            outer_wrappers = (replace_results, *Context.outer_wrappers)
+            outer_bind_wrappers = (replace_results,
+                                   *Context.outer_bind_wrappers)
 
         action = self.plugin.methods['no_input_method']
         call = action._outer_bind(lambda: ReplacingContext(action))
         self.assertIs(call(), replacement)
 
-    def test_all_outer_wrappers_can_observe_a_cache_hit(self):
+    def test_all_outer_bind_wrappers_can_observe_a_cache_hit(self):
         observed = []
 
         @contextmanager
@@ -90,7 +94,7 @@ class TestActionWrappers(unittest.TestCase):
             observed.append(frame.results)
 
         class ObservedContext(Context):
-            outer_wrappers = (observe, *Context.outer_wrappers)
+            outer_bind_wrappers = (observe, *Context.outer_bind_wrappers)
 
             def __init__(self, action, parent, *, expect_dispatch):
                 super().__init__(action, parent=parent)
@@ -117,8 +121,8 @@ class TestActionWrappers(unittest.TestCase):
 
                 hit = ObservedContext(action, Context(), expect_dispatch=False)
                 with patch.object(
-                        action, 'outer_wrappers',
-                        (*action.outer_wrappers, observe)):
+                        action, 'outer_bind_wrappers',
+                        (*action.outer_bind_wrappers, observe)):
                     second = action._outer_bind(lambda: hit)()
 
                 self.assertEqual(first.out.uuid, second.out.uuid)
@@ -157,8 +161,8 @@ class TestActionWrappers(unittest.TestCase):
             yield
 
         class DeferredContext(ParallelContext):
-            outer_wrappers = (outer, *ParallelContext.outer_wrappers)
-            inner_wrappers = (inner,)
+            outer_bind_wrappers = (outer, *ParallelContext.outer_bind_wrappers)
+            inner_apply_wrappers = (inner,)
 
             def _dispatch_action_(self, frame):
                 future = Future()
@@ -195,8 +199,8 @@ class TestActionWrappers(unittest.TestCase):
                 self.assertEqual(events, ['outer-enter', 'outer-exit'])
 
                 frame.bound_arguments = {'ints': artifact}
-                with patch.object(action, 'inner_wrappers', (
-                    require_prepared_arguments, *action.inner_wrappers,
+                with patch.object(action, 'inner_apply_wrappers', (
+                    require_prepared_arguments, *action.inner_apply_wrappers,
                 )):
                     dispatched.set_result(frame())
                 solve.assert_called_once_with(ints=argument)
@@ -240,7 +244,7 @@ class TestActionWrappers(unittest.TestCase):
             yield
 
         class ObservedContext(Context):
-            outer_wrappers = (observe, *Context.outer_wrappers)
+            outer_bind_wrappers = (observe, *Context.outer_bind_wrappers)
 
         action = self.plugin.methods['list_of_ints']
         artifact = Artifact.import_data(SingleInt, 1)
@@ -408,6 +412,19 @@ class TestActionWrappers(unittest.TestCase):
         self.assertEqual(len(contexts), 2)
         self.assertIsNot(contexts[0], contexts[1])
         self.assertIsNot(contexts[0].execution_ctx, contexts[1].execution_ctx)
+
+    def test_serialized_frame_resumes_application_without_rebinding(self):
+        class SerializingContext(Context):
+            def _dispatch_action_(self, frame):
+                worker = dill.loads(dill.dumps(frame.for_worker()))
+                return as_future(worker)
+
+        action = self.plugin.methods['split_ints']
+        artifact = Artifact.import_data(IntSequence1, [1, 2, 3])
+        call = action._outer_bind(lambda: SerializingContext(action))
+        results = call(artifact)
+        self.assertEqual(results.left.view(list), [1])
+        self.assertEqual(results.right.view(list), [2, 3])
 
 
 if __name__ == '__main__':

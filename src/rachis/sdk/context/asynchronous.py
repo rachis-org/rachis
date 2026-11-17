@@ -19,14 +19,14 @@ def _subprocess_apply(frame):
     with frame.ctx.cache:
         ctx = Context(frame.action)
         ctx.execution_ctx = dict(frame.ctx.execution_ctx)
-        ctx.inner_wrappers = frame.ctx.inner_wrappers
+        ctx.inner_apply_wrappers = frame.ctx.inner_apply_wrappers
         frame.ctx = ctx
         return frame()
 
 
 class AsynchronousContext(Context):
     execution_ctx = MappingProxyType({'type': 'asynchronous'})
-    outer_wrappers = (cache_lookup_wrapper,)
+    outer_bind_wrappers = (cache_lookup_wrapper,)
 
     def _dispatch_action_(self, frame):
         # x-ref for why this try except exists

@@ -36,15 +36,20 @@ from rachis.core.cite import CitationRecord
 
 
 class FramePhase(Enum):
-    OUTER_APPLY = 'outer_apply'
+    INNER_APPLY = 'inner_apply'
     FINISHED = 'finished'
 
 
 class Frame:
-    """State for one application phase, shared by its wrapper stack."""
+    """Serializable continuation and runtime state for one application.
+
+    Binding establishes the inputs and next phase before dispatch. The
+    receiving Context calls the frame to enter that phase's wrapper stack.
+    Live stacks and resources belong to the process applying the frame.
+    """
 
     def __init__(self, action, ctx, bound_arguments, *,
-                 phase=FramePhase.OUTER_APPLY):
+                 phase=FramePhase.INNER_APPLY):
         self.action = action
         self.ctx = ctx
         self.bound_arguments = bound_arguments
@@ -56,15 +61,15 @@ class Frame:
         self.ready_provenance = None
 
     def __call__(self):
-        match self.phase:
-            case FramePhase.OUTER_APPLY:
-                result = self.action._outer_apply(self)
-                self.phase = FramePhase.FINISHED
+        phase = self.phase
+        self.phase = FramePhase.FINISHED
+        match phase:
+            case FramePhase.INNER_APPLY:
+                return self.action._inner_apply(self)
             case FramePhase.FINISHED:
                 raise RuntimeError('Cannot call a finished frame')
             case _:
-                raise ValueError(f'Unknown frame phase: {self.phase!r}')
-        return result
+                raise ValueError(f'Unknown frame phase: {phase!r}')
 
     def for_worker(self):
         """Copy a dispatchable phase's inputs into a fresh worker frame."""
@@ -72,6 +77,13 @@ class Frame:
                       phase=self.phase)
         frame.output_types = self.output_types
         return frame
+
+
+@contextmanager
+def track_results_wrapper(frame):
+    yield
+    # Observe the exterior result after all result adapters have unwound.
+    frame.ctx._track_results(frame.results)
 
 
 @contextmanager
@@ -350,8 +362,12 @@ class Action:
     # Outer wrappers run where an application is requested. Inner wrappers run
     # where its callable is evaluated. Context wrappers enter after the
     # action's wrappers in each stack.
-    outer_wrappers = (deprecation_wrapper, normalize_arguments_wrapper)
-    inner_wrappers = (
+    outer_bind_wrappers = (
+        track_results_wrapper,
+        deprecation_wrapper,
+        normalize_arguments_wrapper,
+    )
+    inner_apply_wrappers = (
         callable_arguments_wrapper,
         results_wrapper,
     )
@@ -496,25 +512,22 @@ class Action:
             frame = Frame(self, ctx, bound.arguments)
 
             with ExitStack() as wrappers:
-                for wrapper in chain(self.outer_wrappers, ctx.outer_wrappers):
+                for wrapper in chain(self.outer_bind_wrappers,
+                                     ctx.outer_bind_wrappers):
                     wrappers.enter_context(wrapper(frame))
                 if frame.results is None:
                     frame.results = ctx._dispatch_action_(frame)
 
-            # Post-processing may replace results while the stack unwinds.
-            ctx._track_results(frame.results)
             return frame.results
 
         self._set_wrapper_properties(bound_callable)
         self._set_wrapper_name(bound_callable, name or self.id)
         return bound_callable
 
-    def _outer_apply(self, frame):
-        return self._inner_apply(frame)
-
     def _inner_apply(self, frame):
         """Execute a prepared application in its execution Context."""
-        wrappers = chain(self.inner_wrappers, frame.ctx.inner_wrappers)
+        wrappers = chain(self.inner_apply_wrappers,
+                         frame.ctx.inner_apply_wrappers)
         with ExitStack() as stack:
             for wrapper in wrappers:
                 stack.enter_context(wrapper(frame))
@@ -627,8 +640,8 @@ class Method(Action):
 
     type = 'method'
 
-    inner_wrappers = (
-        *Action.inner_wrappers,
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
         method_output_wrapper,
         provenance_wrapper,
         input_transform_wrapper,
@@ -666,8 +679,8 @@ class Visualizer(Action):
 
     type = 'visualizer'
 
-    inner_wrappers = (
-        *Action.inner_wrappers,
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
         visualization_wrapper,
         provenance_wrapper,
         input_transform_wrapper,
@@ -690,8 +703,8 @@ class Pipeline(Action):
     type = 'pipeline'
     _ProvCaptureCls = archive.PipelineProvenanceCapture
 
-    inner_wrappers = (
-        *Action.inner_wrappers,
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
         pipeline_alias_wrapper,
         provenance_wrapper,
         pipeline_outputs_wrapper,
