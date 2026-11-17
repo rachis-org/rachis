@@ -449,6 +449,90 @@ def test_parsl_resolves_a_coordinate_through_the_dag_before_batch_exit(
     assert result.view(dict) == {'s1': '7'}
 
 
+@pytest.mark.parametrize('coverage', ['matched', 'optional'])
+def test_pending_subset_broadcasts_before_producer_batch_finishes(coverage):
+    plugin = get_dummy_plugin()
+    downstream_committed = Event()
+    order = []
+    inner_apply = MappedMethod._inner_apply
+
+    def broadcast_offset(
+        offset: Annotated[str | None, ForEach['sample':'student':coverage]],
+        data: Annotated[str, ForEach['student', 'assignment']],
+    ) -> Annotated[str, ForEach['student', 'assignment']]:
+        return str(int(data) + (0 if offset is None else int(offset)))
+
+    def broadcast_pipeline(ctx, offsets, scores):
+        retained, _ = ctx.get_action('dummy_plugin', 'filter_samples')(offsets)
+        return ctx.get_action('dummy_plugin', 'broadcast_offset')(
+            retained, scores).output
+
+    def mark_committed(future):
+        future.result()
+        order.append('consumer s1')
+        if len(order) == 2:
+            downstream_committed.set()
+
+    @contextmanager
+    def observe_invocation(frame):
+        yield
+        if frame.action.id == 'broadcast_offset':
+            for assignment in ('a1', 'a2'):
+                cell = frame.results.output._cells['s1', assignment]
+                cell.future.add_done_callback(mark_committed)
+
+    def batches(ctx, cells):
+        if ctx.action_obj.id == 'filter_samples':
+            yield tuple(cells)
+        else:
+            for cell in cells:
+                yield (cell,)
+
+    def observe_cell(self, frame):
+        if (frame.action.id == 'filter_samples'
+                and frame.coordinate.sample == 's2'):
+            assert downstream_committed.wait(timeout=10), (
+                'broadcast consumers waited for the producer batch')
+            order.append('producer s2')
+        return inner_apply(self, frame)
+
+    with (patch.dict(plugin.methods), patch.dict(plugin.pipelines),
+          TemporaryDirectory() as run_dir):
+        plugin.methods.register_function(
+            broadcast_offset,
+            inputs={'offset': Mapping, 'data': AssignmentScores},
+            parameters={}, outputs={'output': AssignmentScores},
+            name='Broadcast a pending offset', description='',
+        )
+        plugin.pipelines.register_function(
+            broadcast_pipeline,
+            inputs={'offsets': Mapping, 'scores': AssignmentScores},
+            parameters={}, outputs={'output': AssignmentScores},
+            name='Broadcast through a pipeline', description='',
+        )
+        offsets = Artifact.import_data('Mapping', {'s1': '10', 's2': '-5'})
+        scores = Artifact.import_data(
+            'AssignmentScores', {'s1/a1': '4', 's1/a2': '5', 's2/a1': '6'})
+        config = Config(
+            executors=[SerializingExecutor(label='default', max_threads=3)],
+            run_dir=run_dir,
+        )
+        with (patch.object(ParallelContext, '_batches', batches),
+              patch.object(MappedMethod, 'inner_bind_wrappers',
+                           (observe_invocation,
+                            *MappedMethod.inner_bind_wrappers)),
+              patch.object(MappedMethod, '_inner_apply', observe_cell),
+              ParallelConfig(config)):
+            result = plugin.pipelines['broadcast_pipeline'].parallel(
+                offsets, scores).output
+
+    assert order == ['consumer s1', 'consumer s1', 'producer s2']
+    expected = {'s1/a1': '14', 's1/a2': '15'}
+    if coverage == 'optional':
+        expected['s2/a1'] = '6'
+    assert result.view(dict) == expected
+
+
 def test_parallel_root_cleans_up_mapped_work_after_pipeline_error(tmp_path):
     pipeline = get_dummy_plugin().pipelines['mapped_sample_pipeline']
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
