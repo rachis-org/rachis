@@ -6,6 +6,7 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+import copy
 import csv
 from concurrent.futures import wait
 from contextlib import ExitStack, contextmanager
@@ -407,15 +408,12 @@ def mapped_results_wrapper(frame):
     if futures.keys() != frame.cells.keys():
         raise ValueError('Cell dispatch must return each coordinate once')
 
+    # Assembly owns its state while dispatch retains the exterior result.
+    completed = copy.copy(frame)
+
     def assemble(inputs, *outcomes):
-        # Completion is local result adaptation. It has no dispatchable phase
-        # and leaves the dispatch frame's exterior result intact.
-        completed = Frame(frame.action, frame.ctx, inputs,
-                          phase=FramePhase.FINISHED)
-        completed.output_types = frame.output_types
-        completed.cells = frame.cells
-        completed.axes = frame.axes
-        completed.outcomes = dict(zip(frame.cells, outcomes, strict=True))
+        completed.bound_arguments = inputs
+        completed.outcomes = dict(zip(completed.cells, outcomes, strict=True))
         with (
             prepare_callable_arguments_wrapper(completed),
             mapped_output_wrapper(completed),
