@@ -15,7 +15,7 @@ import pytest
 import dill
 
 from rachis import Artifact, ForEach
-from rachis.core.testing.type import Mapping
+from rachis.core.testing.type import AssignmentScores, Mapping
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.plugin import CaptureHolder, Int
 from rachis.sdk import MappedMethod, Results
@@ -70,6 +70,74 @@ def test_per_output_filtering():
     assert records.read_text().splitlines() == [
         'sample\tattempt\toutcome', 's1\t1\tcompleted', 's2\t1\tfiltered',
     ]
+
+
+@pytest.mark.parametrize('binding', ['student', 'assignment'])
+@pytest.mark.parametrize('coverage', ['matched', 'optional', 'required'])
+def test_subset_input_broadcasts_over_composite_coordinates(binding, coverage):
+    observed = []
+
+    def add_offset(
+        offset: Annotated[str | None, ForEach['sample':binding:coverage]],
+        data: Annotated[str, ForEach['student', 'assignment']],
+    ) -> Annotated[str, ForEach['student', 'assignment']]:
+        observed.append((data, offset))
+        return str(int(data) + (0 if offset is None else int(offset)))
+
+    plugin = get_dummy_plugin()
+    scores = {'s1/a1': '4', 's1/a2': '5', 's2/a1': '6'}
+    offsets = {'s1' if binding == 'student' else 'a1': '10', 'unused': '99'}
+    index = 0 if binding == 'student' else 1
+    with patch.dict(plugin.methods):
+        plugin.methods.register_function(
+            add_offset, inputs={'offset': Mapping, 'data': AssignmentScores},
+            parameters={}, outputs={'output': AssignmentScores},
+            name='Broadcast an offset', description='',
+        )
+        method = plugin.methods['add_offset']
+        data = Artifact.import_data('AssignmentScores', scores)
+        offset = Artifact.import_data('Mapping', offsets)
+        if coverage == 'required':
+            with pytest.raises(ValueError, match='Required inputs.*offset'):
+                method(offset, data)
+            assert observed == []
+            offsets['s2' if binding == 'student' else 'a2'] = '20'
+            offset = Artifact.import_data('Mapping', offsets)
+        output = method(offset, data).output
+
+    expected = {}
+    expected_calls = []
+    for coordinate, value in scores.items():
+        amount = offsets.get(coordinate.split('/')[index])
+        if amount is None and coverage == 'matched':
+            continue
+        expected[coordinate] = str(
+            int(value) + (0 if amount is None else int(amount)))
+        expected_calls.append((value, amount))
+    assert output.view(dict) == expected
+    assert observed == expected_calls
+
+
+def test_disjoint_input_bindings_still_form_a_product():
+    def add_offsets(
+        data: Annotated[str, ForEach['sample':'student']],
+        offset: Annotated[str, ForEach['sample':'assignment']],
+    ) -> Annotated[str, ForEach['student', 'assignment']]:
+        return str(int(data) + int(offset))
+
+    plugin = get_dummy_plugin()
+    with patch.dict(plugin.methods):
+        plugin.methods.register_function(
+            add_offsets, inputs={'data': Mapping, 'offset': Mapping},
+            parameters={}, outputs={'output': AssignmentScores},
+            name='Add independent offsets', description='',
+        )
+        data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
+        offset = Artifact.import_data('Mapping', {'a1': '10', 'a2': '20'})
+        output = plugin.methods['add_offsets'](data, offset).output
+    assert output.view(dict) == {
+        's1/a1': '14', 's1/a2': '24', 's2/a1': '15', 's2/a2': '25',
+    }
 
 
 def test_cell_context_exits_before_staging_outputs():
