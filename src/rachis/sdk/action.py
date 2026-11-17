@@ -23,7 +23,7 @@ import rachis.sdk
 from rachis.sdk.futures import join
 from rachis.sdk.iresult import IResult
 from rachis.sdk.proxy import (
-    ProxyResult, ProxyResultCollection, ProxyResults, contains_proxy,
+    ProxyResult, ProxyResultCollection, ProxyResults,
     output_proxy, result_future,
 )
 from rachis.sdk.result import Artifact, ResultCollection, ChecksumCache
@@ -59,11 +59,11 @@ class Frame:
         match self.phase:
             case FramePhase.OUTER_APPLY:
                 result = self.action._outer_apply(self)
+                self.phase = FramePhase.FINISHED
             case FramePhase.FINISHED:
                 raise RuntimeError('Cannot call a finished frame')
             case _:
                 raise ValueError(f'Unknown frame phase: {self.phase!r}')
-        self.phase = FramePhase.FINISHED
         return result
 
     def for_worker(self):
@@ -86,26 +86,29 @@ def deprecation_wrapper(frame):
     yield
 
 
-def normalize_arguments(frame):
-    signature = frame.action.signature
-    signature.check_types(**frame.bound_arguments)
-    frame.output_types = signature.solve_output(**frame.bound_arguments)
-    frame.bound_arguments = signature.normalize_arguments(
-        **frame.bound_arguments)
-
-
 @contextmanager
 def normalize_arguments_wrapper(frame):
-    if not contains_proxy(frame.bound_arguments):
-        normalize_arguments(frame)
+    signature = frame.action.signature
+    arguments = frame.bound_arguments
+    signature.check_types(**arguments)
+    frame.output_types = signature.solve_output(**arguments)
+    frame.bound_arguments = signature.normalize_arguments(**arguments)
     yield
 
 
 @contextmanager
 def callable_arguments_wrapper(frame):
-    if frame.output_types is None:
-        normalize_arguments(frame)
-    frame.transformed_arguments = frame.bound_arguments.copy()
+    signature = frame.action.signature
+    arguments = frame.transformed_arguments = frame.bound_arguments.copy()
+    for name, spec in signature.inputs.items():
+        argument = arguments[name]
+        if isinstance(argument, ProxyResultCollection):
+            argument = argument.result()
+        if isinstance(argument, ResultCollection):
+            if not argument:
+                raise TypeError(
+                    f'Parameter {name!r} received an empty collection.')
+            arguments[name] = signature._shape_collection_input(argument, spec)
     yield
 
 
@@ -129,7 +132,7 @@ def provenance_wrapper(frame):
 @contextmanager
 def input_provenance_wrapper(frame):
     for name in frame.action.signature.inputs:
-        frame.provenance.add_input(name, frame.bound_arguments[name])
+        frame.provenance.add_input(name, frame.transformed_arguments[name])
     yield
 
 
@@ -176,7 +179,7 @@ def capture_wrapper(frame):
 @contextmanager
 def checksum_wrapper(frame):
     cache = ChecksumCache()
-    for value in frame.bound_arguments.values():
+    for value in frame.transformed_arguments.values():
         if isinstance(value, Artifact):
             cache.cache_artifact(value)
         elif isinstance(value, ResultCollection):
@@ -275,7 +278,7 @@ def _alias_pipeline_output(name, qiime_type, output, provenance, ctx):
 @contextmanager
 def pipeline_provenance_wrapper(frame):
     ctx = frame.ctx
-    inputs = {name: frame.bound_arguments[name]
+    inputs = {name: frame.transformed_arguments[name]
               for name in frame.action.signature.inputs}
     frame.transformed_arguments['ctx'] = ctx
     yield
@@ -514,6 +517,7 @@ class Action:
                     frame.results = ctx._dispatch_action_(frame)
 
             # Post-processing may replace results while the stack unwinds.
+            ctx._track_results(frame.results)
             return frame.results
 
         self._set_wrapper_properties(bound_callable)
@@ -533,12 +537,16 @@ class Action:
         return frame.results
 
     def _get_parsl_wrapper(self):
-        def context_factory():
+        def parsl_wrapper(*args, **kwargs):
             if not isinstance(self, Pipeline):
                 raise ValueError('Only pipelines may be run in parallel')
-            return rachis.sdk.ParallelContext(self)
+            with rachis.sdk.ParallelContext(self) as ctx:
+                call = self._outer_bind(lambda: ctx)
+                return call(*args, **kwargs)
 
-        return self._outer_bind(context_factory, name='parsl')
+        self._set_wrapper_properties(parsl_wrapper)
+        self._set_wrapper_name(parsl_wrapper, 'parallel')
+        return parsl_wrapper
 
     def _set_wrapper_name(self, wrapper, name):
         wrapper.__name__ = wrapper.__qualname__ = name

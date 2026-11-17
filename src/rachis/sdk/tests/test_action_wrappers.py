@@ -14,11 +14,14 @@ import unittest
 from unittest.mock import patch
 
 from rachis.core.cache import Cache
-from rachis.core.testing.type import IntSequence1, IntSequence2
+from rachis.core.testing.type import IntSequence1, IntSequence2, Mapping
+from rachis.core.testing.type import SingleInt
 from rachis.core.testing.util import get_dummy_plugin
-from rachis.sdk import Artifact, Results
+from rachis.plugin import Collection
+from rachis.sdk import Artifact, ResultCollection, Results
 from rachis.sdk.context import Context, ParallelContext
-from rachis.sdk.proxy import ProxyArtifact
+from rachis.sdk.parallel_config import ParallelConfig
+from rachis.sdk.proxy import ProxyArtifact, ProxyResultCollection
 
 
 class TestActionWrappers(unittest.TestCase):
@@ -143,6 +146,13 @@ class TestActionWrappers(unittest.TestCase):
             yield
             events.append('inner-exit')
 
+        @contextmanager
+        def require_prepared_arguments(frame):
+            self.assertEqual(frame.output_types['left'].qiime_type,
+                             IntSequence1)
+            self.assertIsNone(frame.transformed_arguments)
+            yield
+
         class DeferredContext(ParallelContext):
             outer_wrappers = (outer, *ParallelContext.outer_wrappers)
             inner_wrappers = (inner,)
@@ -155,24 +165,96 @@ class TestActionWrappers(unittest.TestCase):
         action = self.plugin.methods['split_ints']
         artifact = Artifact.import_data(IntSequence1, [1, 2, 3])
         call = action._outer_bind(lambda: DeferredContext(action))
-        results = call(artifact)
-        frame, dispatched = pending.pop()
+        with self.assertRaisesRegex(TypeError, "Parameter 'ints'"):
+            call(ProxyArtifact(Future(), None, Mapping))
+        self.assertEqual(pending, [])
 
-        self.assertIs(results._future_, dispatched)
-        self.assertFalse(dispatched.done())
-        self.assertIsNone(frame.provenance)
-        self.assertIs(frame.bound_arguments['ints'], artifact)
-        self.assertIsNone(frame.transformed_arguments)
-        self.assertEqual(frame.output_types['left'].qiime_type, IntSequence1)
-        self.assertEqual(results.left.type, IntSequence1)
-        self.assertEqual(events, ['outer-enter', 'outer-exit'])
+        proxy = ProxyArtifact(Future(), None, IntSequence1)
+        solve_output = action.signature.solve_output
+        for argument in (artifact, proxy):
+            with (
+                self.subTest(argument=type(argument).__name__),
+                patch.object(action.signature, 'solve_output',
+                             wraps=solve_output) as solve,
+            ):
+                events.clear()
+                results = call(argument)
+                frame, dispatched = pending.pop()
 
-        dispatched.set_result(frame())
-        self.assertEqual(results.left.view(list), [1])
-        with self.assertRaisesRegex(RuntimeError, 'finished frame'):
-            frame()
-        self.assertEqual(events, [
-            'outer-enter', 'outer-exit', 'inner-enter', 'inner-exit'])
+                self.assertIs(results._future_, dispatched)
+                self.assertFalse(dispatched.done())
+                self.assertIsNone(frame.provenance)
+                self.assertIs(frame.bound_arguments['ints'], argument)
+                self.assertIsNone(frame.transformed_arguments)
+                self.assertEqual(frame.output_types['left'].qiime_type,
+                                 IntSequence1)
+                self.assertEqual(results.left.type, IntSequence1)
+                self.assertEqual(events, ['outer-enter', 'outer-exit'])
+
+                frame.bound_arguments = {'ints': artifact}
+                with patch.object(action, 'inner_wrappers', (
+                    require_prepared_arguments, *action.inner_wrappers,
+                )):
+                    dispatched.set_result(frame())
+                solve.assert_called_once_with(ints=argument)
+                self.assertEqual(results.left.view(list), [1])
+                with self.assertRaisesRegex(RuntimeError, 'finished frame'):
+                    frame()
+                self.assertEqual(events, [
+                    'outer-enter', 'outer-exit', 'inner-enter', 'inner-exit'])
+
+    def test_pending_collection_binds_before_callable_shape_is_available(self):
+        class PendingCollection(ProxyResultCollection):
+            def result(self):
+                raise AssertionError('Binding tried to resolve the collection')
+
+        future = Future()
+        collection = ResultCollection({
+            'named': Artifact.import_data(SingleInt, 1),
+        })
+        proxy = PendingCollection(future, None, Collection[SingleInt])
+
+        with ParallelConfig(), ParallelContext(None) as ctx:
+            as_list = ctx.get_action('dummy_plugin', 'list_of_ints')
+            as_collection = ctx.get_action('dummy_plugin', 'dict_of_ints')
+            try:
+                list_output = as_list(proxy).output
+                collection_output = as_collection(proxy).output
+            finally:
+                future.set_result(collection)
+
+        self.assertEqual(list(list_output.keys()), ['0'])
+        self.assertEqual(list(collection_output.keys()), ['named'])
+
+    def test_bound_list_input_uses_result_collection_and_recycles(self):
+        bound = []
+
+        @contextmanager
+        def observe(frame):
+            bound.append(frame.bound_arguments['ints'])
+            yield
+
+        class ObservedContext(Context):
+            outer_wrappers = (observe, *Context.outer_wrappers)
+
+        action = self.plugin.methods['list_of_ints']
+        artifact = Artifact.import_data(SingleInt, 1)
+
+        def context_factory():
+            return ObservedContext(action, parent=Context())
+
+        call = action._outer_bind(context_factory)
+        with TemporaryDirectory() as directory:
+            cache = Cache(os.path.join(directory, 'cache'))
+            with cache.create_pool('recycle'):
+                first = call([artifact]).output['0']
+                second = call({'named': artifact}).output['0']
+
+        self.assertEqual(first.uuid, second.uuid)
+        self.assertEqual(len(bound), 2)
+        for arguments in bound:
+            self.assertIsInstance(arguments, ResultCollection)
+            self.assertEqual(list(arguments.keys()), ['0'])
 
     def test_pipeline_aliases_named_outputs_independently(self):
         pipeline = self.plugin.pipelines['parameter_only_pipeline']
@@ -194,6 +276,77 @@ class TestActionWrappers(unittest.TestCase):
             finally:
                 pending.set_result(Artifact.import_data(IntSequence1, [2]))
             self.assertEqual(results[1].view(list), [2])
+
+    def test_context_raises_pipeline_output_failure_at_scope_exit(self):
+        sequence = Artifact.import_data(IntSequence1, [1])
+        events = []
+
+        with ParallelConfig():
+            with self.assertRaisesRegex(ValueError, "Key 'foo' exists"):
+                with ParallelContext(None) as ctx:
+                    fail = ctx.get_action('dummy_plugin', 'failing_pipeline')
+                    fail(sequence, break_from='method')
+                    events.append('body completed')
+
+        self.assertEqual(events, ['body completed'])
+
+    def test_parallel_raises_failure_from_discarded_nested_call(self):
+        pipeline = self.plugin.pipelines['parameter_only_pipeline']
+        nested = self.plugin.pipelines['failing_pipeline']
+        sequence = Artifact.import_data(IntSequence1, [1])
+
+        def discard_failed_method(ctx, **kwargs):
+            merge = ctx.get_action('dummy_plugin', 'merge_mappings')
+            first = ctx.make_artifact(Mapping, {'foo': 'a'})
+            second = ctx.make_artifact(Mapping, {'foo': 'b'})
+            merge(first, second)
+            return first
+
+        def discard_nested_pipeline(ctx, **kwargs):
+            call = ctx.get_action('dummy_plugin', 'failing_pipeline')
+            call(sequence)
+            return ctx.make_artifact(IntSequence2, [1]), sequence
+
+        with (
+            patch.object(nested, '_callable', discard_failed_method),
+            patch.object(pipeline, '_callable', discard_nested_pipeline),
+            ParallelConfig(),
+        ):
+            with self.assertRaisesRegex(ValueError, "Key 'foo' exists"):
+                pipeline.parallel(1)
+
+    def test_parallel_raises_output_alias_failure_before_return(self):
+        pipeline = self.plugin.pipelines['parameter_only_pipeline']
+
+        with (
+            patch.object(Artifact, '_alias', side_effect=ValueError('alias')),
+            ParallelConfig(),
+        ):
+            with self.assertRaisesRegex(ValueError, '^alias$'):
+                pipeline.parallel(1)
+
+    def test_nested_context_entries_report_their_own_results(self):
+        first = Artifact.import_data(Mapping, {'outer': 'a', 'inner': 'a'})
+        outer = Artifact.import_data(Mapping, {'outer': 'b'})
+        inner = Artifact.import_data(Mapping, {'inner': 'b'})
+        events = []
+
+        with ParallelConfig(), ParallelContext(None) as ctx:
+            merge = ctx.get_action('dummy_plugin', 'merge_mappings')
+            with self.assertRaisesRegex(ValueError, "Key 'outer' exists"), ctx:
+                merge(first, outer)
+                with (
+                    self.assertRaisesRegex(ValueError, "Key 'inner' exists"),
+                    ctx,
+                ):
+                    merge(first, inner)
+                    events.append('inner body completed')
+                events.append('outer body completed')
+            merged = merge(outer, inner).merged_mapping
+
+        self.assertEqual(events, [
+            'inner body completed', 'outer body completed'])
+        self.assertEqual(merged.view(dict), {'outer': 'b', 'inner': 'b'})
 
     def test_visualizer_directory_is_cleaned_when_callable_fails(self):
         directories = []

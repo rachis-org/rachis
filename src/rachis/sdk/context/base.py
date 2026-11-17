@@ -5,7 +5,7 @@
 #
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
 from types import MappingProxyType
 import warnings
@@ -15,7 +15,8 @@ from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
-from rachis.sdk.futures import call_future
+from rachis.sdk.futures import as_future
+from rachis.sdk.proxy import ProxyResults, contains_proxy
 
 
 def _validate_collection(collection_order):
@@ -36,8 +37,9 @@ def _validate_collection(collection_order):
 @contextmanager
 def cache_lookup_wrapper(frame):
     ctx = frame.ctx
-    if (frame.results is None and frame.output_types is not None
-            and ctx._parent is not None and ctx.cache.named_pool is not None):
+    if (frame.results is None and ctx._parent is not None
+            and ctx.cache.named_pool is not None
+            and not contains_proxy(frame.bound_arguments)):
         frame.results = ctx._check_cache(frame.bound_arguments)
     yield
 
@@ -52,11 +54,12 @@ def resolve_dispatch_result_wrapper(frame):
 @contextmanager
 def invocation_resources_wrapper(frame):
     ctx = frame.ctx
-    if ctx._parent is None and not ctx._entered:
-        with ctx:
-            yield
-    else:
+    owns_resources = ctx._parent is None and not ctx._scopes
+    try:
         yield
+    finally:
+        if owns_resources:
+            ctx._close_resources()
 
 
 class InvocationResources(ExitStack):
@@ -82,7 +85,6 @@ class Context(IContext):
     execution_ctx = MappingProxyType({'type': 'synchronous'})
     _defer_results = False
     _resources = None
-    _entered = False
 
     def __init__(self, action_obj=None, parent=None):
         if parent is not None:
@@ -101,10 +103,11 @@ class Context(IContext):
 
         self.action_obj = action_obj
         self._parent = parent
+        self._scopes = []
         self.execution_ctx = dict(type(self).execution_ctx)
 
     def _dispatch_action_(self, frame):
-        return call_future(frame)
+        return as_future(frame)
 
     def _get_resources(self):
         if self._parent is not None:
@@ -113,29 +116,65 @@ class Context(IContext):
             self._resources = InvocationResources()
         return self._resources
 
+    def _close_resources(self):
+        if self._resources is not None:
+            try:
+                self._resources.close()
+            finally:
+                self._resources = None
+
+    def _track_results(self, results):
+        if isinstance(results, ProxyResults):
+            results = results._future_
+        if isinstance(results, Future):
+            ctx = self
+            while ctx is not None and not ctx._scopes:
+                ctx = ctx._parent
+            if ctx is not None:
+                ctx._scopes[-1].append(results)
+
     def __enter__(self):
-        self._entered = True
+        """Start a scope for action results tracked through this context."""
+        self._scopes.append([])
         return self
 
-    def __exit__(self, *exc_details):
-        if self._resources is not None:
-            self._resources.close()
-            self._resources = None
-        self._entered = False
+    def __exit__(self, exc_type, exc, traceback):
+        futures = self._scopes.pop()
+        failure = None
+        try:
+            for future in futures:
+                try:
+                    error = future.exception()
+                except CancelledError as cancelled:
+                    error = cancelled
+                if failure is None and error is not None:
+                    failure = error
+        finally:
+            if not self._scopes:
+                self._close_resources()
+
+        if exc is None and failure is not None:
+            raise failure
 
     def __getstate__(self):
         state = self.__dict__.copy()
         state.pop('_resources', None)
+        state['_scopes'] = []
         return state
 
     def _check_cache(self, bound_arguments):
         plugin = self.action_obj.plugin_id.replace('_', '-')
         plugin_action = f'{plugin}:{self.action_obj.id}'
 
-        # Make args and kwargs look how they do when we read them
-        # out of a .yaml file (list of single value dicts of
-        # input_name: value)
-        arguments = [{name: value} for name, value in bound_arguments.items()]
+        # Match the provenance representation, including unkeyed List inputs.
+        signature = self.action_obj.signature
+        arguments = []
+        for name, value in bound_arguments.items():
+            if (name in signature.inputs
+                    and isinstance(value, rachis.sdk.ResultCollection)):
+                value = signature._shape_collection_input(
+                    value, signature.inputs[name])
+            arguments.append({name: value})
 
         invocation = HashableInvocation(plugin_action, arguments)
         if invocation in self.cache.named_pool.index:

@@ -13,7 +13,7 @@ from types import MappingProxyType
 from parsl.app.app import python_app
 
 from rachis.sdk.action import Pipeline
-from rachis.sdk.futures import call_future
+from rachis.sdk.futures import as_future
 from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy, ProxyResults
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
@@ -78,7 +78,9 @@ def _submit_app(frame, executor):
 
     def worker(frame, inputs=()):
         with frame.ctx.cache:
-            frame.bound_arguments = _unmap_arg(frame.bound_arguments, inputs)
+            if inputs:
+                frame.bound_arguments = _unmap_arg(
+                    frame.bound_arguments, inputs)
             return frame()
 
     frame.action._set_wrapper_name(worker, frame.action.id)
@@ -88,21 +90,13 @@ def _submit_app(frame, executor):
 
 @contextmanager
 def parallel_dispatch_result_wrapper(frame):
-    runs_on_driver = frame.ctx._runs_on_driver(frame)
-    output_types = frame.output_types
-    if frame.results is None and output_types is None and not runs_on_driver:
-        # Use declared proxy types for the driver. The worker prepares its own
-        # arguments and output types after Parsl resolves those inputs.
-        output_types = frame.action.signature.solve_output(
-            **frame.bound_arguments)
     yield
     if not isinstance(frame.results, Future):
         return
-    if runs_on_driver:
+    if frame.ctx._runs_on_driver(frame):
         frame.results = frame.results.result()
     else:
-        frame.output_types = output_types
-        frame.results = ProxyResults(frame.results, output_types)
+        frame.results = ProxyResults(frame.results, frame.output_types)
 
 
 class ParallelContext(Context):
@@ -136,7 +130,7 @@ class ParallelContext(Context):
         # Their child applications still pass through their own outer stacks.
         if self._runs_on_driver(frame):
             self.execution_ctx = {'type': 'parsl', 'parsl_type': 'DFK'}
-            return call_future(frame)
+            return as_future(frame)
 
         if PARALLEL_CONFIG.parallel_config is None:
             raise ValueError('You must load a parallel config before '

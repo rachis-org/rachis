@@ -332,11 +332,14 @@ def failing_pipeline(ctx, int_sequence, break_from='arity'):
         return [integer]
     elif break_from == 'type':
         return wrong_output
-    elif break_from == 'method':
+    elif break_from in ('method', 'method-in-scope'):
         a = ctx.make_artifact(Mapping, {'foo': 'a'})
         b = ctx.make_artifact(Mapping, {'foo': 'b'})
-        # has the same key
-        merge_mappings(a, b)
+        if break_from == 'method':
+            return merge_mappings(a, b).merged_mapping
+        with ctx:
+            result = merge_mappings(a, b)
+        return result.merged_mapping
     elif break_from == 'no-plugin':
         ctx.get_action('not%a$plugin', 'foo')
     elif break_from == 'no-action':

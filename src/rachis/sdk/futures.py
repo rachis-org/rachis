@@ -10,20 +10,16 @@ from concurrent.futures import Future
 from threading import Lock
 
 
-def completed_future(value):
+def as_future(function):
+    """Convert a callable into a Future by evaluating it and
+    recording the result or exception."""
     future = Future()
-    future.set_result(value)
-    return future
-
-
-def call_future(call):
-    """Run work inline with the same result contract as deferred work."""
     try:
-        return completed_future(call())
+        result = function()
+        future.set_result(result)
     except Exception as error:
-        future = Future()
         future.set_exception(error)
-        return future
+    return future
 
 
 def join(dependencies, combine, *, ctx):

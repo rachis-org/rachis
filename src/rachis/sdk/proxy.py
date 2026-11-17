@@ -7,7 +7,7 @@
 # ----------------------------------------------------------------------------
 
 from rachis.sdk.iresult import IResult
-from rachis.sdk.futures import after_all, completed_future, join
+from rachis.sdk.futures import after_all, as_future, join
 
 import rachis.core.transform as transform
 from rachis.core.type.util import is_visualization_type, is_collection_type
@@ -53,7 +53,7 @@ def result_future(value):
         keys = tuple(value)
         return after_all(map(result_future, value.values()),
                          lambda *items: dict(zip(keys, items)))
-    return completed_future(value)
+    return as_future(lambda: value)
 
 
 class ProxyResult(Proxy, IResult):
@@ -303,21 +303,11 @@ class ProxyResults(Proxy):
         return self._result()._asdict()
 
     def result(self):
-        """If you are calling an action in a try-except block in a pipeline,
-           you need to call this method on the Results object returned by the
-           action.
+        """Wait for the results and return them, or raise their exception.
 
-           This is because if the Pipeline was executed with parsl, we need to
-           block on the action in the try-except to ensure we get the result
-           and raise the potential exception while we are still inside of the
-           try-except. Otherwise we would just get the exception whenever the
-           future resolved which would likely be outside of the try-except, so
-           the exception would be raised and not caught.
-
-           If you call an action in the Python API using parsl inside of a
-           context manager (a withed in Cache for instance) you also must call
-           this method there to ensure you get you don't start using a
-           different cache/pool/whatever before your future resolves.
+        A top-level ``.parallel()`` call has already waited for its results.
+        Within a pipeline, use ``with ctx:`` to wait for calls in a scope.
+        To handle a failure locally, catch it around that scope.
         """
         return self._future_.result()
 

@@ -467,7 +467,7 @@ class PipelineSignature:
             )
 
     def normalize_arguments(self, **arguments):
-        """Normalize bound arguments to the signature's expected shapes."""
+        """Canonicalize bound arguments, including artifact collections."""
         normalized = {}
 
         for name, spec in self.signature_order.items():
@@ -483,20 +483,19 @@ class PipelineSignature:
         return normalized
 
     def _normalize_input(self, _input, spec):
-        _, qiime_name = self._get_qiime_type_and_name(spec)
-
-        # Transform collection from list to dict and vice versa if needed
-        if qiime_name == 'Collection' and isinstance(_input, list):
-            _input = self._list_to_dict(_input)
-        elif qiime_name == 'List' and \
-                (isinstance(_input, dict) or
-                 isinstance(_input, rachis.sdk.ResultCollection)):
-            _input = self._dict_to_list(_input)
-
         if isinstance(_input, dict):
-            _input = rachis.sdk.ResultCollection(_input)
-
+            _, qiime_name = self._get_qiime_type_and_name(spec)
+            if qiime_name == 'List':
+                _input = list(_input.values())
+        if isinstance(_input, (dict, list)):
+            return rachis.sdk.ResultCollection(_input)
         return _input
+
+    def _shape_collection_input(self, collection, spec):
+        _, qiime_name = self._get_qiime_type_and_name(spec)
+        if qiime_name == 'List':
+            return self._dict_to_list(collection)
+        return collection
 
     def _normalize_parameter(self, param, spec):
         view_type = spec.view_type
