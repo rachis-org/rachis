@@ -7,17 +7,20 @@
 # ----------------------------------------------------------------------------
 
 from contextlib import contextmanager
+from concurrent.futures import Future
 from typing import Annotated
 from unittest.mock import patch
 
 import pytest
+import dill
 
 from rachis import Artifact, ForEach
 from rachis.core.testing.type import Mapping
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.plugin import CaptureHolder, Int
-from rachis.sdk import MappedMethod
+from rachis.sdk import MappedMethod, Results
 from rachis.sdk.context import Context
+from rachis.sdk.futures import as_future
 
 
 @pytest.mark.parametrize('capture_type', [CaptureHolder, CaptureHolder[int]])
@@ -86,23 +89,86 @@ def test_cell_context_exits_before_staging_outputs():
     def observe_invocation(frame):
         events.append('mapped-enter')
         yield
-        assert frame.provenance is not None
-        assert len(frame.outcomes) == 2
+        assert len(frame.results) == 2
+        assert all(future.done() for future in frame.results.values())
         events.append('mapped-exit')
 
-    @contextmanager
-    def observe_inner(frame):
-        events.append('inner-enter')
-        yield
-
     class ObservedContext(Context):
-        inner_apply_wrappers = (observe_inner,)
-        outer_apply_wrappers = (
-            observe_invocation, *Context.outer_apply_wrappers)
-        mapped_inner_apply_wrappers = (observe,)
+        inner_bind_wrappers = (observe_invocation,)
+        inner_apply_wrappers = (observe,)
 
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
     call = method._outer_bind(lambda: ObservedContext(method))
     assert call(data, 1).output.view(dict) == {'s1': '5', 's2': '6'}
     assert observed == ['5', '6']
     assert events == ['mapped-enter', 's1', 's2', 'mapped-exit']
+
+
+def test_deferred_cells_gather_locally_and_keep_their_workspace():
+    method = get_dummy_plugin().methods['increment_samples']
+    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
+    pending = []
+
+    class DeferredContext(Context):
+        def _dispatch_action_(self, frame):
+            return frame()
+
+        def _dispatch_cells_(self, cells):
+            futures = {}
+            for coord, cell in cells.items():
+                future = futures[coord] = Future()
+                pending.append((cell, future))
+            return futures
+
+    with DeferredContext(method) as ctx:
+        result = method._outer_bind(lambda: ctx)(data, 1)
+        completion, = Results._futures(result)
+        try:
+            assert not completion.done()
+            directory = pending[0][0].cell.path.parent
+            assert directory.is_dir()
+        finally:
+            for cell, future in reversed(pending):
+                outcome = as_future(cell)
+                if outcome.exception() is not None:
+                    future.set_exception(outcome.exception())
+                else:
+                    future.set_result(outcome.result())
+        completed = completion.result(timeout=5)
+        assert completed.output.view(dict) == {'s1': '5', 's2': '6'}
+        assert directory.is_dir()
+    assert not directory.exists()
+
+
+def test_serialized_cells_resume_at_evaluation():
+    class SerializingContext(Context):
+        def _dispatch_cells_(self, cells):
+            return {
+                coord: as_future(dill.loads(dill.dumps(cell)))
+                for coord, cell in cells.items()
+            }
+
+    method = get_dummy_plugin().methods['increment_samples']
+    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
+    call = method._outer_bind(lambda: SerializingContext(method))
+    assert call(data, 1).output.view(dict) == {'s1': '5', 's2': '6'}
+
+
+def test_cell_workspace_is_removed_when_evaluation_fails():
+    method = get_dummy_plugin().methods['increment_samples']
+    data = Artifact.import_data('Mapping', {'s1': '4'})
+    workspaces = []
+
+    @contextmanager
+    def observe(frame):
+        workspaces.append(frame.workspace)
+        yield
+
+    class ObservedContext(Context):
+        inner_apply_wrappers = (observe,)
+
+    with patch.object(method, '_callable', side_effect=ValueError('failure')):
+        with pytest.raises(RuntimeError, match='Mapped cell.*s1.*failure'):
+            method._outer_bind(lambda: ObservedContext(method))(data, 1)
+    assert workspaces
+    assert all(not path.exists() for path in workspaces)

@@ -24,7 +24,10 @@ from rachis.core.archive.provenance import ActionProvenanceCapture
 from rachis.core.axis import Coord
 from rachis.core.type.util import is_collection_type
 from rachis.plugin.model.base import FormatBase
-from rachis.sdk.action import Frame, FramePhase, Method, checked_return_values
+from rachis.sdk.action import (
+    Frame, FramePhase, Method, checked_return_values,
+    prepare_callable_arguments_wrapper, provenance_wrapper,
+)
 from rachis.sdk.plugin_manager import PluginManager
 from rachis.sdk.futures import after_all, join, result_as_future
 from rachis.sdk.proxy import ProxyResult, ProxyResultCollection
@@ -88,20 +91,7 @@ class CellFrame(Frame):
         self.coordinate = next(iter(cell.outputs.values()))
         self.axes = axes
 
-    def __call__(self):
-        self.workspace = Path(tempfile.mkdtemp(dir=self.cell.path.parent))
-        keep = False
-        try:
-            outcome = super().__call__()
-            keep = outcome is not None
-            return outcome
-        except Exception as error:
-            raise RuntimeError(f'Mapped cell {self.coordinate!r} failed: '
-                               f'{error}') from error
-        finally:
-            if not keep:
-                shutil.rmtree(self.workspace)
-
+        self.output_types = parent.output_types
 
 class MappedProvenance(ActionProvenanceCapture):
     def make_execution_section(self):
@@ -227,6 +217,27 @@ def _as_view(value, annotation, name, trace):
 
 
 @contextmanager
+def cell_error_wrapper(frame):
+    try:
+        yield
+    except Exception as error:
+        raise RuntimeError(f'Mapped cell {frame.coordinate!r} failed: '
+                           f'{error}') from error
+
+
+@contextmanager
+def cell_workspace_wrapper(frame):
+    frame.workspace = Path(tempfile.mkdtemp(dir=frame.cell.path.parent))
+    keep = False
+    try:
+        yield
+        keep = frame.results is not None
+    finally:
+        if not keep:
+            shutil.rmtree(frame.workspace)
+
+
+@contextmanager
 def cell_provenance_wrapper(frame):
     frame.provenance = SimpleNamespace(transforms=[])
     yield
@@ -312,32 +323,21 @@ def _record_transforms(provenance, name, pairs):
                 transform.ModelType.from_view_type(target), recorder=recorder)
 
 
-def _prepare_mapped_provenance(frame):
-    action = frame.action
-    signature = action.signature
-    provenance = frame.provenance = MappedProvenance(
-        action.type, action.plugin_id, action.id, frame.ctx.execution_ctx)
-    for name, value in frame.bound_arguments.items():
-        if name in signature.inputs:
-            if isinstance(value, ResultCollection):
-                value = signature._shape_collection_input(
-                    value, signature.inputs[name])
-            provenance.add_input(name, value)
-        else:
-            provenance.add_parameter(
-                name, signature.parameters[name].qiime_type, value)
+@contextmanager
+def mapped_transforms_wrapper(frame):
+    provenance = frame.provenance
     frame.transforms = {}
     for outcome in frame.outcomes.values():
         if outcome is None:
             continue
         for name, source, target in outcome.transforms:
             frame.transforms.setdefault(name, set()).add((source, target))
-    for name in signature.inputs:
+    for name in frame.action.signature.inputs:
         _record_transforms(provenance, name, frame.transforms.get(name))
+    yield
 
 
 def _write_outputs(frame):
-    axes = output_axes(frame)
     outputs = []
     for name in frame.output_types:
         selected = [
@@ -347,16 +347,17 @@ def _write_outputs(frame):
         ]
         chunks = ((coord, value.load()) for coord, value in selected
                   if value is not None)
-        outputs.append((axes[name].write(chunks), selected))
+        outputs.append((frame.axes[name].write(chunks), selected))
     return outputs
 
 
 def _publish_outputs(frame, outputs):
+    provenance = frame.ready_provenance.result()
     artifacts = []
     for (name, spec), (directory, selected) in zip(
         frame.output_types.items(), outputs, strict=True
     ):
-        capture = frame.provenance.fork(name)
+        capture = provenance.fork(name)
         _record_transforms(
             capture, 'return', frame.transforms.get(('return', name)))
         pattern = frame.action.signature.output_patterns[name]
@@ -375,61 +376,95 @@ def _publish_outputs(frame, outputs):
     return Results(frame.output_types, artifacts)
 
 
-class MappedMethod(Method):
-    """A method that invokes its callable once per aligned coordinate."""
+@contextmanager
+def mapped_workspace_wrapper(frame):
+    with ExitStack() as cleanup:
+        frame.workspace_cleanup = cleanup
+        frame.directory = Path(cleanup.enter_context(
+            tempfile.TemporaryDirectory(dir=frame.ctx.cache.path)))
+        try:
+            yield
+        finally:
+            frame.ctx._defer_cleanup(cleanup)
 
-    _mapped = True
-    outer_apply_wrappers = ()
+
+@contextmanager
+def mapped_plan_wrapper(frame):
+    frame.cells, frame.axes = plan_cells(frame, frame.directory)
+    yield
+
+
+@contextmanager
+def mapped_output_wrapper(frame):
+    yield
+    frame.results = _publish_outputs(frame, frame.results)
+
+
+@contextmanager
+def mapped_results_wrapper(frame):
+    yield
+    futures = frame.cell_futures = frame.results
+    if futures.keys() != frame.cells.keys():
+        raise ValueError('Cell dispatch must return each coordinate once')
+
+    def assemble(inputs, *outcomes):
+        # Completion is local result adaptation. It has no dispatchable phase
+        # and leaves the dispatch frame's exterior result intact.
+        completed = Frame(frame.action, frame.ctx, inputs,
+                          phase=FramePhase.FINISHED)
+        completed.output_types = frame.output_types
+        completed.cells = frame.cells
+        completed.axes = frame.axes
+        completed.outcomes = dict(zip(frame.cells, outcomes, strict=True))
+        with (
+            prepare_callable_arguments_wrapper(completed),
+            mapped_output_wrapper(completed),
+            provenance_wrapper(completed),
+            mapped_transforms_wrapper(completed),
+        ):
+            completed.results = _write_outputs(completed)
+        return completed.results
+
+    proxies, rebuild_inputs = Sievable.sieve(
+        frame.bound_arguments,
+        isinstance=(ProxyResult, ProxyResultCollection),
+    )
+    inputs_ready = after_all(
+        map(result_as_future, proxies), rebuild_inputs,
+    )
+    future = join(
+        (inputs_ready,
+         *(futures[coord] for coord in frame.cells)), assemble, ctx=frame.ctx)
+    frame.workspace_cleanup.callback(wait, (future,))
+    frame.results = Results._from_future(future, frame.output_types)
+
+
+class MappedMethod(Method):
+    """Bind a map, dispatch its cells, and gather their exterior outputs."""
+
+    _ProvCaptureCls = MappedProvenance
+    _initial_frame_phase = FramePhase.INNER_BIND
+    inner_bind_wrappers = (
+        mapped_workspace_wrapper,
+        mapped_results_wrapper,
+        mapped_plan_wrapper,
+    )
     inner_apply_wrappers = (
+        cell_error_wrapper,
+        cell_workspace_wrapper,
         cell_provenance_wrapper,
         cell_transform_wrapper,
     )
 
-    def _outer_apply(self, frame):
-        """Plan and dispatch the cells for one mapped invocation."""
-        ctx = frame.ctx
-        with ExitStack() as stack:
-            for wrapper in chain(self.outer_apply_wrappers,
-                                 ctx.outer_apply_wrappers):
-                stack.enter_context(wrapper(frame))
-            frame.phase = FramePhase.INNER_BIND
-            frame()
-        return frame.results
-
     def _inner_bind(self, frame):
-        """Align the inputs and dispatch one frame per planned coordinate."""
-        ctx = frame.ctx
-        frame.cells, axes = plan_cells(frame, frame.directory)
-        cells = {coord: CellFrame(frame, cell, axes)
-                 for coord, cell in frame.cells.items()}
-        futures = ctx._dispatch_cells_(cells)
-        if futures.keys() != cells.keys():
-            raise ValueError('Cell dispatch must return each coordinate once')
-
-        def assemble(inputs, *outcomes):
-            frame.bound_arguments = inputs
-            frame.outcomes = dict(zip(cells, outcomes, strict=True))
-            _prepare_mapped_provenance(frame)
-            return _publish_outputs(frame, _write_outputs(frame))
-
-        proxies, rebuild_inputs = Sievable.sieve(
-            frame.bound_arguments,
-            isinstance=(ProxyResult, ProxyResultCollection),
-        )
-        inputs_ready = after_all(
-            map(result_as_future, proxies), rebuild_inputs,
-        )
-        future = join(
-            (inputs_ready,
-             *(futures[coord] for coord in cells)), assemble, ctx=ctx)
-        frame.workspace_cleanup.callback(wait, (future,))
-        frame.results = Results._from_future(future, frame.output_types)
-
-    def _inner_apply(self, frame):
-        wrappers = chain(self.inner_apply_wrappers,
-                         frame.ctx.mapped_inner_apply_wrappers)
+        wrappers = chain(self.inner_bind_wrappers,
+                         frame.ctx.inner_bind_wrappers)
         with ExitStack() as stack:
             for wrapper in wrappers:
                 stack.enter_context(wrapper(frame))
-            frame.results = self._callable(**frame.transformed_arguments)
+            cell_frames = {
+                coord: CellFrame(frame, cell, frame.axes)
+                for coord, cell in frame.cells.items()
+            }
+            frame.results = frame.ctx._dispatch_cells_(cell_frames)
         return frame.results
