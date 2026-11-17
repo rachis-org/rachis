@@ -20,10 +20,10 @@ from typing import Mapping, TypedDict, Union
 from types import MappingProxyType
 
 import rachis.sdk
-from rachis.sdk.futures import join
+from rachis.sdk.futures import as_future, join
 from rachis.sdk.iresult import IResult
 from rachis.sdk.proxy import (
-    ProxyResult, ProxyResultCollection, ProxyResults,
+    ProxyResult, ProxyResultCollection, ProxyResults, contains_proxy,
     output_proxy, result_future,
 )
 from rachis.sdk.result import Artifact, ResultCollection, ChecksumCache
@@ -53,7 +53,7 @@ class Frame:
         self.output_types = None
         self.results = None
         self.provenance = None
-        self.input_transformations = {}
+        self.ready_provenance = None
 
     def __call__(self):
         match self.phase:
@@ -117,37 +117,47 @@ def provenance_wrapper(frame):
     action = frame.action
     provenance = frame.provenance = action._ProvCaptureCls(
         action.type, action.plugin_id, action.id, frame.ctx.execution_ctx)
+    inputs = {}
+    for name in action.signature.inputs:
+        value = frame.transformed_arguments[name]
+        if isinstance(value, ResultCollection):
+            value = ResultCollection(dict(value.items()))
+        elif isinstance(value, (list, set)):
+            value = value.copy()
+        inputs[name] = value
     for name, spec in action.signature.parameters.items():
         provenance.add_parameter(name, spec.qiime_type,
                                  frame.bound_arguments[name])
 
     yield
 
-    for name, records in frame.input_transformations.items():
-        record = provenance.transformation_recorder(name)
-        for args, kwargs in records:
-            record(*args, **kwargs)
+    def record_inputs(*values):
+        cache = ChecksumCache()
+        for name, value in zip(inputs, values):
+            if isinstance(value, Artifact):
+                cache.cache_artifact(value)
+            elif isinstance(value, ResultCollection):
+                cache.cache_result_collection(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Artifact):
+                        cache.cache_artifact(item)
+            provenance.add_input(name, value)
+        return provenance
 
-
-@contextmanager
-def input_provenance_wrapper(frame):
-    for name in frame.action.signature.inputs:
-        frame.provenance.add_input(name, frame.transformed_arguments[name])
-    yield
+    if contains_proxy(inputs):
+        frame.ready_provenance = join(
+            map(result_future, inputs.values()), record_inputs, ctx=frame.ctx)
+    else:
+        frame.ready_provenance = as_future(
+            lambda: record_inputs(*inputs.values()))
 
 
 @contextmanager
 def input_transform_wrapper(frame):
     signature = frame.action.signature
     arguments = frame.transformed_arguments
-
-    def recorder_for(name):
-        records = frame.input_transformations[name] = []
-
-        def record(*args, **kwargs):
-            records.append((args, kwargs))
-
-        return record
+    recorder_for = frame.provenance.transformation_recorder
 
     for name in signature.inputs:
         arguments[name] = signature._transform_input(
@@ -176,21 +186,6 @@ def capture_wrapper(frame):
             )
 
 
-@contextmanager
-def checksum_wrapper(frame):
-    cache = ChecksumCache()
-    for value in frame.transformed_arguments.values():
-        if isinstance(value, Artifact):
-            cache.cache_artifact(value)
-        elif isinstance(value, ResultCollection):
-            cache.cache_result_collection(value)
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, Artifact):
-                    cache.cache_artifact(item)
-    yield
-
-
 def checked_return_values(value, expected):
     values = tuplize(value)
     actual = len(values)
@@ -205,8 +200,9 @@ def checked_return_values(value, expected):
 def method_output_wrapper(frame):
     yield
     views = checked_return_values(frame.results, len(frame.output_types))
+    provenance = frame.ready_provenance.result()
     frame.results = frame.action.signature.coerce_given_outputs(
-        views, frame.output_types, frame.ctx, frame.provenance.fork)
+        views, frame.output_types, frame.ctx, provenance.fork)
 
 
 @contextmanager
@@ -227,8 +223,9 @@ def visualization_wrapper(frame):
                 "Visualizer %r should not return anything. "
                 "Received %r as a return value."
                 % (frame.action, frame.results))
+        provenance = frame.ready_provenance.result()
         visualization = rachis.sdk.Visualization._from_data_dir(
-            temp_dir, frame.provenance.fork('visualization'))
+            temp_dir, provenance.fork('visualization'))
         frame.results = (frame.ctx.add_reference(visualization),)
 
 
@@ -276,40 +273,28 @@ def _alias_pipeline_output(name, qiime_type, output, provenance, ctx):
 
 
 @contextmanager
-def pipeline_provenance_wrapper(frame):
-    ctx = frame.ctx
-    inputs = {name: frame.transformed_arguments[name]
-              for name in frame.action.signature.inputs}
-    frame.transformed_arguments['ctx'] = ctx
+def pipeline_outputs_wrapper(frame):
+    frame.transformed_arguments['ctx'] = frame.ctx
     yield
 
-    provenance = frame.provenance
     outputs = checked_return_values(frame.results, len(frame.output_types))
-    outputs = tuple(map(_validate_pipeline_output, outputs))
+    frame.results = tuple(map(_validate_pipeline_output, outputs))
 
-    def record_inputs(*values):
-        cache = ChecksumCache()
-        for name, value in zip(inputs, values):
-            if isinstance(value, Artifact):
-                cache.cache_artifact(value)
-            elif isinstance(value, ResultCollection):
-                cache.cache_result_collection(value)
-            provenance.add_input(name, value)
-        return provenance
 
-    ready_provenance = join(
-        (result_future(value) for value in inputs.values()), record_inputs,
-        ctx=ctx)
+@contextmanager
+def pipeline_alias_wrapper(frame):
+    yield
 
+    ctx = frame.ctx
     proxies = {}
-    for output, (name, spec) in zip(outputs, frame.output_types.items()):
+    for output, (name, spec) in zip(frame.results, frame.output_types.items()):
         qiime_type = spec.qiime_type
 
         def alias(resolved, provenance, name=name, qiime_type=qiime_type):
             return _alias_pipeline_output(
                 name, qiime_type, resolved, provenance, ctx)
 
-        future = join((result_future(output), ready_provenance), alias,
+        future = join((result_future(output), frame.ready_provenance), alias,
                       ctx=ctx)
         if isinstance(output, ProxyResult):
             refined_type = _intersect_pipeline_output_type(
@@ -644,10 +629,8 @@ class Method(Action):
 
     inner_wrappers = (
         *Action.inner_wrappers,
-        checksum_wrapper,
         method_output_wrapper,
         provenance_wrapper,
-        input_provenance_wrapper,
         input_transform_wrapper,
         capture_wrapper,
     )
@@ -685,10 +668,8 @@ class Visualizer(Action):
 
     inner_wrappers = (
         *Action.inner_wrappers,
-        checksum_wrapper,
         visualization_wrapper,
         provenance_wrapper,
-        input_provenance_wrapper,
         input_transform_wrapper,
         capture_wrapper,
     )
@@ -711,8 +692,9 @@ class Pipeline(Action):
 
     inner_wrappers = (
         *Action.inner_wrappers,
-        pipeline_provenance_wrapper,
+        pipeline_alias_wrapper,
         provenance_wrapper,
+        pipeline_outputs_wrapper,
         capture_wrapper,
     )
 

@@ -17,6 +17,7 @@ from rachis.core.cache import Cache
 from rachis.core.testing.type import IntSequence1, IntSequence2, Mapping
 from rachis.core.testing.type import SingleInt
 from rachis.core.testing.util import get_dummy_plugin
+from rachis.core.util import load_action_yaml
 from rachis.plugin import Collection
 from rachis.sdk import Artifact, ResultCollection, Results
 from rachis.sdk.context import Context, ParallelContext
@@ -142,8 +143,10 @@ class TestActionWrappers(unittest.TestCase):
 
         @contextmanager
         def inner(frame):
+            self.assertFalse(frame.provenance.inputs)
             events.append('inner-enter')
             yield
+            self.assertFalse(frame.provenance.inputs)
             events.append('inner-exit')
 
         @contextmanager
@@ -197,6 +200,8 @@ class TestActionWrappers(unittest.TestCase):
                 )):
                     dispatched.set_result(frame())
                 solve.assert_called_once_with(ints=argument)
+                self.assertEqual(frame.provenance.inputs['ints'],
+                                 str(artifact.uuid))
                 self.assertEqual(results.left.view(list), [1])
                 with self.assertRaisesRegex(RuntimeError, 'finished frame'):
                     frame()
@@ -276,6 +281,30 @@ class TestActionWrappers(unittest.TestCase):
             finally:
                 pending.set_result(Artifact.import_data(IntSequence1, [2]))
             self.assertEqual(results[1].view(list), [2])
+
+    def test_pipeline_alias_waits_for_original_inputs(self):
+        pipeline = self.plugin.pipelines['list_pipeline']
+        artifact = Artifact.import_data(IntSequence1, [1])
+        pending = Future()
+        proxy = ProxyArtifact(pending, None, IntSequence1)
+
+        def return_outputs(ctx, ints):
+            ints.clear()
+            return [ctx.make_artifact(SingleInt, 2)]
+
+        with ParallelContext(pipeline) as ctx:
+            call = pipeline._outer_bind(lambda: ctx)
+            try:
+                with patch.object(pipeline, '_callable', return_outputs):
+                    output = call([proxy]).output
+                self.assertFalse(output._future_.done())
+            finally:
+                pending.set_result(artifact)
+
+        alias = output.result()['0']
+        provenance = load_action_yaml(alias._archiver.path)
+        self.assertEqual(provenance['action']['inputs'],
+                         [{'ints': [str(artifact.uuid)]}])
 
     def test_context_raises_pipeline_output_failure_at_scope_exit(self):
         sequence = Artifact.import_data(IntSequence1, [1])
