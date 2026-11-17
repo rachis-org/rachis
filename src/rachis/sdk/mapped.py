@@ -248,12 +248,6 @@ def cell_provenance_wrapper(frame):
 
 @contextmanager
 def cell_transform_wrapper(frame):
-    _prepare_cell_views(frame)
-    yield
-    _stage_cell_outputs(frame)
-
-
-def _prepare_cell_views(frame):
     signature = frame.action.signature
     frame.transformed_arguments = {}
     for name, spec in signature.signature_order.items():
@@ -281,13 +275,13 @@ def _prepare_cell_views(frame):
                 value = value._view(spec.view_type)
         frame.transformed_arguments[name] = value
 
+    yield
 
-def _stage_cell_outputs(frame):
-    signature = frame.action.signature
-    views = checked_return_values(frame.results, len(signature.outputs))
+    returned_views = checked_return_values(
+        frame.results, len(signature.outputs))
     outputs = {}
     for index, ((name, spec), value) in enumerate(
-        zip(signature.outputs.items(), views)
+        zip(signature.outputs.items(), returned_views)
     ):
         args = get_args(spec.view_type)
         if value is None and type(None) in args:
@@ -352,31 +346,6 @@ def _write_outputs(frame):
     return outputs
 
 
-def _publish_outputs(frame, outputs):
-    provenance = frame.ready_provenance.result()
-    artifacts = []
-    for (name, spec), (directory, selected) in zip(
-        frame.output_types.items(), outputs, strict=True
-    ):
-        capture = provenance.fork(name)
-        _record_transforms(
-            capture, 'return', frame.transforms.get(('return', name)))
-        pattern = frame.action.signature.output_patterns[name]
-        capture.coordinates = {
-            'axes': list(pattern.axes), 'records': 'coordinates.tsv'}
-        with (capture.action_dir / 'coordinates.tsv').open('w') as stream:
-            writer = csv.writer(stream, delimiter='\t', lineterminator='\n')
-            writer.writerow((*pattern.axes, 'attempt', 'outcome'))
-            for coord, value in selected:
-                writer.writerow((*coord.values(), 1,
-                                 'filtered' if value is None else 'completed'))
-        # The writer has already assembled the registered directory format.
-        artifact = Artifact._from_view(
-            spec.qiime_type, directory, type(directory), capture)
-        artifacts.append(frame.ctx.add_reference(artifact))
-    return Results(frame.output_types, artifacts)
-
-
 @contextmanager
 def mapped_workspace_wrapper(frame):
     with ExitStack() as cleanup:
@@ -398,13 +367,35 @@ def mapped_plan_wrapper(frame):
 @contextmanager
 def mapped_output_wrapper(frame):
     yield
-    frame.results = _publish_outputs(frame, frame.results)
+
+    provenance = frame.ready_provenance.result()
+    artifacts = []
+    for (name, spec), (directory, selected) in zip(
+        frame.output_types.items(), frame.results, strict=True
+    ):
+        capture = provenance.fork(name)
+        _record_transforms(
+            capture, 'return', frame.transforms.get(('return', name)))
+        pattern = frame.action.signature.output_patterns[name]
+        capture.coordinates = {
+            'axes': list(pattern.axes), 'records': 'coordinates.tsv'}
+        with (capture.action_dir / 'coordinates.tsv').open('w') as stream:
+            writer = csv.writer(stream, delimiter='\t', lineterminator='\n')
+            writer.writerow((*pattern.axes, 'attempt', 'outcome'))
+            for coord, value in selected:
+                writer.writerow((*coord.values(), 1,
+                                 'filtered' if value is None else 'completed'))
+        # The writer has already assembled the registered directory format.
+        artifact = Artifact._from_view(
+            spec.qiime_type, directory, type(directory), capture)
+        artifacts.append(frame.ctx.add_reference(artifact))
+    frame.results = Results(frame.output_types, artifacts)
 
 
 @contextmanager
 def mapped_results_wrapper(frame):
     yield
-    futures = frame.cell_futures = frame.results
+    futures = frame.results
     if futures.keys() != frame.cells.keys():
         raise ValueError('Cell dispatch must return each coordinate once')
 
