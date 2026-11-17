@@ -202,15 +202,24 @@ class PipelineSignature:
                 raise TypeError(
                     f'Mapped methods do not support CaptureHolder '
                     f'parameters: {name!r}')
+        # Complete coordinate domains own inputs projected onto their subsets.
+        # Independent domains form products during mapping.
+        groups = {frozenset(pattern.bindings): {}
+                  for pattern in self.input_patterns.values()}
+        groups = {axes: rules for axes, rules in groups.items()
+                  if not any(axes < other for other in groups)}
         bindings = set()
-        groups = set()
-        for pattern in self.input_patterns.values():
-            group = frozenset(pattern.bindings)
-            if group not in groups and bindings.intersection(group):
+        for axes in groups:
+            if bindings.intersection(axes):
                 raise TypeError(
-                    'Mapped inputs require shared or disjoint axis patterns')
-            groups.add(group)
-            bindings.update(group)
+                    'Overlapping mapped inputs need a common composite '
+                    'axis pattern')
+            bindings.update(axes)
+        for name, pattern in self.input_patterns.items():
+            rules = next(rules for axes, rules in groups.items()
+                         if set(pattern.bindings) <= axes)
+            rules[name] = self.input_coverage[name]
+        self.input_groups = tuple(groups.values())
         if not bindings or self.output_patterns.keys() != self.outputs.keys():
             raise TypeError('Mapped methods need mapped inputs and outputs')
         for name, pattern in self.output_patterns.items():

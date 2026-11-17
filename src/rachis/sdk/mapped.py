@@ -145,41 +145,37 @@ def _check_required(rules, present, coordinate):
         raise ValueError(f'Required inputs {missing!r} lack {coordinate!r}')
 
 
-def _groups(signature):
-    groups = {}
-    for name, pattern in signature.input_patterns.items():
-        names = groups.setdefault(frozenset(pattern.bindings), {})
-        names[name] = signature.input_coverage[name]
-    return groups.values()
-
-
 def _group_plan(signature, inputs, rules):
-    first = next(iter(rules))
-    bindings = signature.input_patterns[first].bindings
+    patterns = signature.input_patterns
+    bindings = max((patterns[name].bindings for name in rules), key=len)
     indexes = {}
+    keys = {}
     for name in rules:
-        pattern = signature.input_patterns[name]
-        order = tuple(pattern.bindings.index(binding) for binding in bindings)
-        indexes[name] = {
-            tuple(coord[i] for i in order): selection
-            for coord, selection in _input_index(inputs[name], pattern).items()
-        }
-    keys = dict.fromkeys(key for index in indexes.values() for key in index)
+        pattern = patterns[name]
+        indexes[name] = _input_index(inputs[name], pattern)
+        if len(pattern.bindings) == len(bindings):
+            for coord in indexes[name]:
+                bound = dict(zip(pattern.bindings, coord))
+                keys[tuple(bound[b] for b in bindings)] = None
     plan = []
     for key in keys:
-        selected = {name: index.get(key) for name, index in indexes.items()}
+        bound = dict(zip(bindings, key))
+        selected = {
+            name: index.get(tuple(bound[b] for b in patterns[name].bindings))
+            for name, index in indexes.items()
+        }
         present = {name: value is not None for name, value in selected.items()}
         if not _includes(rules, present):
             continue
         _check_required(rules, present, key)
-        plan.append((dict(zip(bindings, key)), selected))
+        plan.append((bound, selected))
     return plan
 
 
 def plan_cells(frame, directory):
     signature = frame.action.signature
     groups = [_group_plan(signature, frame.bound_arguments, rules)
-              for rules in _groups(signature)]
+              for rules in signature.input_groups]
     broadcast = {
         name: value for name, value in frame.bound_arguments.items()
         if name not in signature.input_patterns
