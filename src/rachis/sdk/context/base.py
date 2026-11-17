@@ -7,8 +7,6 @@
 # ----------------------------------------------------------------------------
 from concurrent.futures import CancelledError, Future
 from contextlib import ExitStack, contextmanager
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from types import MappingProxyType
 import warnings
 
@@ -46,23 +44,10 @@ def cache_lookup_wrapper(frame):
     yield
 
 
-@contextmanager
-def mapped_invocation_wrapper(frame):
-    with ExitStack() as cleanup:
-        frame.workspace_cleanup = cleanup
-        frame.directory = Path(cleanup.enter_context(
-            TemporaryDirectory(dir=frame.ctx.cache.path)))
-        try:
-            yield
-        finally:
-            frame.ctx._defer_cleanup(cleanup)
-
-
 class Context(IContext):
     outer_bind_wrappers = (cache_lookup_wrapper,)
     inner_apply_wrappers = ()
-    outer_apply_wrappers = (mapped_invocation_wrapper,)
-    mapped_inner_apply_wrappers = ()
+    inner_bind_wrappers = ()
     execution_metadata = MappingProxyType({'type': 'synchronous'})
 
     def __init__(self, action_obj=None, parent=None):
@@ -108,7 +93,7 @@ class Context(IContext):
         return self
 
     def __exit__(self, exc_type, exc, traceback):
-        futures, cleanup = self._scopes.pop()
+        futures, cleanup = self._scopes[-1]
         failure = None
         try:
             for future in futures:
@@ -119,6 +104,7 @@ class Context(IContext):
                 if failure is None and error is not None:
                     failure = error
         finally:
+            self._scopes.pop()
             cleanup.close()
 
         if exc is None and failure is not None:
@@ -141,7 +127,7 @@ class Context(IContext):
             owner.callback(cleanup.pop_all().close)
 
     def _dispatch_cells_(self, cells):
-        """Return a future for every invocation coordinate in cells."""
+        """Take ownership of cell frames and return a future per coordinate."""
         return {coord: as_future(cell) for coord, cell in cells.items()}
 
     def _check_cache(self, bound_arguments):

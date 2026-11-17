@@ -7,13 +7,14 @@
 # ----------------------------------------------------------------------------
 
 from concurrent.futures import Future
+from contextlib import ExitStack
 from copy import copy
 from types import MappingProxyType
 
 from parsl.app.app import join_app, python_app
 from parsl.dataflow.errors import JoinError
 
-from rachis.sdk.action import Pipeline
+from rachis.sdk.action import FramePhase, Pipeline
 from rachis.sdk.futures import result_as_future
 from rachis.sdk.proxy import Proxy, output_proxy
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
@@ -61,7 +62,7 @@ def _submit_app(frame, executor):
     def worker(frame, inputs=()):
         with frame.ctx.cache:
             frame.bound_arguments = _unmap_arguments(frame, inputs)
-            if frame.action._mapped:
+            if frame.phase is FramePhase.INNER_BIND:
                 # This worker evaluates the complete mapped invocation.
                 return Context._dispatch_action_(frame.ctx, frame)
             return frame()
@@ -79,6 +80,7 @@ def _submit_pipeline(body):
     completion = Future()
     caller_ctx = body.ctx
     body.ctx = copy(caller_ctx)
+    body.ctx._parent = caller_ctx
 
     def fail_outputs(error):
         for future in outputs:
@@ -89,17 +91,19 @@ def _submit_pipeline(body):
         # Child work belongs to the body, which can submit more actions after
         # the caller has started waiting on its own scope.
         children = []
-        body.ctx._scopes.append(children)
-        try:
-            with body.ctx.cache:
-                aliases = body()
-        except BaseException as error:
-            fail_outputs(error)
-        else:
-            for alias, output in zip(aliases, outputs):
-                result_as_future(alias, into=output)
-        finally:
-            body.ctx._scopes.pop()
+        with ExitStack() as cleanup:
+            body.ctx._scopes.append((children, cleanup))
+            try:
+                with body.ctx.cache:
+                    aliases = body()
+            except BaseException as error:
+                fail_outputs(error)
+            else:
+                for alias, output in zip(aliases, outputs):
+                    result_as_future(alias, into=output)
+            finally:
+                body.ctx._scopes.pop()
+                body.ctx._defer_cleanup(cleanup)
 
         return [*outputs, *children]
 
