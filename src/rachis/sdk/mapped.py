@@ -8,9 +8,10 @@
 
 """Mapped binding surrounds Context dispatch with planning and result assembly.
 
-Cell frames resume the ordinary inner-application runner. Its wrappers bind
-realized inputs, open views, and publish cell outcomes. The binding stack joins
-those outcomes locally to assemble artifacts, without dispatching finalization.
+Cell application reuses a committed outcome, omits an absent coordinate, or
+enters the ordinary callable runner. Wrappers publish the value, absence, or
+exception after evaluation unwinds. The binding stack joins outcomes locally
+to assemble artifacts, without dispatching finalization.
 """
 
 import copy
@@ -324,57 +325,17 @@ def _as_view(value, annotation, name, trace):
         f'No cell transformation from {type(value)} to {annotation}')
 
 
-class _CellComplete(Exception):
-    """Unwind cell binding when no callable evaluation is needed."""
-
-
 @contextmanager
-def cell_commit_wrapper(frame):
+def commit_cell_outcome_wrapper(frame):
+    """Publish one outcome after the entire new cell invocation unwinds."""
     try:
         yield
-    except _CellComplete:
-        if frame.cell.path.is_file():
-            frame.results = read_outcome(frame.cell.path)
-            if isinstance(frame.results, Exception):
-                raise frame.results
-            return
-        frame.results = None
     except Exception as error:
-        commit_outcome(frame, error)
-        raise
+        failure = RuntimeError(f'Mapped cell {frame.coordinate!r} failed: '
+                               f'{error}')
+        failure.__cause__ = error
+        frame.results = failure
     frame.results = commit_outcome(frame, frame.results)
-    if isinstance(frame.results, Exception):
-        raise frame.results
-
-
-@contextmanager
-def cell_binding_wrapper(frame):
-    if frame.cell.path.is_file():
-        raise _CellComplete
-    frame.bound_arguments = {
-        name: value.resolve()
-        if isinstance(value, (PendingCell, CommittedCell)) else value
-        for name, value in frame.bound_arguments.items()
-    }
-    for group in frame.action.signature.input_groups:
-        present = {name for name in group.inputs
-                   if frame.bound_arguments[name] is not None}
-        missing = group.coverage(present)
-        if missing is None:
-            raise _CellComplete
-        _check_required(missing, frame.coordinate)
-    yield
-
-
-@contextmanager
-def cell_error_wrapper(frame):
-    try:
-        yield
-    except _CellComplete:
-        raise
-    except Exception as error:
-        raise RuntimeError(f'Mapped cell {frame.coordinate!r} failed: '
-                           f'{error}') from error
 
 
 @contextmanager
@@ -614,9 +575,6 @@ class MappedMethod(Method):
         mapped_plan_wrapper,
     )
     inner_apply_wrappers = (
-        cell_commit_wrapper,
-        cell_error_wrapper,
-        cell_binding_wrapper,
         cell_workspace_wrapper,
         cell_provenance_wrapper,
         cell_views_wrapper,
@@ -632,4 +590,31 @@ class MappedMethod(Method):
             }
             frame.results = frame.ctx._dispatch_cells_(
                 cell_frames, cleanup=frame.workspace_cleanup)
+        return frame.results
+
+    def _inner_apply(self, frame):
+        """Choose a cell outcome before entering callable evaluation."""
+        if frame.cell.path.is_file():
+            frame.results = read_outcome(frame.cell.path)
+        else:
+            with commit_cell_outcome_wrapper(frame):
+                frame.bound_arguments = {
+                    name: value.resolve()
+                    if isinstance(value, (PendingCell, CommittedCell))
+                    else value
+                    for name, value in frame.bound_arguments.items()
+                }
+                for group in self.signature.input_groups:
+                    present = {name for name in group.inputs
+                               if frame.bound_arguments[name] is not None}
+                    missing = group.coverage(present)
+                    if missing is None:
+                        frame.results = None
+                        break
+                    _check_required(missing, frame.coordinate)
+                else:
+                    frame.results = super()._inner_apply(frame)
+
+        if isinstance(frame.results, Exception):
+            raise frame.results
         return frame.results

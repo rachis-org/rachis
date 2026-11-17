@@ -8,6 +8,7 @@
 
 from contextlib import contextmanager
 from concurrent.futures import Future
+from copy import copy
 from tempfile import TemporaryDirectory
 from threading import Event, current_thread
 from typing import Annotated
@@ -26,7 +27,10 @@ from rachis.plugin import CaptureHolder, Int
 from rachis.sdk import MappedMethod, Results
 from rachis.sdk.context import Context, ParallelContext
 from rachis.sdk.futures import as_future
-from rachis.sdk.mapped import MappedProxyArtifact
+from rachis.sdk.mapped import (
+    CellOutcome, CommittedCell, MappedProxyArtifact, commit_outcome,
+    read_outcome,
+)
 from rachis.sdk.parallel_config import ParallelConfig
 from rachis.sdk.proxy import ProxyArtifact
 
@@ -454,19 +458,18 @@ def test_parallel_root_cleans_up_mapped_work_after_pipeline_error(tmp_path):
         ctx.get_action('dummy_plugin', 'filter_samples')(data)
         raise ValueError('pipeline failed after dispatch')
 
-    @contextmanager
-    def observe_commit(frame):
-        yield
+    def observe_commit(frame, outcome):
+        result = commit_outcome(frame, outcome)
         assert frame.cell.path.is_file()
         commits.append(frame.cell.path)
+        return result
 
     config = Config(
         executors=[ThreadPoolExecutor(label='default', max_threads=2)],
         run_dir=str(tmp_path),
     )
     with (patch.object(pipeline, '_callable', fail_after_dispatch),
-          patch.object(MappedMethod, 'inner_apply_wrappers',
-                       (observe_commit, *MappedMethod.inner_apply_wrappers)),
+          patch('rachis.sdk.mapped.commit_outcome', observe_commit),
           ParallelConfig(config)):
         with pytest.raises(ValueError, match='pipeline failed after dispatch'):
             pipeline.parallel(data)
@@ -491,17 +494,13 @@ def test_parallel_proxy_surfaces_mapped_finalization_error(tmp_path):
 
 
 def test_batch_continues_after_a_cell_fails(tmp_path):
-    from rachis.sdk.mapped import CellOutcome, read_outcome
-
     data = Artifact.import_data('Mapping', {'s1': 'invalid', 's2': '4'})
     outcomes = {}
 
-    @contextmanager
-    def observe_commit(frame):
-        try:
-            yield
-        finally:
-            outcomes[frame.coordinate.sample] = read_outcome(frame.cell.path)
+    def observe_commit(frame, outcome):
+        result = commit_outcome(frame, outcome)
+        outcomes[frame.coordinate.sample] = read_outcome(frame.cell.path)
+        return result
 
     def one_batch(ctx, cells):
         yield tuple(cells)
@@ -511,11 +510,109 @@ def test_batch_continues_after_a_cell_fails(tmp_path):
         run_dir=str(tmp_path),
     )
     with (patch.object(ParallelContext, '_batches', one_batch),
-          patch.object(MappedMethod, 'inner_apply_wrappers',
-                       (observe_commit, *MappedMethod.inner_apply_wrappers)),
+          patch('rachis.sdk.mapped.commit_outcome', observe_commit),
           ParallelConfig(config)):
         with (pytest.raises(RuntimeError, match='Mapped cell.*s1.*failed'),
               ParallelContext(None) as ctx):
             ctx.get_action('dummy_plugin', 'filter_samples')(data)
     assert isinstance(outcomes['s1'], Exception)
     assert isinstance(outcomes['s2'], CellOutcome)
+
+
+@pytest.mark.parametrize('outcome', ['value', 'absent', 'error'])
+def test_cell_outcomes_are_reused_without_evaluation_or_publication(outcome):
+    method = get_dummy_plugin().methods['increment_samples']
+    value = 'invalid' if outcome == 'error' else '4'
+    data = Artifact.import_data('Mapping', {'s1': value})
+    recorded = []
+
+    class RepeatingContext(Context):
+        def _dispatch_cells_(self, cells, *, cleanup):
+            futures = {}
+            for coord, cell in cells.items():
+                if outcome == 'absent':
+                    cell.bound_arguments['data'] = CommittedCell(None, 'data')
+                retry = copy(cell)
+                first = futures[coord] = as_future(cell)
+                recorded.append(read_outcome(cell.cell.path))
+                committed = cell.cell.path.read_bytes()
+                # A transported retry needs only its commit to recover any of
+                # the three outcomes. Binding must not revisit these inputs.
+                retry.bound_arguments = {}
+                retry = dill.loads(dill.dumps(retry))
+                repeated = as_future(retry)
+                assert cell.cell.path.read_bytes() == committed
+                if first.exception() is not None:
+                    assert type(repeated.exception()) is type(
+                        first.exception())
+                    assert str(repeated.exception()) == str(first.exception())
+                elif outcome == 'absent':
+                    assert repeated.result() is None
+                else:
+                    assert repeated.result().outputs['output'].load() == '5'
+            return futures
+
+    with patch('rachis.sdk.mapped.commit_outcome',
+               wraps=commit_outcome) as publish:
+        call = method._outer_bind(lambda: RepeatingContext(method))
+        if outcome == 'error':
+            with pytest.raises(RuntimeError, match='Mapped cell.*s1.*failed'):
+                call(data, 1)
+            assert isinstance(recorded[0], RuntimeError)
+        else:
+            result = call(data, 1)
+            expected = {} if outcome == 'absent' else {'s1': '5'}
+            assert result.output.view(dict) == expected
+            if outcome == 'absent':
+                assert recorded == [None]
+            else:
+                assert isinstance(recorded[0], CellOutcome)
+        assert publish.call_count == 1
+
+
+def test_cell_records_failure_after_evaluation_wrappers_unwind():
+    method = get_dummy_plugin().methods['increment_samples']
+    data = Artifact.import_data('Mapping', {'s1': '4'})
+    events = []
+
+    @contextmanager
+    def fail_on_exit(frame):
+        yield
+        events.append('callable returned')
+        raise ValueError('failed during unwind')
+
+    class ObservedContext(Context):
+        inner_apply_wrappers = (fail_on_exit,)
+
+    def observe_commit(frame, outcome):
+        assert isinstance(outcome, RuntimeError)
+        assert isinstance(outcome.__cause__, ValueError)
+        assert not frame.workspace.exists()
+        events.append('published failure')
+        return commit_outcome(frame, outcome)
+
+    with patch('rachis.sdk.mapped.commit_outcome', observe_commit):
+        with pytest.raises(RuntimeError, match='failed during unwind'):
+            method._outer_bind(lambda: ObservedContext(method))(data, 1)
+    assert events == ['callable returned', 'published failure']
+
+
+def test_filtered_output_is_a_value_outcome_not_an_absent_cell():
+    def filter_every_sample(
+        data: Annotated[str, ForEach['sample']],
+    ) -> Annotated[str | None, ForEach['sample']]:
+        return None
+
+    plugin = get_dummy_plugin()
+    data = Artifact.import_data('Mapping', {'s1': '4'})
+    with patch.dict(plugin.methods):
+        plugin.methods.register_function(
+            filter_every_sample, inputs={'data': Mapping}, parameters={},
+            outputs={'output': Mapping}, name='Filter samples', description='',
+        )
+        result = plugin.methods['filter_every_sample'](data).output
+    assert result.view(dict) == {}
+    records = result._archiver.provenance_dir / 'action' / 'coordinates.tsv'
+    assert records.read_text().splitlines() == [
+        'sample\tattempt\toutcome', 's1\t1\tfiltered',
+    ]
