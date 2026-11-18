@@ -37,14 +37,24 @@ from rachis.sdk.results import Results
 from rachis.sdk.util import Sievable
 
 
+class CellView:
+    """A cell view whose backing resources survive through output staging."""
+
+    @contextmanager
+    def open(self):
+        yield self.load()
+
+
 @dataclass(frozen=True)
-class ArtifactCell:
+class ArtifactCell(CellView):
     artifact: Artifact
     pattern: object
     coord: Coord
 
-    def load(self):
-        return self.artifact._axis(self.pattern)[self.coord]
+    @contextmanager
+    def open(self):
+        with self.artifact._axis(self.pattern) as (axis, _):
+            yield axis[self.coord]
 
 
 @dataclass(frozen=True)
@@ -55,7 +65,7 @@ class Cell:
 
 
 @dataclass(frozen=True)
-class StoredView:
+class StoredView(CellView):
     path: Path
     format: type | None = None
 
@@ -245,64 +255,67 @@ def cell_provenance_wrapper(frame):
 @contextmanager
 def cell_transform_wrapper(frame):
     signature = frame.action.signature
-    frame.transformed_arguments = {}
-    for name, spec in signature.signature_order.items():
-        value = frame.bound_arguments[name]
-        if name in signature.input_patterns:
-            if isinstance(value, ArtifactCell):
-                value = value.load()
-            if value is not None:
-                value = _as_view(
-                    value, spec.view_type, name, frame.provenance.transforms)
-            elif type(None) not in get_args(spec.view_type):
-                raise TypeError(f'Input {name!r} does not accept None')
-        elif name in signature.inputs and value is not None:
-            if is_collection_type(spec.qiime_type):
-                if isinstance(value, ProxyResultCollection):
-                    value = value.result()
-                if isinstance(value, ResultCollection):
-                    value = signature._shape_collection_input(value, spec)
-                if isinstance(value, list):
-                    value = [item._view(spec.view_type) for item in value]
+    with ExitStack() as views:
+        frame.transformed_arguments = {}
+        for name, spec in signature.signature_order.items():
+            value = frame.bound_arguments[name]
+            if name in signature.input_patterns:
+                if isinstance(value, CellView):
+                    value = views.enter_context(value.open())
+                if value is not None:
+                    value = _as_view(
+                        value, spec.view_type, name,
+                        frame.provenance.transforms)
+                elif type(None) not in get_args(spec.view_type):
+                    raise TypeError(f'Input {name!r} does not accept None')
+            elif name in signature.inputs and value is not None:
+                if is_collection_type(spec.qiime_type):
+                    if isinstance(value, ProxyResultCollection):
+                        value = value.result()
+                    if isinstance(value, ResultCollection):
+                        value = signature._shape_collection_input(value, spec)
+                    if isinstance(value, list):
+                        value = [item._view(spec.view_type) for item in value]
+                    else:
+                        value = type(value)({key: item._view(spec.view_type)
+                                             for key, item in value.items()})
                 else:
-                    value = type(value)({key: item._view(spec.view_type)
-                                         for key, item in value.items()})
-            else:
-                value = value._view(spec.view_type)
-        frame.transformed_arguments[name] = value
+                    value = value._view(spec.view_type)
+            frame.transformed_arguments[name] = value
 
-    yield
+        yield
 
-    returned_views = checked_return_values(
-        frame.results, len(signature.outputs))
-    outputs = {}
-    for index, ((name, spec), value) in enumerate(
-        zip(signature.outputs.items(), returned_views)
-    ):
-        args = get_args(spec.view_type)
-        if value is None and type(None) in args:
-            outputs[name] = None
-            continue
-        view_type = spec.view_type
-        if type(None) in args:
-            view_type = next(t for t in args if t is not type(None))
-        if type(value) is not view_type:
-            raise TypeError(f'Output {name!r} expected {view_type!r}, '
-                            f'received {type(value)!r}')
-        axis_view = get_type_hints(frame.axes[name].__getitem__)['return']
-        if axis_view is not view_type:
-            value = _as_view(value, axis_view, ('return', name),
-                             frame.provenance.transforms)
-        outputs[name] = StoredView.save(value, frame.workspace / str(index))
-    frame.results = outputs
+        returned_views = checked_return_values(
+            frame.results, len(signature.outputs))
+        outputs = {}
+        for index, ((name, spec), value) in enumerate(
+            zip(signature.outputs.items(), returned_views)
+        ):
+            args = get_args(spec.view_type)
+            if value is None and type(None) in args:
+                outputs[name] = None
+                continue
+            view_type = spec.view_type
+            if type(None) in args:
+                view_type = next(t for t in args if t is not type(None))
+            if type(value) is not view_type:
+                raise TypeError(f'Output {name!r} expected {view_type!r}, '
+                                f'received {type(value)!r}')
+            axis_view = get_type_hints(frame.axes[name].__getitem__)['return']
+            if axis_view is not view_type:
+                value = _as_view(value, axis_view, ('return', name),
+                                 frame.provenance.transforms)
+            outputs[name] = StoredView.save(
+                value, frame.workspace / str(index))
+        frame.results = outputs
 
 
 def output_axes(frame):
-    patterns = frame.action.signature.output_patterns
+    manager = PluginManager()
     return {
-        name: PluginManager().get_axis(frame.output_types[name].qiime_type,
-                                       pattern)
-        for name, pattern in patterns.items()
+        name: manager.get_axis(
+            frame.output_types[name].qiime_type, pattern).axis
+        for name, pattern in frame.action.signature.output_patterns.items()
     }
 
 
