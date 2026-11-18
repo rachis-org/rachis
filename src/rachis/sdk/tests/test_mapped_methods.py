@@ -174,6 +174,26 @@ def test_cell_context_exits_before_staging_outputs():
     assert events == ['mapped-enter', 's1', 's2', 'mapped-exit']
 
 
+def test_synchronous_child_owns_its_mapped_workspace():
+    method = get_dummy_plugin().methods['increment_samples']
+    data = Artifact.import_data('Mapping', {'s1': '4'})
+    directories = []
+
+    @contextmanager
+    def observe_workspace(frame):
+        directories.append(frame.directory)
+        yield
+
+    call = Context().get_action('dummy_plugin', 'increment_samples')
+    with patch.object(method, 'inner_bind_wrappers',
+                      (*method.inner_bind_wrappers, observe_workspace)):
+        result = call(data, 1)
+
+    assert result.output.view(dict) == {'s1': '5'}
+    directory, = directories
+    assert not directory.exists()
+
+
 def test_deferred_cells_gather_locally_and_keep_their_workspace():
     method = get_dummy_plugin().methods['increment_samples']
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
