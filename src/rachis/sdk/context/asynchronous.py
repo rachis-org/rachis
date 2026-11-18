@@ -9,6 +9,8 @@
 import concurrent.futures
 from types import MappingProxyType
 
+from rachis.sdk.futures import InvocationResources
+
 from .base import Context, cache_lookup_wrapper
 
 
@@ -16,7 +18,7 @@ def _subprocess_apply(frame):
     # The worker uses synchronous dispatch for any pipeline child calls, while
     # this application retains its asynchronous execution provenance.
     # Activate the transported cache so the worker Context uses that cache.
-    with frame.ctx.cache:
+    with frame.ctx.cache, InvocationResources():
         ctx = Context(frame.action)
         ctx.execution_ctx = dict(frame.ctx.execution_ctx)
         frame.ctx = ctx

@@ -6,8 +6,50 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
-from concurrent.futures import Future
-from threading import Lock
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from contextlib import ExitStack, nullcontext
+from functools import cached_property
+from threading import Lock, local
+
+
+class InvocationResources(ExitStack):
+    """Keep invocation resources alive until work and joins settle."""
+
+    _local = local()
+
+    def __init__(self):
+        super().__init__()
+        self.jobs = []
+
+    @classmethod
+    def current(cls):
+        stack = getattr(cls._local, 'stack', ())
+        if not stack:
+            raise RuntimeError('No active invocation resource scope')
+        return stack[-1]
+
+    @classmethod
+    def ensure(cls):
+        """Borrow the current resource scope or open a new one."""
+        return nullcontext() if getattr(cls._local, 'stack', ()) else cls()
+
+    @cached_property
+    def executor(self):
+        return self.enter_context(ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='rachis-join'))
+
+    def __enter__(self):
+        if not hasattr(self._local, 'stack'):
+            self._local.stack = []
+        self._local.stack.append(self)
+        return self
+
+    def __exit__(self, *exc_details):
+        try:
+            wait(self.jobs)
+            return super().__exit__(*exc_details)
+        finally:
+            self._local.stack.pop()
 
 
 def as_future(function):
@@ -46,7 +88,7 @@ def result_as_future(value):
 
 def join(dependencies, combine, *, ctx):
     """Combine results locally and track deferred work in its invocation."""
-    resources = ctx._get_resources()
+    resources = InvocationResources.current()
 
     def run(*values):
         with ctx.cache:

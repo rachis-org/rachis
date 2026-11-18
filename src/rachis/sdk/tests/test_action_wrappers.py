@@ -23,6 +23,7 @@ from rachis.core.util import load_action_yaml
 from rachis.plugin import Collection
 from rachis.sdk import Artifact, ResultCollection, Results
 from rachis.sdk.context import Context, ParallelContext
+from rachis.sdk.futures import InvocationResources
 from rachis.sdk.parallel_config import ParallelConfig
 from rachis.sdk.proxy import ProxyArtifact, ProxyResultCollection
 
@@ -264,12 +265,22 @@ class TestActionWrappers(unittest.TestCase):
             self.assertIsInstance(arguments, ResultCollection)
             self.assertEqual(list(arguments.keys()), ['0'])
 
+    def test_invocation_resources_restore_enclosing_scope_on_error(self):
+        with InvocationResources() as outer:
+            with self.assertRaisesRegex(ValueError, 'inner failed'):
+                with InvocationResources() as inner:
+                    self.assertIs(InvocationResources.current(), inner)
+                    raise ValueError('inner failed')
+            self.assertIs(InvocationResources.current(), outer)
+        with self.assertRaisesRegex(RuntimeError, 'No active invocation'):
+            InvocationResources.current()
+
     def test_synchronous_pipeline_keeps_resources_through_inner_scope(self):
         pipeline = self.plugin.pipelines['parameter_only_pipeline']
         directories = []
 
         def return_outputs(ctx, **kwargs):
-            directory = ctx._get_resources().enter_context(
+            directory = InvocationResources.current().enter_context(
                 TemporaryDirectory())
             directories.append(directory)
             with ctx:

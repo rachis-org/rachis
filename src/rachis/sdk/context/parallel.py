@@ -13,11 +13,12 @@ from types import MappingProxyType
 from parsl.app.app import python_app
 
 from rachis.sdk.action import Pipeline
+from rachis.sdk.futures import InvocationResources
 from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy, ProxyResults
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
 
-from .base import Context, cache_lookup_wrapper, invocation_resources_wrapper
+from .base import Context, cache_lookup_wrapper
 
 
 def _map_arg(arg, futures):
@@ -76,7 +77,7 @@ def _submit_app(frame, executor):
     worker_frame.bound_arguments = _map_arg(frame.bound_arguments, futures)
 
     def worker(frame, inputs=()):
-        with frame.ctx.cache:
+        with frame.ctx.cache, InvocationResources():
             frame.bound_arguments = _unmap_arg(frame.bound_arguments, inputs)
             return frame()
 
@@ -95,7 +96,6 @@ def parallel_dispatch_result_wrapper(frame):
 class ParallelContext(Context):
     execution_ctx = MappingProxyType({'type': 'parsl'})
     outer_bind_wrappers = (
-        invocation_resources_wrapper,
         cache_lookup_wrapper,
         parallel_dispatch_result_wrapper,
     )
@@ -133,5 +133,5 @@ class ParallelContext(Context):
         }
 
         future = _submit_app(frame, executor)
-        self._get_resources().jobs.append(future)
+        InvocationResources.current().jobs.append(future)
         return future

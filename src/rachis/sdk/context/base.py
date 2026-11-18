@@ -5,9 +5,8 @@
 #
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
-from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, wait
+from concurrent.futures import CancelledError, Future
 from contextlib import ExitStack, contextmanager
-from functools import cached_property
 from types import MappingProxyType
 import warnings
 
@@ -16,6 +15,7 @@ from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
+from rachis.sdk.futures import InvocationResources
 from rachis.sdk.proxy import ProxyResults, contains_proxy
 
 
@@ -44,40 +44,10 @@ def cache_lookup_wrapper(frame):
     yield
 
 
-@contextmanager
-def invocation_resources_wrapper(frame):
-    ctx = frame.ctx
-    owns_resources = ctx._parent is None and not ctx._scopes
-    try:
-        yield
-    finally:
-        if owns_resources:
-            ctx._close_resources()
-
-
-class InvocationResources(ExitStack):
-    """Keep invocation resources alive until work and joins settle."""
-
-    def __init__(self):
-        super().__init__()
-        self.jobs = []
-
-    @cached_property
-    def executor(self):
-        return self.enter_context(ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix='rachis-join'))
-
-    def __exit__(self, *exc_details):
-        wait(self.jobs)
-        return super().__exit__(*exc_details)
-
-
 class Context(IContext):
     outer_bind_wrappers = (cache_lookup_wrapper,)
     inner_apply_wrappers = ()
     execution_ctx = MappingProxyType({'type': 'synchronous'})
-    _resources = None
-    _dispatch_resources = None
 
     def __init__(self, action_obj=None, parent=None):
         if parent is not None:
@@ -100,30 +70,7 @@ class Context(IContext):
         self.execution_ctx = dict(type(self).execution_ctx)
 
     def _dispatch_action_(self, frame):
-        resources = InvocationResources()
-        previous = self._dispatch_resources
-        self._dispatch_resources = resources
-        try:
-            with resources:
-                return frame()._result()
-        finally:
-            self._dispatch_resources = previous
-
-    def _get_resources(self):
-        if self._dispatch_resources is not None:
-            return self._dispatch_resources
-        if self._resources is None:
-            if self._parent is not None:
-                return self._parent._get_resources()
-            self._resources = InvocationResources()
-        return self._resources
-
-    def _close_resources(self):
-        if self._resources is not None:
-            try:
-                self._resources.close()
-            finally:
-                self._resources = None
+        return frame()._result()
 
     def _track_results(self, results):
         if isinstance(results, ProxyResults):
@@ -133,15 +80,18 @@ class Context(IContext):
             while ctx is not None and not ctx._scopes:
                 ctx = ctx._parent
             if ctx is not None:
-                ctx._scopes[-1].append(results)
+                futures, _ = ctx._scopes[-1]
+                futures.append(results)
 
     def __enter__(self):
         """Start a scope for action results tracked through this context."""
-        self._scopes.append([])
+        stack = ExitStack()
+        stack.enter_context(InvocationResources.ensure())
+        self._scopes.append(([], stack))
         return self
 
     def __exit__(self, exc_type, exc, traceback):
-        futures = self._scopes.pop()
+        futures, stack = self._scopes.pop()
         failure = None
         try:
             for future in futures:
@@ -152,16 +102,13 @@ class Context(IContext):
                 if failure is None and error is not None:
                     failure = error
         finally:
-            if not self._scopes:
-                self._close_resources()
+            stack.close()
 
         if exc is None and failure is not None:
             raise failure
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        state.pop('_resources', None)
-        state.pop('_dispatch_resources', None)
         state['_scopes'] = []
         return state
 
