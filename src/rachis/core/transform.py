@@ -6,10 +6,12 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 import pathlib
+from typing import get_origin, get_args, Union
 
 from rachis import sdk
 from rachis.plugin import model
 from rachis.core import util
+from rachis.core.exceptions import ValidationError
 
 
 def identity_transformer(view):
@@ -19,7 +21,9 @@ def identity_transformer(view):
 class ModelType:
     @staticmethod
     def from_view_type(view_type):
-        if issubclass(view_type, model.base.FormatBase):
+        if get_origin(view_type) is Union:
+            return UnionType(view_type)
+        elif issubclass(view_type, model.base.FormatBase):
             if issubclass(view_type,
                           model.SingleFileDirectoryFormatBase):
                 # HACK: this is necessary because we need to be able to "act"
@@ -137,7 +141,7 @@ class FormatType(ModelType):
 
     def validate(self, view, level='min'):
         if not isinstance(view, self._view_type):
-            raise TypeError("%r is not an instance of %r."
+            raise ValidationError("%r is not an instance of %r."
                             % (view, self._view_type))
         # Formats have a validate method, so defer to it
         view.validate(level)
@@ -230,5 +234,76 @@ class SingleFileDirectoryFormatType(FormatType):
 class ObjectType(ModelType):
     def validate(self, view, level=None):
         if not isinstance(view, self._view_type):
-            raise TypeError("%r is not of type %r, cannot transform further."
-                            % (view, self._view_type))
+            raise ValidationError(
+                "%r is not of type %r, cannot transform further."
+                % (view, self._view_type)
+            )
+
+
+class UnionType(ModelType):
+    @classmethod
+    def _is_union_type(cls, type):
+        return get_origin(type) is Union
+
+    def make_transformation(self, other, recorder=None):
+        transformations = []
+        if (
+            self._is_union_type(self._view_type)
+            and self._is_union_type(other._view_type)
+        ):
+            from_types = ', '.join(
+                [str(arg) for arg in get_args(self._view_type)]
+            )
+            to_types = ', '.join(
+                [str(arg) for arg in get_args(other._view_type)]
+            )
+            message = (
+                f'No transformation from any of {from_types} to any of '
+                f'{to_types}'
+            )
+            for from_arg in get_args(self._view_type):
+                for to_arg in get_args(self._view_type):
+                    from_type = ModelType.from_view_type(from_arg)
+                    to_type = ModelType.from_view_type(to_arg)
+                    try:
+                         transformations.append(
+                             from_type.make_transformation(to_type, recorder)
+                         )
+                    except Exception:
+                        pass
+        elif self._is_union_type(self._view_type):
+            from_types = ', '.join(
+                [str(arg) for arg in get_args(self._view_type)]
+            )
+            message = (
+                f'No transformation from any of {from_types} to '
+                f'{other._view_type}'
+            )
+            for arg in get_args(self._view_type):
+                type = ModelType.from_view_type(arg)
+                try:
+                    transformations.append(
+                        type.make_transformation(other, recorder)
+                    )
+                except Exception:
+                    pass
+        else:
+            to_types =  ', '.join(
+                [str(arg) for arg in get_args(other._view_type)]
+            )
+            message = f'No transformation from {self._view_type} to {to_types}'
+            type = ModelType.from_view_type(self._view_type)
+            for arg in get_args(other._view_type):
+                arg = ModelType.from_view_type(arg)
+                try:
+                     transformations.append(
+                         type.make_transformation(arg, recorder)
+                     )
+                except Exception as e:
+                    print(e)
+                    pass
+
+        if len(transformations) > 0:
+            return transformations
+
+        raise Exception(message)
