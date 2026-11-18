@@ -78,9 +78,7 @@ def _submit_app(frame, executor):
 
     def worker(frame, inputs=()):
         with frame.ctx.cache:
-            if inputs:
-                frame.bound_arguments = _unmap_arg(
-                    frame.bound_arguments, inputs)
+            frame.bound_arguments = _unmap_arg(frame.bound_arguments, inputs)
             return frame()
 
     frame.action._set_wrapper_name(worker, frame.action.id)

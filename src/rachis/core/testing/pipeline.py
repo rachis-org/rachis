@@ -337,8 +337,14 @@ def failing_pipeline(ctx, int_sequence, break_from='arity'):
         b = ctx.make_artifact(Mapping, {'foo': 'b'})
         if break_from == 'method':
             return merge_mappings(a, b).merged_mapping
-        with ctx:
-            result = merge_mappings(a, b)
+        result = None
+        try:
+            with ctx:
+                result = merge_mappings(a, b)
+        except ValueError as error:
+            if result is None or "Key 'foo' exists" not in str(error):
+                raise
+            return ctx.make_artifact(Mapping, {'caught': 'at scope exit'})
         return result.merged_mapping
     elif break_from == 'no-plugin':
         ctx.get_action('not%a$plugin', 'foo')

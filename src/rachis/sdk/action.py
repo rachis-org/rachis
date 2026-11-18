@@ -21,11 +21,11 @@ from typing import Mapping, TypedDict, Union
 from types import MappingProxyType
 
 import rachis.sdk
-from rachis.sdk.futures import as_future, join
+from rachis.sdk.futures import as_future, join, result_as_future
 from rachis.sdk.iresult import IResult
 from rachis.sdk.proxy import (
     ProxyResult, ProxyResultCollection, ProxyResults, contains_proxy,
-    output_proxy, result_future,
+    output_proxy,
 )
 from rachis.sdk.result import Artifact, ResultCollection, ChecksumCache
 import rachis.core.type as qtype
@@ -161,7 +161,8 @@ def provenance_wrapper(frame):
 
     if contains_proxy(inputs):
         frame.ready_provenance = join(
-            map(result_future, inputs.values()), record_inputs, ctx=frame.ctx)
+            map(result_as_future, inputs.values()), record_inputs,
+            ctx=frame.ctx)
     else:
         frame.ready_provenance = as_future(
             lambda: record_inputs(*inputs.values()))
@@ -308,8 +309,8 @@ def pipeline_alias_wrapper(frame):
             return _alias_pipeline_output(
                 name, qiime_type, resolved, provenance, ctx)
 
-        future = join((result_future(output), frame.ready_provenance), alias,
-                      ctx=ctx)
+        future = join((result_as_future(output), frame.ready_provenance),
+                      alias, ctx=ctx)
         if isinstance(output, ProxyResult):
             refined_type = _intersect_pipeline_output_type(
                 qiime_type, output.type, repr(name))
@@ -317,7 +318,7 @@ def pipeline_alias_wrapper(frame):
         else:
             proxies[name] = output_proxy(future, None, qiime_type)
 
-    results = ProxyResults.from_named(proxies, frame.output_types)
+    results = ProxyResults._from_named(proxies, frame.output_types)
     frame.results = results if ctx._defer_results else results._result()
 
 

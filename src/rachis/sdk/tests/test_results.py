@@ -10,6 +10,7 @@ import pickle
 import unittest
 
 from rachis.sdk import Results
+from rachis.sdk.proxy import ProxyResults
 
 
 class TestResults(unittest.TestCase):
@@ -60,6 +61,13 @@ class TestResults(unittest.TestCase):
 
         with self.assertRaises(AttributeError):
             r.baz
+
+    def test_result_helpers_do_not_shadow_output_names(self):
+        outputs = {'result': 42, 'from_named': 43}
+        results = ProxyResults._from_named(outputs, outputs.keys())
+        for named in (results, results._result()):
+            self.assertEqual(named.result, 42)
+            self.assertEqual(named.from_named, 43)
 
     def test_per_instance_field_attributes(self):
         # Field attributes are added to a `Results` instance, not the type.

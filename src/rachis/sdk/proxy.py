@@ -7,7 +7,7 @@
 # ----------------------------------------------------------------------------
 
 from rachis.sdk.iresult import IResult
-from rachis.sdk.futures import after_all, as_future, join
+from rachis.sdk.futures import after_all, join, result_as_future
 
 import rachis.core.transform as transform
 from rachis.core.type.util import is_visualization_type, is_collection_type
@@ -36,26 +36,6 @@ def contains_proxy(value):
     return False
 
 
-def result_future(value):
-    """Resolve a result reference, including any prospective collection."""
-    from rachis.sdk.result import ResultCollection
-
-    if isinstance(value, (ProxyResult, ProxyResultCollection)):
-        return after_all((value._future_,), value._get_element_)
-    if isinstance(value, ResultCollection):
-        keys = tuple(value.keys())
-        return after_all(map(result_future, value.values()),
-                         lambda *items: ResultCollection(
-                             dict(zip(keys, items))))
-    if isinstance(value, list):
-        return after_all(map(result_future, value), lambda *items: list(items))
-    if isinstance(value, dict):
-        keys = tuple(value)
-        return after_all(map(result_future, value.values()),
-                         lambda *items: dict(zip(keys, items)))
-    return as_future(lambda: value)
-
-
 class ProxyResult(Proxy, IResult):
     def __init__(self, future, selector, qiime_type=None):
         """We have a future that represents the results of some QIIME 2 action,
@@ -81,7 +61,7 @@ class ProxyResult(Proxy, IResult):
                 qiime_type, self._qiime_type_)
 
         future = join(
-            (result_future(self),),
+            (result_as_future(self),),
             lambda result: result._alias(name, provenance, ctx, qiime_type),
             ctx=ctx)
         alias_type = self._qiime_type_ if qiime_type is None else qiime_type
@@ -247,12 +227,12 @@ class ProxyResults(Proxy):
         self._named_ = None
 
     @classmethod
-    def from_named(cls, proxies, signature):
+    def _from_named(cls, proxies, signature):
         from rachis.sdk.results import Results
 
         names = tuple(signature)
         joined = after_all(
-            (result_future(proxies[name]) for name in names),
+            (result_as_future(proxies[name]) for name in names),
             lambda *outputs: Results(names, outputs))
         results = cls(joined, signature)
         results._named_ = proxies
@@ -302,7 +282,7 @@ class ProxyResults(Proxy):
     def _asdict(self):
         return self._result()._asdict()
 
-    def result(self):
+    def _result(self):
         """Wait for the results and return them, or raise their exception.
 
         A top-level ``.parallel()`` call has already waited for its results.
@@ -310,8 +290,6 @@ class ProxyResults(Proxy):
         To handle a failure locally, catch it around that scope.
         """
         return self._future_.result()
-
-    _result = result
 
     def _create_proxy(self, selector):
         """Create a ProxyResult for the element of the ProxyResults being

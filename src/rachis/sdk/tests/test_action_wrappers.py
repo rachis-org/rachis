@@ -289,12 +289,13 @@ class TestActionWrappers(unittest.TestCase):
     def test_pipeline_alias_waits_for_original_inputs(self):
         pipeline = self.plugin.pipelines['list_pipeline']
         artifact = Artifact.import_data(IntSequence1, [1])
+        source = Artifact.import_data(SingleInt, 2)
         pending = Future()
         proxy = ProxyArtifact(pending, None, IntSequence1)
 
         def return_outputs(ctx, ints):
             ints.clear()
-            return [ctx.make_artifact(SingleInt, 2)]
+            return [source]
 
         with ParallelContext(pipeline) as ctx:
             call = pipeline._outer_bind(lambda: ctx)
@@ -309,6 +310,7 @@ class TestActionWrappers(unittest.TestCase):
         provenance = load_action_yaml(alias._archiver.path)
         self.assertEqual(provenance['action']['inputs'],
                          [{'ints': [str(artifact.uuid)]}])
+        self.assertEqual(provenance['action']['alias-of'], str(source.uuid))
 
     def test_context_raises_pipeline_output_failure_at_scope_exit(self):
         sequence = Artifact.import_data(IntSequence1, [1])

@@ -594,12 +594,12 @@ class TestPipeline(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Key 'foo' exists"):
                 call(self.int_sequence, break_from='method')
 
-    def test_parallel_failing_from_method_in_scope(self):
+    def test_parallel_pipeline_catches_failure_at_inner_scope_exit(self):
         pipeline = self.plugin.pipelines['failing_pipeline']
         with rachis.sdk.parallel_config.ParallelConfig():
-            with self.assertRaisesRegex(ValueError, "Key 'foo' exists"):
-                pipeline.parallel(self.int_sequence,
-                                  break_from='method-in-scope')
+            mapping, = pipeline.parallel(self.int_sequence,
+                                         break_from='method-in-scope')
+        self.assertEqual(mapping.view(dict), {'caught': 'at scope exit'})
 
     def test_failing_from_type(self):
         for call in self.iter_callables('failing_pipeline'):
