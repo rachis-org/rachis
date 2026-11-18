@@ -85,13 +85,13 @@ class Context(IContext):
 
     def __enter__(self):
         """Start a scope for action results tracked through this context."""
-        stack = ExitStack()
-        stack.enter_context(InvocationResources.ensure())
-        self._scopes.append(([], stack))
+        resource_scope = ExitStack()
+        resource_scope.enter_context(InvocationResources.ensure())
+        self._scopes.append(([], resource_scope))
         return self
 
     def __exit__(self, exc_type, exc, traceback):
-        futures, stack = self._scopes.pop()
+        futures, resource_scope = self._scopes.pop()
         failure = None
         try:
             for future in futures:
@@ -102,7 +102,7 @@ class Context(IContext):
                 if failure is None and error is not None:
                     failure = error
         finally:
-            stack.close()
+            resource_scope.close()
 
         if exc is None and failure is not None:
             raise failure

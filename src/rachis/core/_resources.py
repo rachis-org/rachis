@@ -33,16 +33,15 @@ class InvocationResources(ExitStack):
     @classmethod
     @contextmanager
     def ensure(cls):
-        """Borrow the active resources or own them for this scope."""
-        resources = getattr(_active, 'resources', None)
-        if resources is not None:
-            yield resources
+        """Open a resource scope if the current thread has none."""
+        if getattr(_active, 'resources', None) is not None:
+            yield
             return
 
         try:
             with cls() as resources:
                 _active.resources = resources
-                yield resources
+                yield
         finally:
             _clear_active_resources()
 
