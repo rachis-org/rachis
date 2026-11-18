@@ -11,11 +11,11 @@ from types import MappingProxyType
 import warnings
 
 from rachis.plugin import IContext
+from rachis.core._resources import InvocationResources
 from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
-from rachis.sdk.futures import InvocationResources
 from rachis.sdk.proxy import ProxyResults, contains_proxy
 
 

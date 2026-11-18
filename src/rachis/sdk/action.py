@@ -21,9 +21,8 @@ from typing import Mapping, TypedDict, Union
 from types import MappingProxyType
 
 import rachis.sdk
-from rachis.sdk.futures import (
-    InvocationResources, as_future, join, result_as_future,
-)
+from rachis.core._resources import InvocationResources
+from rachis.sdk.futures import as_future, join, result_as_future
 from rachis.sdk.iresult import IResult
 from rachis.sdk.proxy import (
     ProxyResult, ProxyResultCollection, ProxyResults, contains_proxy,

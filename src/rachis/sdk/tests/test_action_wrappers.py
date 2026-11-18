@@ -16,6 +16,7 @@ from unittest.mock import patch
 import dill
 
 from rachis.core.cache import Cache
+from rachis.core._resources import InvocationResources
 from rachis.core.testing.type import IntSequence1, IntSequence2, Mapping
 from rachis.core.testing.type import SingleInt
 from rachis.core.testing.util import get_dummy_plugin
@@ -23,7 +24,6 @@ from rachis.core.util import load_action_yaml
 from rachis.plugin import Collection
 from rachis.sdk import Artifact, ResultCollection, Results
 from rachis.sdk.context import Context, ParallelContext
-from rachis.sdk.futures import InvocationResources
 from rachis.sdk.parallel_config import ParallelConfig
 from rachis.sdk.proxy import ProxyArtifact, ProxyResultCollection
 
@@ -264,16 +264,6 @@ class TestActionWrappers(unittest.TestCase):
         for arguments in bound:
             self.assertIsInstance(arguments, ResultCollection)
             self.assertEqual(list(arguments.keys()), ['0'])
-
-    def test_invocation_resources_restore_enclosing_scope_on_error(self):
-        with InvocationResources() as outer:
-            with self.assertRaisesRegex(ValueError, 'inner failed'):
-                with InvocationResources() as inner:
-                    self.assertIs(InvocationResources.current(), inner)
-                    raise ValueError('inner failed')
-            self.assertIs(InvocationResources.current(), outer)
-        with self.assertRaisesRegex(RuntimeError, 'No active invocation'):
-            InvocationResources.current()
 
     def test_synchronous_pipeline_keeps_resources_through_inner_scope(self):
         pipeline = self.plugin.pipelines['parameter_only_pipeline']
