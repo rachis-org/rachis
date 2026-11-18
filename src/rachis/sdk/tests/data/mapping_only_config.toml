@@ -1,8 +1,5 @@
 [parsl]
 
 [parsl.executor_mapping.dummy_plugin]
-list_of_ints = "test"
-concatenate_ints = "test"
-
-[parsl.executor_mapping.other_plugin]
-concatenate_ints = "default"
+list_of_ints = "tpool"
+concatenate_ints = "tpool"
