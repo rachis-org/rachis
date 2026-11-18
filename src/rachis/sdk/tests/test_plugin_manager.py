@@ -32,7 +32,13 @@ from rachis.core.testing.format import (Cephalapod, IntSequenceDirectoryFormat,
                                         EchoDirectoryFormat,
                                         CephalapodDirectoryFormat,
                                         ImportableOnlyFormat,
-                                        ExportableOnlyFormat)
+                                        ExportableOnlyFormat,
+                                        FirstStepFormat,
+                                        SecondStepFormat,
+                                        ThirdStepFormat,
+                                        FourthStepFormat,
+                                        FifthStepFormat
+)
 
 from rachis.core.testing.validator import (validator_example_null1,
                                            validate_ascending_seq,
@@ -224,6 +230,21 @@ class TestPluginManager(unittest.TestCase):
                              plugin=self.plugin),
             'ExportableOnlyFormat':
                 FormatRecord(format=ExportableOnlyFormat,
+                             plugin=self.plugin),
+            'FirstStepFormat':
+                FormatRecord(format=FirstStepFormat,
+                             plugin=self.plugin),
+            'SecondStepFormat':
+                FormatRecord(format=SecondStepFormat,
+                             plugin=self.plugin),
+            'ThirdStepFormat':
+                FormatRecord(format=ThirdStepFormat,
+                             plugin=self.plugin),
+            'FourthStepFormat':
+                FormatRecord(format=FourthStepFormat,
+                             plugin=self.plugin),
+            'FifthStepFormat':
+                FormatRecord(format=FifthStepFormat,
                              plugin=self.plugin),
         }
 
