@@ -162,12 +162,14 @@ def test_cell_context_exits_before_staging_outputs():
         events.append('mapped-exit')
 
     class ObservedContext(Context):
-        inner_bind_wrappers = (observe_invocation,)
         inner_apply_wrappers = (observe,)
 
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
     call = method._outer_bind(lambda: ObservedContext(method))
-    assert call(data, 1).output.view(dict) == {'s1': '5', 's2': '6'}
+    with patch.object(method, 'inner_bind_wrappers',
+                      (*method.inner_bind_wrappers, observe_invocation)):
+        result = call(data, 1)
+    assert result.output.view(dict) == {'s1': '5', 's2': '6'}
     assert observed == ['5', '6']
     assert events == ['mapped-enter', 's1', 's2', 'mapped-exit']
 

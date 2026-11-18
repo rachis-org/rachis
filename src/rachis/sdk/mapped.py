@@ -11,7 +11,7 @@ import csv
 from concurrent.futures import wait
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
-from itertools import chain, product
+from itertools import product
 from pathlib import Path
 import shutil
 import tempfile
@@ -442,10 +442,8 @@ class MappedMethod(Method):
     )
 
     def _inner_bind(self, frame):
-        wrappers = chain(self.inner_bind_wrappers,
-                         frame.ctx.inner_bind_wrappers)
         with ExitStack() as stack:
-            for wrapper in wrappers:
+            for wrapper in self.inner_bind_wrappers:
                 stack.enter_context(wrapper(frame))
             cell_frames = {
                 coord: CellFrame(frame, cell, frame.axes)
