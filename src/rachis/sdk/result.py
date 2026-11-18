@@ -27,6 +27,7 @@ import rachis.plugin.model as model
 import rachis.core.util as util
 import rachis.core.exceptions as exceptions
 
+from rachis.core.archive import Archiver
 from rachis.sdk.iresult import IResult
 
 # Note: Result, Artifact, and Visualization classes are in this file to avoid
@@ -36,8 +37,9 @@ from rachis.sdk.iresult import IResult
 # explicit.
 
 
-ResultMetadata = collections.namedtuple('ResultMetadata',
-                                        ['uuid', 'type', 'format'])
+ResultMetadata = collections.namedtuple(
+    'ResultMetadata', ['uuid', 'type', 'format', 'last_action']
+)
 
 
 class Result(IResult):
@@ -76,8 +78,8 @@ class Result(IResult):
         # cache.data) and load it from the cache if it is. Avoids unzipping the
         # qza again if we already have it.
         cache = get_cache()
-        peek = cls.peek(filepath)
-        archiver = cache._load_uuid(peek.uuid)
+        uuid = Archiver.get_archive(filepath).uuid
+        archiver = cache._load_uuid(uuid)
 
         if not archiver:
             try:

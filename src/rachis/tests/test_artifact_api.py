@@ -122,7 +122,7 @@ class TestImports(unittest.TestCase):
         from rachis import Artifact
         from rachis.core.testing.type import IntSequence2
         from rachis.core.testing.format import IntSequenceFormat
-        from rachis.core.util import load_action_yaml
+        from rachis.core.archive import Archiver
         from rachis.plugin.util import transform
 
         ff = transform([1, 2, 3,], to_type=IntSequenceFormat)
@@ -130,7 +130,8 @@ class TestImports(unittest.TestCase):
                                    view_type=IntSequenceFormat)
 
         # If the checksum is not stored, this will raise a KeyError
-        action = load_action_yaml(ff2._archiver.path)['action']['manifest']
+        archive = Archiver.get_archive(ff2._archiver.path)
+        action = archive.load_action_yaml()['action']['manifest']
         self.assertIn('md5sum', action[0].keys())
         # This ensures that the checksum is exactly what we expect and will
         # catch empty strings or other weird values that could arise

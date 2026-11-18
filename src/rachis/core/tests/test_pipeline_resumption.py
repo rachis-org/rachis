@@ -16,13 +16,14 @@ import rachis
 from rachis.core.cache import Cache
 from rachis.core.testing.type import IntSequence1, SingleInt
 from rachis.core.testing.util import get_dummy_plugin, PipelineError
+from rachis.core.archive import Archiver
 from rachis.sdk.result import Artifact
 from rachis.sdk.parallel_config import ParallelConfig
-from rachis.core.util import load_action_yaml
 
 
 def _load_alias_uuid(result):
-    return load_action_yaml(result._archiver.path)['action']['alias-of']
+    archive = Archiver.get_archive(result._archiver.path)
+    return archive.load_action_yaml()['action']['alias-of']
 
 
 def _load_nested_alias_uuid(result, cache):
