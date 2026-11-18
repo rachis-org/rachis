@@ -22,6 +22,7 @@ from rachis.core.testing.type import (IntSequence1, IntSequence2, IntSequence3,
 
 from rachis.core.testing.format import (Cephalapod, IntSequenceDirectoryFormat,
                                         MappingDirectoryFormat,
+                                        OldMappingDirFmt,
                                         IntSequenceV2DirectoryFormat,
                                         IntSequenceFormatV2,
                                         IntSequenceMultiFileDirectoryFormat,
@@ -216,6 +217,8 @@ class TestPluginManager(unittest.TestCase):
             'MappingDirectoryFormat':
                 FormatRecord(format=MappingDirectoryFormat,
                              plugin=self.plugin),
+            'OldMappingDirFmt':
+                FormatRecord(format=OldMappingDirFmt, plugin=self.plugin),
             'Cephalapod':
                 FormatRecord(format=Cephalapod, plugin=self.plugin),
             'CephalapodDirectoryFormat':

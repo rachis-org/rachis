@@ -6,20 +6,16 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
-from collections.abc import Iterable, Iterator
-from pathlib import Path
-from unittest.mock import patch
+from collections.abc import Iterable
 
 import pytest
 
 from rachis import Artifact, Coord, ForEach
-from rachis.core.testing.format import MappingDirectoryFormat, MappingFormat
+from rachis.core.archive import Archiver, ImportProvenanceCapture
+from rachis.core.testing.format import MappingDirectoryFormat, OldMappingDirFmt
 from rachis.core.testing.mapped_axis import SampleMappingAxis
 from rachis.core.testing.type import Mapping
 from rachis.core.testing.util import get_dummy_plugin
-from rachis.plugin import Plugin, model
-from rachis.plugin.plugin import TransformerRecord
-from rachis.sdk import PluginManager
 
 
 def test_registered_axis_and_coordinate_views():
@@ -70,45 +66,18 @@ def test_coordinate_views_from_axis_reflection():
 
 
 def test_axis_reads_an_artifact_in_an_older_directory_format():
-    class CurrentFormat(model.DirectoryFormat):
-        mapping = model.File('current.tsv', format=MappingFormat)
+    old = OldMappingDirFmt()
+    old.mapping.write_data({'s1': '4'}, dict)
+    archiver = Archiver.from_data(
+        Mapping, OldMappingDirFmt,
+        data_initializer=old.path._move_or_copy,
+        provenance_capture=ImportProvenanceCapture())
+    data = Artifact._from_archiver(archiver)
 
-    class CurrentAxis:
-        def __init__(self, path, *, mode):
-            self.path = Path(path)
-
-        def __iter__(self) -> Iterator[Coord]:
-            directory = CurrentFormat(self.path, mode='r')
-            for sample in directory.mapping.view(dict):
-                yield Coord(sample=sample)
-
-        def __getitem__(self, coord: Coord) -> MappingFormat:
-            return MappingFormat(self.path / 'current.tsv', mode='r')
-
-        @classmethod
-        def write(cls, chunks: Iterable[tuple[Coord, MappingFormat]],
-                  ) -> CurrentFormat:
-            raise NotImplementedError
-
-    def upgrade(old):
-        directory = CurrentFormat()
-        directory.mapping.write_data(old.mapping.view(dict), dict)
-        return directory
-
-    data = Artifact.import_data('Mapping', {'s1': '4'})
-    plugin = Plugin('axis-test', '0.0.1', 'https://example.org')
-    plugin.register_axes(Mapping, {ForEach['sample']: CurrentAxis})
-    manager = PluginManager()
-    with (patch.dict(manager.axes, plugin.axes),
-          patch.dict(manager.transformers[MappingDirectoryFormat], {
-              CurrentFormat: TransformerRecord(upgrade, plugin, ()),
-          })):
-        coord, = data.coords('sample')
-        cell = data.view(MappingFormat, **coord)
+    coord, = data.coords('sample')
     assert coord == Coord(sample='s1')
-    with cell.open() as stream:
-        assert stream.read() == 's1\t4\n'
-    assert data.format is MappingDirectoryFormat
+    assert data.view(str, **coord) == '4'
+    assert data.format is OldMappingDirFmt
 
 
 def test_for_each_bindings():
