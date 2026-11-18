@@ -15,9 +15,10 @@ import collections
 import distutils.dir_util
 import pathlib
 import json
+from contextlib import contextmanager
 from typing import Union, get_args, get_origin
 
-from rachis.core.format import report
+from rachis.core.format import FormatBase, report
 from rachis.core.axis import Coord, ForEach
 import rachis.plugin
 import rachis.sdk
@@ -464,11 +465,17 @@ class Artifact(Result):
                 rachis.sdk.PluginManager().get_axes(self.type)]
 
     def coords(self, *axes):
-        return iter(self._axis(ForEach[axes]))
+        with self._axis(ForEach[axes]) as (axis, _):
+            yield from axis
 
+    @contextmanager
     def _axis(self, pattern):
-        axis = rachis.sdk.PluginManager().get_axis(self.type, pattern)
-        return axis(self._archiver.data_dir, mode='r')
+        """Open an axis while retaining its backing directory path."""
+        record = rachis.sdk.PluginManager().get_axis(self.type, pattern)
+        directory = self._archiver.data_dir
+        if self.format is not record.directory_format:
+            directory = self._view(record.directory_format).path
+        yield record.axis(directory, mode='r'), directory
 
     def view(self, view_type, **coordinate):
         """View the artifact or a cell at a registered coordinate.
@@ -476,11 +483,14 @@ class Artifact(Result):
         Coordinate names must match a registered axis path in order.
         """
         if coordinate:
-            axis = self._axis(ForEach[tuple(coordinate)])
-            cell = axis[Coord(**coordinate)]
-            source = transform.ModelType.from_view_type(type(cell))
-            target = transform.ModelType.from_view_type(view_type)
-            return source.make_transformation(target)(cell)
+            with self._axis(ForEach[tuple(coordinate)]) as (axis, directory):
+                cell = axis[Coord(**coordinate)]
+                source = transform.ModelType.from_view_type(type(cell))
+                target = transform.ModelType.from_view_type(view_type)
+                result = source.make_transformation(target)(cell)
+                if isinstance(result, FormatBase):
+                    result._axis_data_dir = directory
+                return result
         return self._view(view_type)
 
     def _view(self, view_type, recorder=None):

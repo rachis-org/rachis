@@ -51,9 +51,11 @@ class Coord(Mapping):
 
 class _ForEachMeta(type):
     def __getitem__(cls, entries):
+        entries = tuplize(entries)
+        bound = any(isinstance(entry, slice) for entry in entries)
         axes = []
         pattern = []
-        for entry in tuplize(entries):
+        for entry in entries:
             if isinstance(entry, slice):
                 name, binding, rule = entry.start, entry.stop, entry.step
             else:
@@ -65,7 +67,7 @@ class _ForEachMeta(type):
                 raise TypeError('ForEach bindings must be strings')
             if rule not in (None, 'matched', 'required', 'optional'):
                 raise ValueError(f'Invalid axis coverage {rule!r}')
-            if isinstance(entry, slice):
+            if bound:
                 entry = slice(name, name if binding is None else binding,
                               'matched' if rule is None else rule)
             pattern.append(entry)
@@ -126,7 +128,7 @@ class ForEach(metaclass=_ForEachMeta):
 
 
 def validate_axis_protocol(axis):
-    """Check that an axis reads and writes the same annotated cell view."""
+    """Check the axis protocol and return its declared directory format."""
     from rachis.plugin.model import DirectoryFormat
 
     if not isinstance(axis, type) or not all(
@@ -169,3 +171,4 @@ def validate_axis_protocol(axis):
     if (not isinstance(directory_format, type)
             or not issubclass(directory_format, DirectoryFormat)):
         raise TypeError(f'{axis.__name__}.write must return a DirectoryFormat')
+    return directory_format

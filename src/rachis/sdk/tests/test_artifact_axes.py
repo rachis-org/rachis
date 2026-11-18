@@ -6,21 +6,31 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from rachis import Artifact, Coord, ForEach
-from rachis.core.testing.format import MappingDirectoryFormat
+from rachis.core.testing.format import MappingDirectoryFormat, MappingFormat
 from rachis.core.testing.mapped_axis import SampleMappingAxis
 from rachis.core.testing.type import Mapping
 from rachis.core.testing.util import get_dummy_plugin
+from rachis.plugin import Plugin, model
+from rachis.plugin.plugin import TransformerRecord
+from rachis.sdk import PluginManager
 
 
 def test_registered_axis_and_coordinate_views():
     plugin = get_dummy_plugin()
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '-5'})
-    assert plugin.axes[data.type, ForEach['sample']] is SampleMappingAxis
+    record = plugin.axes[data.type, ForEach['sample']]
+    assert record.axis is SampleMappingAxis
+    assert record.semantic_type == data.type
+    assert record.pattern == ForEach['sample']
+    assert record.directory_format is MappingDirectoryFormat
+    assert record.plugin is plugin
     assert data.axes() == [('sample',)]
     assert list(data.coords('sample')) == [Coord(sample='s1'),
                                             Coord(sample='s2')]
@@ -35,6 +45,70 @@ def test_nested_coordinate_views():
     assert data.view(str, student='s1', assignment='a1') == '4'
     with pytest.raises(ValueError, match='has no axis'):
         data.view(str, assignment='a1', student='s1')
+
+
+def test_coordinate_views_from_axis_reflection():
+    data = Artifact.import_data('AssignmentScores', {
+        's1/a1': '4', 's1/a2': '5', 's2/a1': '6',
+    })
+    view_types = {('student',): dict, ('student', 'assignment'): str}
+    assert {
+        axis: {coord: data.view(view_types[axis], **coord)
+               for coord in data.coords(*axis)}
+        for axis in data.axes()
+    } == {
+        ('student',): {
+            Coord(student='s1'): {'a1': '4', 'a2': '5'},
+            Coord(student='s2'): {'a1': '6'},
+        },
+        ('student', 'assignment'): {
+            Coord(student='s1', assignment='a1'): '4',
+            Coord(student='s1', assignment='a2'): '5',
+            Coord(student='s2', assignment='a1'): '6',
+        },
+    }
+
+
+def test_axis_reads_an_artifact_in_an_older_directory_format():
+    class CurrentFormat(model.DirectoryFormat):
+        mapping = model.File('current.tsv', format=MappingFormat)
+
+    class CurrentAxis:
+        def __init__(self, path, *, mode):
+            self.path = Path(path)
+
+        def __iter__(self) -> Iterator[Coord]:
+            directory = CurrentFormat(self.path, mode='r')
+            for sample in directory.mapping.view(dict):
+                yield Coord(sample=sample)
+
+        def __getitem__(self, coord: Coord) -> MappingFormat:
+            return MappingFormat(self.path / 'current.tsv', mode='r')
+
+        @classmethod
+        def write(cls, chunks: Iterable[tuple[Coord, MappingFormat]],
+                  ) -> CurrentFormat:
+            raise NotImplementedError
+
+    def upgrade(old):
+        directory = CurrentFormat()
+        directory.mapping.write_data(old.mapping.view(dict), dict)
+        return directory
+
+    data = Artifact.import_data('Mapping', {'s1': '4'})
+    plugin = Plugin('axis-test', '0.0.1', 'https://example.org')
+    plugin.register_axes(Mapping, {ForEach['sample']: CurrentAxis})
+    manager = PluginManager()
+    with (patch.dict(manager.axes, plugin.axes),
+          patch.dict(manager.transformers[MappingDirectoryFormat], {
+              CurrentFormat: TransformerRecord(upgrade, plugin, ()),
+          })):
+        coord, = data.coords('sample')
+        cell = data.view(MappingFormat, **coord)
+    assert coord == Coord(sample='s1')
+    with cell.open() as stream:
+        assert stream.read() == 's1\t4\n'
+    assert data.format is MappingDirectoryFormat
 
 
 def test_for_each_bindings():
@@ -58,11 +132,13 @@ def test_for_each_bindings():
     assert explicit.as_unbound() == ForEach['student']
     mixed = ForEach['student':'learner', 'assignment']
     assert repr(mixed) == (
-        "ForEach['student':'learner':'matched', 'assignment']"
+        "ForEach['student':'learner':'matched', "
+        "'assignment':'assignment':'matched']"
     )
     normalized = mixed.normalize()
     assert normalized.entries == (slice('student', 'learner', 'matched'),
                                   slice('assignment', 'assignment', 'matched'))
+    assert mixed == normalized
     assert normalized.normalize() == normalized
     assert normalized.as_unbound() == pattern
     with pytest.raises(ValueError, match='unique bindings'):
