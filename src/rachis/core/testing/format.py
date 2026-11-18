@@ -97,6 +97,10 @@ class MappingDirectoryFormat(model.DirectoryFormat):
     mapping = model.File('mapping.tsv', format=MappingFormat)
 
 
+class OldMappingDirFmt(model.DirectoryFormat):
+    mapping = model.File('legacy.tsv', format=MappingFormat)
+
+
 class FourIntsDirectoryFormat(model.DirectoryFormat):
     """
     A sequence of exactly four integers stored across multiple files, some of
