@@ -584,10 +584,7 @@ class Plugin:
           ``mode='r'``, iterates over coordinates, and returns a native view
           when indexed by a coordinate. Its ``write(chunks)`` class method
           accepts ``(Coord, view)`` pairs and returns the directory format the
-          implementation reads. Artifacts in another format are transformed
-          before opening the axis.
-          Annotate the coordinate and view types consistently across these
-          methods.
+          implementation reads.
 
         Returns
         -------
