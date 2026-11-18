@@ -229,10 +229,10 @@ class PluginManager:
             else:
                 self.artifact_classes[name] = record
 
-        for key, axis in plugin.axes.items():
+        for key, record in plugin.axes.items():
             if key in self.axes:
                 raise ValueError(f'Duplicate axis registration for {key!r}')
-            self.axes[key] = axis
+            self.axes[key] = record
 
         for semantic_type, validation_object in plugin.validators.items():
             if semantic_type not in self.validators:
@@ -413,7 +413,8 @@ class PluginManager:
 
     def get_axes(self, semantic_type):
         return {
-            pattern: axis for (registered, pattern), axis in self.axes.items()
+            pattern: record
+            for (registered, pattern), record in self.axes.items()
             if semantic_type <= registered
         }
 

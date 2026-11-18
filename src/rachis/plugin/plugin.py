@@ -89,6 +89,9 @@ ViewRecord = collections.namedtuple(
 ArtifactClassRecord = collections.namedtuple(
     'ArtifactClassRecord', ['semantic_type', 'format', 'plugin', 'description',
                             'examples', 'type_expression'])
+AxisRecord = collections.namedtuple(
+    'AxisRecord', ['semantic_type', 'pattern', 'axis', 'directory_format',
+                   'plugin'])
 ValidatorRecord = collections.namedtuple(
     'ValidatorRecord', ['validator', 'view', 'plugin', 'context'])
 
@@ -580,7 +583,9 @@ class Plugin:
           An implementation accepts the artifact's data directory and
           ``mode='r'``, iterates over coordinates, and returns a native view
           when indexed by a coordinate. Its ``write(chunks)`` class method
-          accepts ``(Coord, view)`` pairs and returns a directory format.
+          accepts ``(Coord, view)`` pairs and returns the directory format the
+          implementation reads. Artifacts in another format are transformed
+          before opening the axis.
           Annotate the coordinate and view types consistently across these
           methods.
 
@@ -622,11 +627,12 @@ class Plugin:
             if (not isinstance(pattern, ForEach)
                     or pattern != pattern.as_unbound()):
                 raise TypeError('Axis registration requires plain axis names')
-            validate_axis_protocol(axis)
+            directory_format = validate_axis_protocol(axis)
             key = (semantic_type, pattern)
             if key in self.axes:
                 raise ValueError(f'Axis {pattern.axes!r} already registered')
-            registrations[key] = axis
+            registrations[key] = AxisRecord(semantic_type, pattern, axis,
+                                            directory_format, self)
         return registrations
 
 
