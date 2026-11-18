@@ -318,8 +318,7 @@ def pipeline_alias_wrapper(frame):
         else:
             proxies[name] = output_proxy(future, None, qiime_type)
 
-    results = ProxyResults._from_named(proxies, frame.output_types)
-    frame.results = results if ctx._defer_results else results._result()
+    frame.results = ProxyResults._from_named(proxies, frame.output_types)
 
 
 # TODO: validation on these params via data.yaml in distributions
@@ -543,7 +542,8 @@ class Action:
                 raise ValueError('Only pipelines may be run in parallel')
             with rachis.sdk.ParallelContext(self) as ctx:
                 call = self._outer_bind(lambda: ctx)
-                return call(*args, **kwargs)
+                results = call(*args, **kwargs)
+            return results._result()
 
         self._set_wrapper_properties(parsl_wrapper)
         self._set_wrapper_name(parsl_wrapper, 'parallel')

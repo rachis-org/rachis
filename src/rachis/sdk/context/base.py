@@ -7,6 +7,7 @@
 # ----------------------------------------------------------------------------
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
+from functools import cached_property
 from types import MappingProxyType
 import warnings
 
@@ -15,7 +16,6 @@ from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
-from rachis.sdk.futures import as_future
 from rachis.sdk.proxy import ProxyResults, contains_proxy
 
 
@@ -45,13 +45,6 @@ def cache_lookup_wrapper(frame):
 
 
 @contextmanager
-def resolve_dispatch_result_wrapper(frame):
-    yield
-    if isinstance(frame.results, Future):
-        frame.results = frame.results.result()
-
-
-@contextmanager
 def invocation_resources_wrapper(frame):
     ctx = frame.ctx
     owns_resources = ctx._parent is None and not ctx._scopes
@@ -63,28 +56,28 @@ def invocation_resources_wrapper(frame):
 
 
 class InvocationResources(ExitStack):
-    """Keep driver resources alive while submitted work and joins settle."""
+    """Keep invocation resources alive until work and joins settle."""
 
     def __init__(self):
         super().__init__()
         self.jobs = []
-        self.executor = self.enter_context(ThreadPoolExecutor(
+
+    @cached_property
+    def executor(self):
+        return self.enter_context(ThreadPoolExecutor(
             max_workers=1, thread_name_prefix='rachis-join'))
 
-    def close(self):
+    def __exit__(self, *exc_details):
         wait(self.jobs)
-        super().close()
+        return super().__exit__(*exc_details)
 
 
 class Context(IContext):
-    outer_bind_wrappers = (
-        cache_lookup_wrapper,
-        resolve_dispatch_result_wrapper,
-    )
+    outer_bind_wrappers = (cache_lookup_wrapper,)
     inner_apply_wrappers = ()
     execution_ctx = MappingProxyType({'type': 'synchronous'})
-    _defer_results = False
     _resources = None
+    _dispatch_resources = None
 
     def __init__(self, action_obj=None, parent=None):
         if parent is not None:
@@ -107,12 +100,21 @@ class Context(IContext):
         self.execution_ctx = dict(type(self).execution_ctx)
 
     def _dispatch_action_(self, frame):
-        return as_future(frame)
+        resources = InvocationResources()
+        previous = self._dispatch_resources
+        self._dispatch_resources = resources
+        try:
+            with resources:
+                return frame()._result()
+        finally:
+            self._dispatch_resources = previous
 
     def _get_resources(self):
-        if self._parent is not None:
-            return self._parent._get_resources()
+        if self._dispatch_resources is not None:
+            return self._dispatch_resources
         if self._resources is None:
+            if self._parent is not None:
+                return self._parent._get_resources()
             self._resources = InvocationResources()
         return self._resources
 
@@ -159,6 +161,7 @@ class Context(IContext):
     def __getstate__(self):
         state = self.__dict__.copy()
         state.pop('_resources', None)
+        state.pop('_dispatch_resources', None)
         state['_scopes'] = []
         return state
 

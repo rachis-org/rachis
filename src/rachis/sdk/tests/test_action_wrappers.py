@@ -23,7 +23,6 @@ from rachis.core.util import load_action_yaml
 from rachis.plugin import Collection
 from rachis.sdk import Artifact, ResultCollection, Results
 from rachis.sdk.context import Context, ParallelContext
-from rachis.sdk.futures import as_future
 from rachis.sdk.parallel_config import ParallelConfig
 from rachis.sdk.proxy import ProxyArtifact, ProxyResultCollection
 
@@ -265,6 +264,27 @@ class TestActionWrappers(unittest.TestCase):
             self.assertIsInstance(arguments, ResultCollection)
             self.assertEqual(list(arguments.keys()), ['0'])
 
+    def test_synchronous_pipeline_keeps_resources_through_inner_scope(self):
+        pipeline = self.plugin.pipelines['parameter_only_pipeline']
+        directories = []
+
+        def return_outputs(ctx, **kwargs):
+            directory = ctx._get_resources().enter_context(
+                TemporaryDirectory())
+            directories.append(directory)
+            with ctx:
+                first = ctx.make_artifact(IntSequence2, [1])
+            self.assertTrue(os.path.isdir(directory))
+            return first, ctx.make_artifact(IntSequence1, [2])
+
+        with patch.object(pipeline, '_callable', return_outputs):
+            first, second = pipeline(1)
+
+        self.assertEqual(first.view(list), [1])
+        self.assertEqual(second.view(list), [2])
+        directory, = directories
+        self.assertFalse(os.path.exists(directory))
+
     def test_pipeline_aliases_named_outputs_independently(self):
         pipeline = self.plugin.pipelines['parameter_only_pipeline']
         pending = Future()
@@ -432,7 +452,7 @@ class TestActionWrappers(unittest.TestCase):
 
             def _dispatch_action_(self, frame):
                 worker = dill.loads(dill.dumps(frame.for_worker()))
-                return as_future(worker)
+                return Context._dispatch_action_(worker.ctx, worker)
 
         action = self.plugin.methods['split_ints']
         artifact = Artifact.import_data(IntSequence1, [1, 2, 3])

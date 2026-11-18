@@ -20,7 +20,7 @@ def _subprocess_apply(frame):
         ctx = Context(frame.action)
         ctx.execution_ctx = dict(frame.ctx.execution_ctx)
         frame.ctx = ctx
-        return frame()
+        return ctx._dispatch_action_(frame)
 
 
 class AsynchronousContext(Context):

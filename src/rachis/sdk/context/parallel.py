@@ -13,7 +13,6 @@ from types import MappingProxyType
 from parsl.app.app import python_app
 
 from rachis.sdk.action import Pipeline
-from rachis.sdk.futures import as_future
 from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy, ProxyResults
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
@@ -89,11 +88,7 @@ def _submit_app(frame, executor):
 @contextmanager
 def parallel_dispatch_result_wrapper(frame):
     yield
-    if not isinstance(frame.results, Future):
-        return
-    if frame.ctx._runs_on_driver(frame):
-        frame.results = frame.results.result()
-    else:
+    if isinstance(frame.results, Future):
         frame.results = ProxyResults(frame.results, frame.output_types)
 
 
@@ -104,7 +99,6 @@ class ParallelContext(Context):
         cache_lookup_wrapper,
         parallel_dispatch_result_wrapper,
     )
-    _defer_results = True
 
     def __init__(self, action_obj, parent=None):
         super(ParallelContext, self).__init__(action_obj, parent=parent)
@@ -120,15 +114,12 @@ class ParallelContext(Context):
                 else {v.label: v.__class__.__name__
                       for v in PARALLEL_CONFIG.parallel_config.executors}
 
-    def _runs_on_driver(self, frame):
-        return isinstance(frame.action, Pipeline)
-
     def _dispatch_action_(self, frame):
         # Pipeline bodies keep coordinating locally, as before this refactor.
         # Their child applications still pass through their own outer stacks.
-        if self._runs_on_driver(frame):
+        if isinstance(frame.action, Pipeline):
             self.execution_ctx = {'type': 'parsl', 'parsl_type': 'DFK'}
-            return as_future(frame)
+            return frame()
 
         if PARALLEL_CONFIG.parallel_config is None:
             raise ValueError('You must load a parallel config before '

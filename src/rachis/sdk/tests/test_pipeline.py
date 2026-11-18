@@ -297,8 +297,9 @@ class TestPipeline(unittest.TestCase):
         exp = {'0': 0, '1': 1, '2': 2}
 
         with rachis.sdk.parallel_config.ParallelConfig():
-            ret = pipeline.parallel()._result()
+            ret = pipeline.parallel()
 
+        self.assertIsInstance(ret, rachis.sdk.Results)
         obs = rachis.sdk.util.view_collection(ret.output, int)
 
         self.assertEqual(obs, exp)

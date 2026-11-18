@@ -46,9 +46,6 @@ def result_as_future(value):
 
 def join(dependencies, combine, *, ctx):
     """Combine results locally and track deferred work in its invocation."""
-    if not ctx._defer_results:
-        return after_all(dependencies, combine)
-
     resources = ctx._get_resources()
 
     def run(*values):

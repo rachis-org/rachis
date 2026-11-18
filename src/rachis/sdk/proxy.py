@@ -285,9 +285,9 @@ class ProxyResults(Proxy):
     def _result(self):
         """Wait for the results and return them, or raise their exception.
 
-        A top-level ``.parallel()`` call has already waited for its results.
-        Within a pipeline, use ``with ctx:`` to wait for calls in a scope.
-        To handle a failure locally, catch it around that scope.
+        Within a parallel pipeline, use ``with ctx:`` to wait for calls in a
+        scope and catch failures around that scope. A top-level
+        ``.parallel()`` call returns realized ``Results``.
         """
         return self._future_.result()
 
