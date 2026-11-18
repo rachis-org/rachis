@@ -19,7 +19,6 @@ def _subprocess_apply(frame):
     with frame.ctx.cache:
         ctx = Context(frame.action)
         ctx.execution_metadata = dict(frame.ctx.execution_metadata)
-        ctx.inner_bind_wrappers = frame.ctx.inner_bind_wrappers
         frame.ctx = ctx
         return ctx._dispatch_action_(frame)
 
