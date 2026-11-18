@@ -817,7 +817,8 @@ dummy_plugin.pipelines.register_function(
     },
     parameters={
         'do_extra_thing': Bool,
-        'add': Int
+        'add': Int,
+        'record_provenance': Bool
     },
     outputs=[
         ('out_map', Mapping),
@@ -832,7 +833,8 @@ dummy_plugin.pipelines.register_function(
     },
     parameter_descriptions={
         'do_extra_thing': 'Increment `left` by `add` if true',
-        'add': 'Unused if `do_extra_thing` is false'
+        'add': 'Unused if `do_extra_thing` is false',
+        'record_provenance': 'If True, record internal prov. If False, do not.'
     },
     output_descriptions={
         'out_map': 'Same as input',

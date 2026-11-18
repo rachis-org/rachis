@@ -9,6 +9,8 @@
 import os
 import pathlib
 
+from rachis.core.archive.provenance import NoOpProvenanceCapture
+
 import rachis.core.archive.format.v1 as v1
 import rachis.core.archive.format.v6 as v6
 
@@ -118,41 +120,41 @@ class ArchiveFormat(v6.ArchiveFormat):
         v1.ArchiveFormat.write(archive_record, type, format,
                                data_initializer, provenance_capture)
 
-        # Write `conda-env.yaml` file
-        conda_fp = \
-            archive_record.root / cls.PROVENANCE_DIR / cls.CONDA_ENV_FILE
-        conda_prefix = os.environ.get('CONDA_PREFIX')
+        if not isinstance(provenance_capture, NoOpProvenanceCapture):
+            # Write `conda-env.yaml` file
+            conda_fp = \
+                archive_record.root / cls.PROVENANCE_DIR / cls.CONDA_ENV_FILE
+            conda_prefix = os.environ.get('CONDA_PREFIX')
 
-        if conda_prefix:
-            conda_meta_dir = pathlib.Path(conda_prefix) / 'conda-meta'
+            if conda_prefix:
+                conda_meta_dir = pathlib.Path(conda_prefix) / 'conda-meta'
 
-            if conda_meta_dir.exists():
-                dependency_list = \
-                    [file.stem for file in conda_meta_dir.iterdir()
-                     if file.is_file()]
+                if conda_meta_dir.exists():
+                    dependency_list = \
+                        [file.stem for file in conda_meta_dir.iterdir()
+                        if file.is_file()]
 
+                    with conda_fp.open(mode='w') as fh:
+                        fh.write('dependencies:\n')
+                        for unformatted_dep in sorted(dependency_list):
+                            dep = '='.join(unformatted_dep.rsplit('-', 2))
+                            fh.write(f'- {dep}\n')
+            else:
                 with conda_fp.open(mode='w') as fh:
-                    fh.write('dependencies:\n')
-                    for unformatted_dep in sorted(dependency_list):
-                        dep = '='.join(unformatted_dep.rsplit('-', 2))
-                        fh.write(f'- {dep}\n')
+                    fh.write('error: no conda environment detected.\n')
 
-        else:
-            with conda_fp.open(mode='w') as fh:
-                fh.write('error: no conda environment detected.\n')
+            # Add `data-size` field under top-level `metadata.yaml` file
+            data_fp = archive_record.root / cls.DATA_DIR
+            total_size = cls._calculate_directory_size(data_fp)
+            datadir_size = cls._human_readable_size(total_size)
 
-        # Add `data-size` field under top-level `metadata.yaml` file
-        data_fp = archive_record.root / cls.DATA_DIR
-        total_size = cls._calculate_directory_size(data_fp)
-        datadir_size = cls._human_readable_size(total_size)
+            root_md_fp = archive_record.root / cls.METADATA_FILE
+            prov_md_fp = \
+                archive_record.root / cls.PROVENANCE_DIR / cls.METADATA_FILE
 
-        root_md_fp = archive_record.root / cls.METADATA_FILE
-        prov_md_fp = \
-            archive_record.root / cls.PROVENANCE_DIR / cls.METADATA_FILE
-
-        for md_fp in [root_md_fp, prov_md_fp]:
-            with md_fp.open(mode='a') as fh:
-                fh.write(f'data-size: {datadir_size}')
+            for md_fp in [root_md_fp, prov_md_fp]:
+                with md_fp.open(mode='a') as fh:
+                    fh.write(f'data-size: {datadir_size}')
 
         # now move temporary annotations dir from within provenance
         # so that we prevent duplication of each result's annotations
