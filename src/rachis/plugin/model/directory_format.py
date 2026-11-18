@@ -7,11 +7,14 @@
 # ----------------------------------------------------------------------------
 
 import re
+import os
 import shutil
 import sys
 import pathlib
+import warnings
 
 from rachis.core import transform
+from rachis.core.exceptions import RachisWarning
 from .base import FormatBase, ValidationError, _check_validation_level
 from rachis.plugin.util import get_nonhidden_files
 
@@ -176,11 +179,15 @@ class DirectoryFormat(FormatBase, metaclass=_DirectoryMeta):
             getattr(self, field)._validate_members(collected_paths, level)
 
         for path, value in collected_paths.items():
-            if value:
-                continue
             if value is None:
                 raise ValidationError("Unrecognized file (%s) for %s."
                                       % (path, self.__class__.__name__))
+            if (os.path.getsize(path) == 0 and not self.allow_empty):
+                warnings.warn(
+                    f'Format {self.__class__.__name__} contains of one or '
+                    'more empty files.',
+                    RachisWarning
+                )
         if hasattr(self, '_validate_'):
             try:
                 self._validate_(level)
@@ -212,12 +219,18 @@ class SingleFileDirectoryFormatBase(DirectoryFormat):
             )
 
 
-def SingleFileDirectoryFormat(name, pathspec, format):
+def SingleFileDirectoryFormat(name, pathspec, format, allow_empty=False):
     # TODO: do the same hack namedtuple does so we don't mangle globals
     # (arguably the code is going to be broken if defined dynamically anyways,
     # but better to find that out later than writing in the module namespace
     # even if it isn't called module-level [which is must be!])
-    df = type(name, (SingleFileDirectoryFormatBase,),
-              {'file': File(pathspec, format=format)})
+    attributes = {'file': File(pathspec, format=format)}
+    if allow_empty:
+        def init(self, path=None, mode='w'):
+            SingleFileDirectoryFormatBase.__init__(self, path, mode, True)
+
+        attributes['__init__'] = init
+
+    df = type(name, (SingleFileDirectoryFormatBase,), attributes)
     df.__module__ = sys._getframe(1).f_globals.get('__name__', '__main__')
     return df
