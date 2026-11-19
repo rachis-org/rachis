@@ -235,13 +235,11 @@ def cell_error_wrapper(frame):
 @contextmanager
 def cell_workspace_wrapper(frame):
     frame.workspace = Path(tempfile.mkdtemp(dir=frame.cell.path.parent))
-    keep = False
     try:
         yield
-        keep = frame.results is not None
-    finally:
-        if not keep:
-            shutil.rmtree(frame.workspace)
+    except BaseException:
+        shutil.rmtree(frame.workspace)
+        raise
 
 
 @contextmanager
@@ -253,7 +251,7 @@ def cell_provenance_wrapper(frame):
 
 
 @contextmanager
-def cell_transform_wrapper(frame):
+def cell_views_wrapper(frame):
     signature = frame.action.signature
     with ExitStack() as views:
         frame.transformed_arguments = {}
@@ -374,7 +372,7 @@ def mapped_plan_wrapper(frame):
 
 
 @contextmanager
-def mapped_output_wrapper(frame):
+def archive_mapped_outputs_wrapper(frame):
     yield
 
     provenance = frame.ready_provenance.result()
@@ -402,7 +400,7 @@ def mapped_output_wrapper(frame):
 
 
 @contextmanager
-def mapped_results_wrapper(frame):
+def gather_cells_wrapper(frame):
     yield
     futures = frame.results
     if futures.keys() != frame.cells.keys():
@@ -416,7 +414,7 @@ def mapped_results_wrapper(frame):
         completed.outcomes = dict(zip(completed.cells, outcomes, strict=True))
         with (
             prepare_callable_arguments_wrapper(completed),
-            mapped_output_wrapper(completed),
+            archive_mapped_outputs_wrapper(completed),
             provenance_wrapper(completed),
             mapped_transforms_wrapper(completed),
         ):
@@ -444,14 +442,14 @@ class MappedMethod(Method):
     _initial_frame_phase = FramePhase.INNER_BIND
     inner_bind_wrappers = (
         mapped_workspace_wrapper,
-        mapped_results_wrapper,
+        gather_cells_wrapper,
         mapped_plan_wrapper,
     )
     inner_apply_wrappers = (
         cell_error_wrapper,
         cell_workspace_wrapper,
         cell_provenance_wrapper,
-        cell_transform_wrapper,
+        cell_views_wrapper,
     )
 
     def _inner_bind(self, frame):
