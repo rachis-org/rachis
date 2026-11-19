@@ -590,23 +590,22 @@ class Cache:
             self._thread.start()
 
     def __enter__(self):
-        """Tell QIIME 2 to use this cache in its current invocation (see
-        get_cache).
-        """
-        previous = getattr(_CACHE, 'cache', None)
-        if previous is not None and previous.path != self.path:
+        """Activate this cache or borrow the active cache at the same path."""
+        active = getattr(_CACHE, 'cache', None)
+        if active is None:
+            _CACHE.cache = self
+        elif active.path != self.path:
             raise ValueError("You cannot enter multiple caches at once, "
                              "currently entered cache is located at: "
-                             f"'{previous.path}'")
+                             f"'{active.path}'")
 
-        if not hasattr(_CACHE, 'cache_stack'):
-            _CACHE.cache_stack = []
-        _CACHE.cache_stack.append(previous)
-        _CACHE.cache = self
+        _CACHE.depth = getattr(_CACHE, 'depth', 0) + 1
 
     def __exit__(self, *args):
-        """Restore the active cache from before entering this scope."""
-        _CACHE.cache = _CACHE.cache_stack.pop()
+        """Clear the active cache when its last scope exits."""
+        _CACHE.depth -= 1
+        if _CACHE.depth == 0:
+            _CACHE.cache = None
 
     def __getstate__(self):
         """Tell the cache not to pickle anything related to the daemon that
@@ -1592,38 +1591,25 @@ class Pool:
         False
         >>> test_dir.cleanup()
         """
-        # This threadlocal may not even have a cache attribute
-        has_cache = hasattr(_CACHE, 'cache')
-
-        if has_cache and _CACHE.cache is not None \
-                and _CACHE.cache.path != self.cache.path:
+        previous = getattr(_CACHE, 'cache', None)
+        if previous is not None and previous.path != self.cache.path:
             raise ValueError('Cannot enter a pool that is not on the '
                              'currently set cache. The current cache is '
-                             f'located at: {_CACHE.cache.path}')
-        else:
-            self.previously_entered_cache = _CACHE.cache if has_cache else None
-            _CACHE.cache = self.cache
+                             f'located at: {previous.path}')
 
         if self.cache.named_pool is not None:
             raise ValueError("You cannot enter multiple pools at once, "
                              "currently entered pool is located at: "
                              f"'{self.cache.named_pool.path}'")
 
+        self.previously_entered_cache = previous
+        _CACHE.cache = self.cache
+        _CACHE.depth = getattr(_CACHE, 'depth', 0) + 1
         self.cache._named_pool_ = self
 
     def __exit__(self, *args):
-        """Unsets the named pool on the currently set cache. If there was no
-        cache set before setting this named pool then unset the cache as well.
-
-        Note
-        ----
-        self.previously_entered_cache will either be None or the cache this
-        named pool belongs to. It will be None if there was no cache set when
-        we set this named pool. It will be this named pool's cache if that
-        cache was already set when we set this named pool. If there was a
-        different cache set when we set this named pool, we would have errored
-        in __enter__.
-        """
+        """Unset the named pool and restore the previous cache selection."""
+        _CACHE.depth -= 1
         _CACHE.cache = self.previously_entered_cache
         self.cache._named_pool_ = None
 
