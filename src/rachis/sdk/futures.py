@@ -9,8 +9,6 @@
 from concurrent.futures import Future
 from threading import Lock
 
-from rachis.core._resources import InvocationResources
-
 
 def as_future(function):
     """Convert a callable into a Future by evaluating it and
@@ -47,20 +45,16 @@ def result_as_future(value):
 
 
 def join(dependencies, combine, *, ctx):
-    """Combine results locally and track deferred work in its invocation."""
-    resources = InvocationResources.current()
+    """Combine settled results under the invocation's cache."""
 
     def run(*values):
         with ctx.cache:
             return combine(*values)
 
-    future = after_all(dependencies, run,
-                       run_local=resources.executor.submit)
-    resources.jobs.append(future)
-    return future
+    return after_all(dependencies, run)
 
 
-def after_all(dependencies, combine, *, run_local=None):
+def after_all(dependencies, combine):
     """Call combine with settled dependency values in their original order."""
     dependencies = tuple(dependencies)
     future = Future()
@@ -70,21 +64,11 @@ def after_all(dependencies, combine, *, run_local=None):
     def finish():
         try:
             values = tuple(dep.result() for dep in dependencies)
-            if run_local is None:
-                future.set_result(combine(*values))
-            else:
-                task = run_local(combine, *values)
-                task.add_done_callback(publish)
-        except BaseException as error:
-            future.set_exception(error)
-
-    def publish(task):
-        try:
-            value = task.result()
+            result = combine(*values)
         except BaseException as error:
             future.set_exception(error)
         else:
-            future.set_result(value)
+            future.set_result(result)
 
     def ready(_):
         nonlocal remaining

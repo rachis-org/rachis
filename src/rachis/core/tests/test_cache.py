@@ -418,6 +418,16 @@ class TestCache(unittest.TestCase):
                 with cache:
                     pass
 
+    def test_reenter_cache_restores_outer_scope(self):
+        default = get_cache()
+        with self.cache:
+            with self.assertRaisesRegex(ValueError, 'inner cache scope'):
+                with self.cache:
+                    self.assertIs(get_cache(), self.cache)
+                    raise ValueError('inner cache scope')
+            self.assertIs(get_cache(), self.cache)
+        self.assertIs(get_cache(), default)
+
     def test_enter_multiple_pools(self):
         pool1 = self.cache.create_pool('pool1')
         pool2 = self.cache.create_pool('pool2')

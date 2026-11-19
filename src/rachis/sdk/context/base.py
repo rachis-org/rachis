@@ -6,12 +6,11 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 from concurrent.futures import CancelledError, Future
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from types import MappingProxyType
 import warnings
 
 from rachis.plugin import IContext
-from rachis.core._resources import InvocationResources
 from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
@@ -80,29 +79,23 @@ class Context(IContext):
             while ctx is not None and not ctx._scopes:
                 ctx = ctx._parent
             if ctx is not None:
-                futures, _ = ctx._scopes[-1]
-                futures.append(results)
+                ctx._scopes[-1].append(results)
 
     def __enter__(self):
         """Start a scope for action results tracked through this context."""
-        resource_scope = ExitStack()
-        resource_scope.enter_context(InvocationResources.ensure())
-        self._scopes.append(([], resource_scope))
+        self._scopes.append([])
         return self
 
     def __exit__(self, exc_type, exc, traceback):
-        futures, resource_scope = self._scopes.pop()
+        futures = self._scopes.pop()
         failure = None
-        try:
-            for future in futures:
-                try:
-                    error = future.exception()
-                except CancelledError as cancelled:
-                    error = cancelled
-                if failure is None and error is not None:
-                    failure = error
-        finally:
-            resource_scope.close()
+        for future in futures:
+            try:
+                error = future.exception()
+            except CancelledError as cancelled:
+                error = cancelled
+            if failure is None and error is not None:
+                failure = error
 
         if exc is None and failure is not None:
             raise failure

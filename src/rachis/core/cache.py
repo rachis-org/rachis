@@ -593,18 +593,20 @@ class Cache:
         """Tell QIIME 2 to use this cache in its current invocation (see
         get_cache).
         """
-        if hasattr(_CACHE, 'cache') and _CACHE.cache is not None \
-                and _CACHE.cache.path != self.path:
+        previous = getattr(_CACHE, 'cache', None)
+        if previous is not None and previous.path != self.path:
             raise ValueError("You cannot enter multiple caches at once, "
                              "currently entered cache is located at: "
-                             f"'{_CACHE.cache.path}'")
+                             f"'{previous.path}'")
 
+        if not hasattr(_CACHE, 'cache_stack'):
+            _CACHE.cache_stack = []
+        _CACHE.cache_stack.append(previous)
         _CACHE.cache = self
 
     def __exit__(self, *args):
-        """Tell QIIME 2 to go back to using the default cache.
-        """
-        _CACHE.cache = None
+        """Restore the active cache from before entering this scope."""
+        _CACHE.cache = _CACHE.cache_stack.pop()
 
     def __getstate__(self):
         """Tell the cache not to pickle anything related to the daemon that

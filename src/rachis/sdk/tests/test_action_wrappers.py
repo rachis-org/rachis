@@ -15,8 +15,7 @@ from unittest.mock import patch
 
 import dill
 
-from rachis.core.cache import Cache
-from rachis.core._resources import InvocationResources
+from rachis.core.cache import Cache, get_cache
 from rachis.core.testing.type import IntSequence1, IntSequence2, Mapping
 from rachis.core.testing.type import SingleInt
 from rachis.core.testing.util import get_dummy_plugin
@@ -265,26 +264,14 @@ class TestActionWrappers(unittest.TestCase):
             self.assertIsInstance(arguments, ResultCollection)
             self.assertEqual(list(arguments.keys()), ['0'])
 
-    def test_synchronous_pipeline_keeps_resources_through_inner_scope(self):
+    def test_synchronous_pipeline_preserves_active_cache(self):
         pipeline = self.plugin.pipelines['parameter_only_pipeline']
-        directories = []
-
-        def return_outputs(ctx, **kwargs):
-            directory = InvocationResources.current().enter_context(
-                TemporaryDirectory())
-            directories.append(directory)
-            with ctx:
-                first = ctx.make_artifact(IntSequence2, [1])
-            self.assertTrue(os.path.isdir(directory))
-            return first, ctx.make_artifact(IntSequence1, [2])
-
-        with patch.object(pipeline, '_callable', return_outputs):
-            first, second = pipeline(1)
-
-        self.assertEqual(first.view(list), [1])
-        self.assertEqual(second.view(list), [2])
-        directory, = directories
-        self.assertFalse(os.path.exists(directory))
+        with TemporaryDirectory() as directory:
+            cache = Cache(os.path.join(directory, 'cache'))
+            with cache:
+                first, _ = pipeline(1)
+                self.assertIs(get_cache(), cache)
+                self.assertEqual(first.view(list), [1, 2, 3])
 
     def test_pipeline_aliases_named_outputs_independently(self):
         pipeline = self.plugin.pipelines['parameter_only_pipeline']

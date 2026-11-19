@@ -21,7 +21,6 @@ from typing import Mapping, TypedDict, Union
 from types import MappingProxyType
 
 import rachis.sdk
-from rachis.core._resources import InvocationResources
 from rachis.sdk.futures import as_future, join, result_as_future
 from rachis.sdk.iresult import IResult
 from rachis.sdk.proxy import (
@@ -514,7 +513,7 @@ class Action:
             ctx = context_factory()
             frame = Frame(self, ctx, bound.arguments)
 
-            with InvocationResources.ensure(), ExitStack() as wrappers:
+            with ExitStack() as wrappers:
                 for wrapper in chain(self.outer_bind_wrappers,
                                      ctx.outer_bind_wrappers):
                     wrappers.enter_context(wrapper(frame))
