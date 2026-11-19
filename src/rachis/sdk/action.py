@@ -28,6 +28,7 @@ from rachis.sdk.proxy import (
     output_proxy,
 )
 from rachis.sdk.result import Artifact, ResultCollection, ChecksumCache
+from rachis.sdk.results import Results
 import rachis.core.type as qtype
 from rachis.core.type.util import contains_generic_base
 import rachis.core.archive as archive
@@ -49,8 +50,7 @@ class Frame:
     Live stacks and resources belong to the process applying the frame.
     """
 
-    def __init__(self, action, ctx, bound_arguments, *,
-                 phase=FramePhase.INNER_APPLY):
+    def __init__(self, action, ctx, bound_arguments, *, phase):
         self.action = action
         self.ctx = ctx
         self.bound_arguments = bound_arguments
@@ -101,7 +101,7 @@ def deprecation_wrapper(frame):
 
 
 @contextmanager
-def normalize_arguments_wrapper(frame):
+def bind_signature_wrapper(frame):
     signature = frame.action.signature
     arguments = frame.bound_arguments
     signature.check_types(**arguments)
@@ -111,7 +111,7 @@ def normalize_arguments_wrapper(frame):
 
 
 @contextmanager
-def callable_arguments_wrapper(frame):
+def prepare_callable_arguments_wrapper(frame):
     signature = frame.action.signature
     arguments = frame.transformed_arguments = frame.bound_arguments.copy()
     for name, spec in signature.inputs.items():
@@ -181,7 +181,7 @@ def input_transform_wrapper(frame):
 
 
 @contextmanager
-def capture_wrapper(frame):
+def capture_holders_wrapper(frame):
     arguments = frame.transformed_arguments
     captures = []
     for name, spec in frame.action.signature.parameters.items():
@@ -216,16 +216,9 @@ def method_output_wrapper(frame):
     yield
     views = checked_return_values(frame.results, len(frame.output_types))
     provenance = frame.ready_provenance.result()
-    frame.results = frame.action.signature.coerce_given_outputs(
+    outputs = frame.action.signature.coerce_given_outputs(
         views, frame.output_types, frame.ctx, provenance.fork)
-
-
-@contextmanager
-def results_wrapper(frame):
-    yield
-    if not isinstance(frame.results, ProxyResults):
-        frame.results = rachis.sdk.Results(
-            frame.action.signature.outputs.keys(), frame.results)
+    frame.results = Results(frame.output_types, outputs)
 
 
 @contextmanager
@@ -241,7 +234,8 @@ def visualization_wrapper(frame):
         provenance = frame.ready_provenance.result()
         visualization = rachis.sdk.Visualization._from_data_dir(
             temp_dir, provenance.fork('visualization'))
-        frame.results = (frame.ctx.add_reference(visualization),)
+        frame.results = Results(
+            frame.output_types, (frame.ctx.add_reference(visualization),))
 
 
 def _validate_pipeline_output(output):
@@ -288,7 +282,7 @@ def _alias_pipeline_output(name, qiime_type, output, provenance, ctx):
 
 
 @contextmanager
-def pipeline_outputs_wrapper(frame):
+def pipeline_call_wrapper(frame):
     frame.transformed_arguments['ctx'] = frame.ctx
     yield
 
@@ -360,6 +354,7 @@ class Action:
     """QIIME 2 Action"""
     type = 'action'
     _ProvCaptureCls = archive.ActionProvenanceCapture
+    _initial_frame_phase = FramePhase.INNER_APPLY
 
     # Outer wrappers run where an application is requested. Inner wrappers run
     # where its callable is evaluated. Context wrappers enter after the
@@ -367,12 +362,9 @@ class Action:
     outer_bind_wrappers = (
         track_results_wrapper,
         deprecation_wrapper,
-        normalize_arguments_wrapper,
+        bind_signature_wrapper,
     )
-    inner_apply_wrappers = (
-        callable_arguments_wrapper,
-        results_wrapper,
-    )
+    inner_apply_wrappers = (prepare_callable_arguments_wrapper,)
 
     __call__ = LateBindingAttribute('_dynamic_call')
     asynchronous = LateBindingAttribute('_dynamic_async')
@@ -511,7 +503,8 @@ class Action:
             bound = self._wrapper_signature.bind(*args, **kwargs)
             bound.apply_defaults()
             ctx = context_factory()
-            frame = Frame(self, ctx, bound.arguments)
+            frame = Frame(self, ctx, bound.arguments,
+                          phase=self._initial_frame_phase)
 
             with ExitStack() as wrappers:
                 for wrapper in chain(self.outer_bind_wrappers,
@@ -648,7 +641,7 @@ class Method(Action):
         method_output_wrapper,
         provenance_wrapper,
         input_transform_wrapper,
-        capture_wrapper,
+        capture_holders_wrapper,
     )
 
     @classmethod
@@ -687,7 +680,7 @@ class Visualizer(Action):
         visualization_wrapper,
         provenance_wrapper,
         input_transform_wrapper,
-        capture_wrapper,
+        capture_holders_wrapper,
     )
 
     @classmethod
@@ -710,8 +703,8 @@ class Pipeline(Action):
         *Action.inner_apply_wrappers,
         pipeline_alias_wrapper,
         provenance_wrapper,
-        pipeline_outputs_wrapper,
-        capture_wrapper,
+        pipeline_call_wrapper,
+        capture_holders_wrapper,
     )
 
     @classmethod

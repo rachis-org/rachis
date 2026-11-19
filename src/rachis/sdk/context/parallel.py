@@ -6,8 +6,6 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
-from concurrent.futures import Future
-from contextlib import contextmanager
 from types import MappingProxyType
 
 from parsl.app.app import python_app
@@ -17,7 +15,7 @@ from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy, ProxyResults
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
 
-from .base import Context, cache_lookup_wrapper
+from .base import Context
 
 
 def _map_arg(arg, futures):
@@ -85,19 +83,8 @@ def _submit_app(frame, executor):
         worker_frame, inputs=futures)
 
 
-@contextmanager
-def parallel_dispatch_result_wrapper(frame):
-    yield
-    if isinstance(frame.results, Future):
-        frame.results = ProxyResults(frame.results, frame.output_types)
-
-
 class ParallelContext(Context):
     execution_ctx = MappingProxyType({'type': 'parsl'})
-    outer_bind_wrappers = (
-        cache_lookup_wrapper,
-        parallel_dispatch_result_wrapper,
-    )
 
     def __init__(self, action_obj, parent=None):
         super(ParallelContext, self).__init__(action_obj, parent=parent)
@@ -131,4 +118,4 @@ class ParallelContext(Context):
             'parsl_type': self.executor_name_type_mapping[executor],
         }
 
-        return _submit_app(frame, executor)
+        return ProxyResults(_submit_app(frame, executor), frame.output_types)
