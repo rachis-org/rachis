@@ -7,7 +7,7 @@
 # ----------------------------------------------------------------------------
 
 from contextlib import contextmanager
-from concurrent.futures import Future
+from concurrent.futures import Future, wait
 from copy import copy
 from tempfile import TemporaryDirectory
 from threading import Event, current_thread
@@ -26,6 +26,7 @@ from rachis.core.testing.util import get_dummy_plugin
 from rachis.plugin import CaptureHolder, Int
 from rachis.sdk import MappedMethod, Results
 from rachis.sdk.context import Context, ParallelContext
+from rachis.sdk.context.parallel import _submit_batch
 from rachis.sdk.futures import as_future
 from rachis.sdk.mapped import (
     CellOutcome, CommittedCell, MappedProxyArtifact, commit_outcome,
@@ -560,6 +561,52 @@ def test_parallel_root_cleans_up_mapped_work_after_pipeline_error(tmp_path):
 
         assert len(commits) == 2
         assert all(not path.parent.exists() for path in commits)
+
+
+def test_partial_batch_submission_drains_worker_before_workspace_cleanup(
+    tmp_path,
+):
+    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
+    cleanup_started = Event()
+    submitted = []
+    completed = []
+    inner_apply = MappedMethod._inner_apply
+
+    def fail_second_submission(cells, executor):
+        if submitted:
+            raise ValueError('second batch failed to submit')
+        cells = tuple(cells)
+        submitted.append(cells[0].cell.path)
+        return _submit_batch(cells, executor)
+
+    def finish_after_cleanup_starts(self, frame):
+        outcome = inner_apply(self, frame)
+        assert cleanup_started.wait(timeout=5)
+        assert frame.cell.path.is_file()
+        completed.append(frame.cell.path)
+        return outcome
+
+    def drain_batches(jobs):
+        cleanup_started.set()
+        wait(jobs)
+
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    with (patch('rachis.sdk.context.parallel._submit_batch',
+                fail_second_submission),
+          patch('rachis.sdk.context.parallel.wait', drain_batches),
+          patch.object(MappedMethod, '_inner_apply',
+                       finish_after_cleanup_starts),
+          ParallelConfig(config)):
+        with (pytest.raises(ValueError, match='second batch failed to submit'),
+              ParallelContext(None) as ctx):
+            ctx.get_action('dummy_plugin', 'increment_samples')(data, 1)
+
+    assert completed == submitted
+    path, = submitted
+    assert not path.parent.exists()
 
 
 def test_parallel_proxy_surfaces_mapped_finalization_error(tmp_path):
