@@ -210,20 +210,21 @@ def test_deferred_cells_gather_locally_and_keep_their_workspace():
                 pending.append((cell, future))
             return futures
 
-    with DeferredContext(method) as ctx:
-        result = method._outer_bind(lambda: ctx)(data, 1)
-        completion, = Results._futures(result)
-        try:
-            assert not completion.done()
-            directory = pending[0][0].cell.path.parent
-            assert directory.is_dir()
-        finally:
-            for cell, future in reversed(pending):
-                outcome = as_future(cell)
-                if outcome.exception() is not None:
-                    future.set_exception(outcome.exception())
-                else:
-                    future.set_result(outcome.result())
+    with DeferredContext() as ctx:
+        with DeferredContext(method, parent=ctx) as child:
+            result = method._outer_bind(lambda: child)(data, 1)
+            completion, = Results._futures(result)
+            try:
+                assert not completion.done()
+                directory = pending[0][0].cell.path.parent
+                assert directory.is_dir()
+            finally:
+                for cell, future in reversed(pending):
+                    outcome = as_future(cell)
+                    if outcome.exception() is not None:
+                        future.set_exception(outcome.exception())
+                    else:
+                        future.set_result(outcome.result())
         completed = completion.result(timeout=5)
         assert completed.output.view(dict) == {'s1': '5', 's2': '6'}
         assert directory.is_dir()
