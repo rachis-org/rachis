@@ -233,7 +233,7 @@ class ProxyResults(Proxy):
         names = tuple(signature)
         joined = after_all(
             (result_as_future(proxies[name]) for name in names),
-            lambda *outputs: Results(names, outputs))
+            lambda outputs: Results(names, outputs))
         results = cls(joined, signature)
         results._named_ = proxies
         return results

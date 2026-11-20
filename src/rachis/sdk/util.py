@@ -6,7 +6,9 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+import builtins
 import re
+from copy import copy
 from importlib.metadata import entry_points
 from typing import Dict, TYPE_CHECKING
 
@@ -29,6 +31,74 @@ __all__ = [
     'actions_by_input_type', 'is_union', 'is_metadata_column_type',
     'is_parallel_type'
 ]
+
+
+class Sievable:
+    """Opt a value into recursive selection.
+
+    The default _sieve walks items() and rebuilds via an independent shallow
+    copy and update(). Other structures can supply their own _sieve.
+    """
+    @classmethod
+    def sieve(cls, value, *, isinstance):
+        """Select instances of given types and return a reusable rebuild."""
+        selected = []
+
+        def visit(value):
+            if builtins.isinstance(value, isinstance):
+                index = len(selected)
+                selected.append(value)
+                return lambda replacements: replacements[index]
+
+            if builtins.isinstance(value, Sievable):
+                return value._sieve(visit)
+            if builtins.isinstance(value, dict):
+                mapping = value if type(value) is dict else dict(value)
+                return cls._sieve_mapping(mapping, visit)
+            if builtins.isinstance(value, (list, set)):
+                traversal = tuple(map(visit, value))
+                return lambda replacements: type(value)(
+                    rebuild_item(replacements) for rebuild_item in traversal
+                )
+            return lambda _: value
+
+        rebuild_root = visit(value)
+
+        def rebuild(replacements):
+            replacements = tuple(replacements)
+            if len(replacements) != len(selected):
+                raise ValueError('Expected one replacement per selected value')
+            return rebuild_root(replacements)
+
+        return tuple(selected), rebuild
+
+    def __copy__(self):
+        """Return a shallow copy of the same type with independent entries."""
+        raise NotImplementedError
+
+    def update(self, items):
+        """Update this object from an iterable of key-value pairs."""
+        raise NotImplementedError
+
+    def _sieve(self, visit):
+        return self._sieve_mapping(self, visit)
+
+    @staticmethod
+    def _sieve_mapping(mapping, visit):
+        snapshot = copy(mapping)
+        traversal = tuple(
+            (key, visit(value)) for key, value in snapshot.items()
+        )
+
+        def rebuild(replacements):
+            result = copy(snapshot)
+            result.update(
+                (key, rebuild_item(replacements))
+                for key, rebuild_item in traversal
+            )
+            return result
+
+        return rebuild
 
 
 def camel_to_snake(name: str) -> str:

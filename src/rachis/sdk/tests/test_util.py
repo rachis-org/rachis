@@ -11,10 +11,26 @@ import unittest
 import rachis
 import rachis.sdk
 
-from rachis.sdk.util import validate_result_collection_keys
+from rachis.sdk.util import Sievable, validate_result_collection_keys
 
 
 class TestUtil(unittest.TestCase):
+    def test_sieve_rebuilds_independently(self):
+        collection = rachis.sdk.ResultCollection({'key': 'pending'})
+        arguments = {'inputs': [collection], 'parameter': 7}
+        selected, rebuild = Sievable.sieve(arguments, isinstance=str)
+
+        self.assertEqual(selected, ('pending',))
+        collection['added'] = 'after selection'
+        first = rebuild([1])
+        second = rebuild([2])
+
+        self.assertEqual(first['inputs'][0], {'key': 1})
+        self.assertEqual(second['inputs'][0], {'key': 2})
+        self.assertEqual(collection, {'key': 'pending',
+                                      'added': 'after selection'})
+        self.assertEqual(first['parameter'], 7)
+
     def test_artifact_actions(self):
         obs = rachis.sdk.util.actions_by_input_type(None)
         self.assertEqual(obs, [])

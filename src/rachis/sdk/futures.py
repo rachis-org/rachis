@@ -9,6 +9,8 @@
 from concurrent.futures import Future
 from threading import Lock
 
+from rachis.sdk.util import Sievable
+
 
 def as_future(function):
     """Convert a callable into a Future by evaluating it and
@@ -27,27 +29,21 @@ def result_as_future(value):
     from rachis.sdk.proxy import ProxyResult, ProxyResultCollection
     from rachis.sdk.result import ResultCollection
 
-    if isinstance(value, (ProxyResult, ProxyResultCollection)):
-        return after_all((value._future_,), value._get_element_)
-    if isinstance(value, ResultCollection):
-        keys = tuple(value.keys())
-        return after_all(map(result_as_future, value.values()),
-                         lambda *items: ResultCollection(
-                             dict(zip(keys, items))))
-    if isinstance(value, list):
-        return after_all(map(result_as_future, value),
-                         lambda *items: list(items))
-    if isinstance(value, dict):
-        keys = tuple(value)
-        return after_all(map(result_as_future, value.values()),
-                         lambda *items: dict(zip(keys, items)))
+    proxy_types = (ProxyResult, ProxyResultCollection)
+    if isinstance(value, proxy_types):
+        return after_all(
+            (value._future_,), lambda values: value._get_element_(values[0]),
+        )
+    if isinstance(value, (ResultCollection, list)):
+        proxies, rebuild = Sievable.sieve(value, isinstance=proxy_types)
+        return after_all(map(result_as_future, proxies), rebuild)
     return as_future(lambda: value)
 
 
 def join(dependencies, combine, *, ctx):
     """Combine settled results under the invocation's cache."""
 
-    def run(*values):
+    def run(values):
         with ctx.cache:
             return combine(*values)
 
@@ -55,7 +51,7 @@ def join(dependencies, combine, *, ctx):
 
 
 def after_all(dependencies, combine):
-    """Call combine with settled dependency values in their original order."""
+    """Call combine with a tuple of settled values in dependency order."""
     dependencies = tuple(dependencies)
     future = Future()
     lock = Lock()
@@ -64,7 +60,7 @@ def after_all(dependencies, combine):
     def finish():
         try:
             values = tuple(dep.result() for dep in dependencies)
-            result = combine(*values)
+            result = combine(values)
         except BaseException as error:
             future.set_exception(error)
         else:

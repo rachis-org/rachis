@@ -11,71 +11,52 @@ from types import MappingProxyType
 from parsl.app.app import python_app
 
 from rachis.sdk.action import Pipeline
-from rachis.sdk.result import ResultCollection
 from rachis.sdk.proxy import Proxy, ProxyResults
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
+from rachis.sdk.util import Sievable
 
 from .base import Context
 
 
-def _map_arg(arg, futures):
-    """ Map a proxy artifact for input to a parsl action
-    """
-    # We add this future to the list and create a new proxy with its index as
-    # its future.
-    if isinstance(arg, Proxy):
-        futures.append(arg._future_)
-        mapped = arg.__class__(len(futures) - 1, arg._selector_,
-                               getattr(arg, '_qiime_type_', None))
-    # We do the above but for all elements in the collection
-    elif isinstance(arg, list):
-        mapped = [_map_arg(proxy, futures) for proxy in arg]
-    elif isinstance(arg, ResultCollection):
-        mapped = ResultCollection({
-            key: _map_arg(value, futures) for key, value in arg.items()})
-    elif isinstance(arg, dict):
-        mapped = {key: _map_arg(proxy, futures) for key, proxy in arg.items()}
-    # We just have a real artifact and don't need to map
-    else:
-        mapped = arg
-
-    return mapped
+def _sieve_inputs(frame, types):
+    arguments = frame.bound_arguments
+    inputs = frame.action.signature.inputs
+    selected, rebuild = Sievable.sieve(
+        {name: value for name, value in arguments.items() if name in inputs},
+        isinstance=types,
+    )
+    return selected, lambda replacements: arguments | rebuild(replacements)
 
 
-def _unmap_arg(arg, inputs):
-    """ Unmap a proxy artifact given to a parsl action
-    """
-    # We were hacky and set _future_ to be the index of this artifact in the
-    # inputs list
-    if isinstance(arg, Proxy):
-        resolved_result = inputs[arg._future_]
-        unmapped = arg._get_element_(resolved_result)
-    # If we got a collection of proxies as the input we were even hackier and
-    # added each proxy to the inputs list individually while having a list of
-    # their indices in the args.
-    elif isinstance(arg, list):
-        unmapped = [_unmap_arg(proxy, inputs) for proxy in arg]
-    elif isinstance(arg, ResultCollection):
-        unmapped = ResultCollection({
-            key: _unmap_arg(value, inputs) for key, value in arg.items()})
-    elif isinstance(arg, dict):
-        unmapped = {key: _unmap_arg(proxy, inputs) for
-                    key, proxy in arg.items()}
-    # We didn't have a proxy at all
-    else:
-        unmapped = arg
+def _map_arguments(frame, futures):
+    """Encode proxies as indexes into the app's dependency list."""
+    proxies, rebuild = _sieve_inputs(frame, Proxy)
 
-    return unmapped
+    def encode(proxy):
+        index = len(futures)
+        futures.append(proxy._future_)
+        return proxy.__class__(index, proxy._selector_,
+                               getattr(proxy, '_qiime_type_', None))
+
+    return rebuild(map(encode, proxies))
+
+
+def _unmap_arguments(frame, inputs):
+    """Select the worker's inputs from Parsl's resolved dependencies."""
+    proxies, rebuild = _sieve_inputs(frame, Proxy)
+    return rebuild(
+        proxy._get_element_(inputs[proxy._future_]) for proxy in proxies
+    )
 
 
 def _submit_app(frame, executor):
     futures = []
     worker_frame = frame.for_worker()
-    worker_frame.bound_arguments = _map_arg(frame.bound_arguments, futures)
+    worker_frame.bound_arguments = _map_arguments(frame, futures)
 
     def worker(frame, inputs=()):
         with frame.ctx.cache:
-            frame.bound_arguments = _unmap_arg(frame.bound_arguments, inputs)
+            frame.bound_arguments = _unmap_arguments(frame, inputs)
             return frame()
 
     frame.action._set_wrapper_name(worker, frame.action.id)
