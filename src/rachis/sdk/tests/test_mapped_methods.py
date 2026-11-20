@@ -576,7 +576,7 @@ def test_optional_broadcast_does_not_restore_filtered_composite_cells(
             name='Add an optional offset', description='',
         )
         scores = Artifact.import_data(
-            'AssignmentScores', {'s1/a1': '4', 's1/a2': '-5'})
+            'AssignmentScores', {'s1/a1': '4', 's1/a2': '-5', 's2/a1': '6'})
         offsets = Artifact.import_data('Mapping', {'s1': '10'})
         with ParallelConfig(config), ParallelContext(None) as ctx:
             retained = ctx.get_action('dummy_plugin', 'filter_scores')(
@@ -584,11 +584,13 @@ def test_optional_broadcast_does_not_restore_filtered_composite_cells(
             output = ctx.get_action('dummy_plugin', 'add_offset')(
                 retained, offsets).output
 
-    assert observed == [('4', '10')]
-    assert output.view(dict) == {'s1/a1': '14'}
+    assert sorted(observed, key=repr) == [('4', '10'), ('6', None)]
+    assert output.view(dict) == {'s1/a1': '14', 's2/a1': '6'}
     records = output._archiver.provenance_dir / 'action' / 'coordinates.tsv'
     assert records.read_text().splitlines() == [
-        'student\tassignment\tattempt\toutcome', 's1\ta1\t1\tcompleted',
+        'student\tassignment\tattempt\toutcome',
+        's1\ta1\t1\tcompleted',
+        's2\ta1\t1\tcompleted',
     ]
 
 
