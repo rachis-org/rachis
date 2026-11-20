@@ -20,7 +20,7 @@ from parsl.serialize import pack_apply_message, unpack_apply_message
 import pytest
 import dill
 
-from rachis import Artifact, ForEach
+from rachis import Artifact, Coord, ForEach
 from rachis.core.testing.type import AssignmentScores, Mapping
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.plugin import CaptureHolder, Int
@@ -30,6 +30,7 @@ from rachis.sdk.context.parallel import _submit_batch
 from rachis.sdk.futures import after_all, as_future
 from rachis.sdk.mapped import (
     CellOutcome, CommittedCell, MappedProxyArtifact, commit_outcome,
+    coordinate_source,
     read_outcome,
 )
 from rachis.sdk.parallel_config import ParallelConfig
@@ -532,6 +533,167 @@ def test_pending_subset_broadcasts_before_producer_batch_finishes(coverage):
     if coverage == 'optional':
         expected['s2/a1'] = '6'
     assert result.view(dict) == expected
+
+
+def test_pipeline_alias_preserves_pending_mapped_cells():
+    plugin = get_dummy_plugin()
+    pipeline = plugin.pipelines['mapped_sample_pipeline']
+    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
+    consumer_committed = Event()
+    inner_apply = MappedMethod._inner_apply
+
+    def return_mapped(ctx, data):
+        retained, _ = ctx.get_action('dummy_plugin', 'filter_samples')(data)
+        return retained
+
+    def batches(ctx, cells):
+        if ctx.action_obj.id == 'filter_samples':
+            yield tuple(cells)
+        else:
+            for coord in cells:
+                yield (coord,)
+
+    def observe(self, frame):
+        if self.id == 'filter_samples' and frame.coordinate.sample == 's2':
+            assert consumer_committed.wait(timeout=10)
+        return inner_apply(self, frame)
+
+    with TemporaryDirectory() as run_dir:
+        config = Config(
+            executors=[SerializingExecutor(label='default', max_threads=2)],
+            run_dir=run_dir,
+        )
+        with (patch.object(pipeline, '_callable', return_mapped),
+              patch.object(ParallelContext, '_batches', batches),
+              patch.object(MappedMethod, '_inner_apply', observe),
+              ParallelConfig(config), ParallelContext(None) as ctx):
+            first = ctx.get_action('dummy_plugin', pipeline.id)
+            increment = ctx.get_action('dummy_plugin', 'increment_samples')
+            alias = first(data).output
+            assert not alias._future_.done()
+            result = increment(alias, 1).output
+            try:
+                plan = coordinate_source(result, ForEach['sample'])
+                cell = plan.result(timeout=5)._cells['s1',].future
+                assert cell.result(timeout=5).outputs['output'].load() == '5'
+                assert not alias._future_.done()
+            finally:
+                consumer_committed.set()
+            assert result.view(dict) == {'s1': '5', 's2': '6'}
+            assert result._archiver.provenance_dir.joinpath(
+                'artifacts', str(alias.uuid)).is_dir()
+
+
+@pytest.mark.parametrize('through_pipeline', [False, True])
+def test_parsl_resolves_nested_axis_prefixes_before_batch_exit(
+    through_pipeline,
+):
+    plugin = get_dummy_plugin()
+    pipeline = plugin.pipelines['mapped_scores_pipeline']
+    data = Artifact.import_data('AssignmentScores', {
+        's1/a1': '4', 's1/a2': '5', 's1/a3': '-1',
+        's2/a1': '7', 's3/a1': '-4',
+    })
+    sample_planned = Event()
+    sample_started = Event()
+    sample_committed = Event()
+    inner_apply = MappedMethod._inner_apply
+    score_commits = {}
+    order = []
+    s1_assignments = {
+        Coord(student='s1', assignment=assignment)
+        for assignment in ('a1', 'a2', 'a3')
+    }
+    s2_assignment = Coord(student='s2', assignment='a1')
+
+    def filter_scores_pipeline(ctx, data):
+        return ctx.get_action('dummy_plugin', 'filter_scores')(data).retained
+
+    def sum_aliased_scores(ctx, data):
+        filtered, = ctx.get_action(
+            'dummy_plugin', 'filter_scores_pipeline')(data)
+        totals, = ctx.get_action('dummy_plugin', 'sum_scores')(filtered)
+        increment = ctx.get_action('dummy_plugin', 'increment_samples')
+        output, = increment(totals, 1)
+        return filtered, output
+
+    def batches(ctx, cells):
+        if ctx.action_obj.id == 'filter_scores':
+            score_commits.update((cell.outputs['retained'], cell.path)
+                               for cell in (frame.cell
+                                            for frame in cells.values()))
+            yield tuple(cells)
+            return
+        if ctx.action_obj.id == 'sum_scores':
+            s1 = next(frame for frame in cells.values()
+                      if frame.coordinate.sample == 's1')
+            planned = {coord for coord, _ in
+                       s1.bound_arguments['data'].members}
+            assert planned == s1_assignments
+            sample_planned.set()
+        for cell in cells:
+            yield (cell,)
+
+    def observe_cell(self, frame):
+        coord = frame.coordinate
+        if self.id == 'filter_scores':
+            if coord == Coord(student='s1', assignment='a2'):
+                # Force the sample to be planned while suffixes are pending.
+                assert sample_planned.wait(timeout=10)
+                assert not sample_started.is_set()
+            if coord == s2_assignment:
+                assert sample_committed.wait(timeout=10), (
+                    'downstream s1 waited for another sample or assembly')
+                order.append('producer s2')
+        if self.id == 'sum_scores' and coord.sample == 's1':
+            assert all(score_commits[cell].is_file()
+                       for cell in s1_assignments)
+            assert not score_commits[s2_assignment].exists()
+            sample_started.set()
+        return inner_apply(self, frame)
+
+    @contextmanager
+    def observe_invocation(frame):
+        yield
+        if frame.action.id == 'increment_samples':
+            cell = frame.results.output._cells['s1',]
+            cell.future.add_done_callback(mark_committed)
+
+    def mark_committed(future):
+        future.result()
+        order.append('third-stage s1')
+        sample_committed.set()
+
+    with patch.dict(plugin.pipelines), TemporaryDirectory() as run_dir:
+        plugin.pipelines.register_function(
+            filter_scores_pipeline, inputs={'data': AssignmentScores},
+            parameters={}, outputs={'filtered': AssignmentScores},
+            name='Filter scores in a pipeline', description='',
+        )
+        config = Config(
+            executors=[SerializingExecutor(label='default', max_threads=3)],
+            run_dir=run_dir,
+        )
+        pipeline_body = (sum_aliased_scores if through_pipeline
+                         else pipeline._callable)
+        with (patch.object(pipeline, '_callable', pipeline_body),
+              patch.object(ParallelContext, '_batches', batches),
+              patch.object(MappedMethod, 'inner_bind_wrappers',
+                           (observe_invocation,
+                            *MappedMethod.inner_bind_wrappers)),
+              patch.object(MappedMethod, '_inner_apply', observe_cell),
+              ParallelConfig(config)):
+            filtered, output = pipeline.parallel(data)
+            assert all(not path.parent.exists()
+                       for path in score_commits.values())
+
+    assert order == ['third-stage s1', 'producer s2']
+    assert set(filtered.coords('student')) == {
+        Coord(student=coord.student)
+        for coord in filtered.coords('student', 'assignment')
+    }
+    assert filtered.view(dict, student='s1') == {'a1': '4', 'a2': '5'}
+    assert output.view(dict) == {'s1': '10', 's2': '8'}
 
 
 @pytest.mark.parametrize('coverage', ['optional', 'required'])
