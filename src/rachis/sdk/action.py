@@ -37,6 +37,7 @@ from rachis.core.cite import CitationRecord
 
 
 class FramePhase(Enum):
+    INNER_BIND = 'inner_bind'
     INNER_APPLY = 'inner_apply'
     FINISHED = 'finished'
 
@@ -64,6 +65,8 @@ class Frame:
         phase = self.phase
         self.phase = FramePhase.FINISHED
         match phase:
+            case FramePhase.INNER_BIND:
+                return self.action._inner_bind(self)
             case FramePhase.INNER_APPLY:
                 return self.action._inner_apply(self)
             case FramePhase.FINISHED:
@@ -659,8 +662,12 @@ class Method(Action):
                                           outputs, input_descriptions,
                                           parameter_descriptions,
                                           output_descriptions)
-        return super()._init(callable, signature, plugin_id, name, description,
-                             citations, deprecated, migrated, examples)
+        if cls is Method and signature.is_mapped:
+            from rachis.sdk.mapped import MappedMethod
+            cls = MappedMethod
+        return super(Method, cls)._init(
+            callable, signature, plugin_id, name, description, citations,
+            deprecated, migrated, examples)
 
 
 class Visualizer(Action):

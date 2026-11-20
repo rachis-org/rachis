@@ -6,7 +6,7 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 from concurrent.futures import CancelledError, Future
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from types import MappingProxyType
 import warnings
 
@@ -15,6 +15,7 @@ from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
+from rachis.sdk.futures import as_future
 from rachis.sdk.proxy import contains_proxy
 
 
@@ -79,7 +80,7 @@ class Context(IContext):
         if ctx is None:
             return
 
-        futures = ctx._scopes[-1]
+        futures, _ = ctx._scopes[-1]
         if isinstance(results, rachis.sdk.Results):
             futures.extend(rachis.sdk.Results._futures(results))
         elif isinstance(results, Future):
@@ -87,19 +88,23 @@ class Context(IContext):
 
     def __enter__(self):
         """Start a scope for action results tracked through this context."""
-        self._scopes.append([])
+        self._scopes.append(([], ExitStack()))
         return self
 
     def __exit__(self, exc_type, exc, traceback):
-        futures = self._scopes.pop()
+        futures, cleanup = self._scopes[-1]
         failure = None
-        for future in futures:
-            try:
-                error = future.exception()
-            except CancelledError as cancelled:
-                error = cancelled
-            if failure is None and error is not None:
-                failure = error
+        try:
+            for future in futures:
+                try:
+                    error = future.exception()
+                except CancelledError as cancelled:
+                    error = cancelled
+                if failure is None and error is not None:
+                    failure = error
+        finally:
+            self._scopes.pop()
+            cleanup.close()
 
         if exc is None and failure is not None:
             raise failure
@@ -108,6 +113,21 @@ class Context(IContext):
         state = self.__dict__.copy()
         state['_scopes'] = []
         return state
+
+    def _defer_cleanup(self, cleanup):
+        """Keep resources alive for consumers outside nested scopes."""
+        owner = None
+        ctx = self
+        while ctx is not None:
+            if ctx._scopes:
+                _, owner = ctx._scopes[0]
+            ctx = ctx._parent
+        if owner is not None:
+            owner.callback(cleanup.pop_all().close)
+
+    def _dispatch_cells_(self, cells):
+        """Take ownership of cell frames and return a future per coordinate."""
+        return {coord: as_future(cell) for coord, cell in cells.items()}
 
     def _check_cache(self, bound_arguments):
         plugin = self.action_obj.plugin_id.replace('_', '-')
