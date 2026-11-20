@@ -39,8 +39,7 @@ class AsynchronousContext(Context):
             pass
 
         pool = concurrent.futures.ProcessPoolExecutor(max_workers=1)
-        worker_frame = frame.for_worker()
-        future = pool.submit(_subprocess_apply, worker_frame)
+        future = pool.submit(_subprocess_apply, frame)
         # TODO: pool.shutdown(wait=False) caused the child process to
         # hang unrecoverably. This seems to be a bug in Python 3.7
         # It's probably best to gut concurrent.futures entirely, so we're

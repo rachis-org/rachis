@@ -71,14 +71,6 @@ class Frame:
             case _:
                 raise ValueError(f'Unknown frame phase: {phase!r}')
 
-    def for_worker(self):
-        """Copy the continuation, including state established by wrappers.
-
-        Transport adapters replace arguments on this copy. Serialization
-        hydrates its state in the worker without transporting entered stacks.
-        """
-        return copy.copy(self)
-
 
 @contextmanager
 def track_results_wrapper(frame):
@@ -510,7 +502,9 @@ class Action:
                                      ctx.outer_bind_wrappers):
                     wrappers.enter_context(wrapper(frame))
                 if frame.results is None:
-                    frame.results = ctx._dispatch_action_(frame)
+                    # Dispatch owns the continuation while outer wrappers
+                    # observe the caller-facing result on this frame.
+                    frame.results = ctx._dispatch_action_(copy.copy(frame))
 
             return frame.results
 

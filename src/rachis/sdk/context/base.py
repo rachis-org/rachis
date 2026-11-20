@@ -69,6 +69,7 @@ class Context(IContext):
         self.execution_metadata = dict(type(self).execution_metadata)
 
     def _dispatch_action_(self, frame):
+        """Resume an owned continuation and return its exterior result."""
         return frame()._result()
 
     def _track_results(self, results):

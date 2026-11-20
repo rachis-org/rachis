@@ -166,7 +166,7 @@ class TestActionWrappers(unittest.TestCase):
 
             def _dispatch_action_(self, frame):
                 future = Future()
-                pending.append((frame.for_worker(), future))
+                pending.append((frame, future))
                 return Results._from_future(future, frame.output_types)
 
         action = self.plugin.methods['split_ints']
@@ -190,6 +190,7 @@ class TestActionWrappers(unittest.TestCase):
 
                 self.assertEqual(Results._futures(results), (dispatched,))
                 self.assertFalse(dispatched.done())
+                self.assertIsNone(frame.results)
                 self.assertIsNone(frame.provenance)
                 self.assertIs(frame.bound_arguments['ints'], argument)
                 self.assertIsNone(frame.transformed_arguments)
@@ -491,7 +492,7 @@ class TestActionWrappers(unittest.TestCase):
             inner_apply_wrappers = (consume_state,)
 
             def _dispatch_action_(self, frame):
-                worker = dill.loads(dill.dumps(frame.for_worker()))
+                worker = dill.loads(dill.dumps(frame))
                 return Context._dispatch_action_(worker.ctx, worker)
 
         action = self.plugin.methods['split_ints']

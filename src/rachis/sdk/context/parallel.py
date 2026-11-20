@@ -56,8 +56,7 @@ def _unmap_arguments(frame, inputs):
 
 def _submit_app(frame, executor):
     futures = []
-    worker_frame = frame.for_worker()
-    worker_frame.bound_arguments = _map_arguments(frame, futures)
+    frame.bound_arguments = _map_arguments(frame, futures)
 
     def worker(frame, inputs=()):
         with frame.ctx.cache:
@@ -65,19 +64,18 @@ def _submit_app(frame, executor):
             return frame()
 
     frame.action._set_wrapper_name(worker, frame.action.id)
-    return python_app(executors=[executor])(worker)(
-        worker_frame, inputs=futures)
+    return python_app(executors=[executor])(worker)(frame, inputs=futures)
 
 
-def _submit_pipeline(frame):
-    outputs = [Future() for _ in frame.output_types]
-    results = Results(frame.output_types, (
+def _submit_pipeline(body):
+    outputs = [Future() for _ in body.output_types]
+    results = Results(body.output_types, (
         output_proxy(future, None, spec.qiime_type)
-        for future, spec in zip(outputs, frame.output_types.values())
+        for future, spec in zip(outputs, body.output_types.values())
     ))
     completion = Future()
-    body = frame.for_worker()
-    body.ctx = copy(frame.ctx)
+    caller_ctx = body.ctx
+    body.ctx = copy(caller_ctx)
 
     def fail_outputs(error):
         for future in outputs:
@@ -115,9 +113,9 @@ def _submit_pipeline(frame):
             fail_outputs(error)
         completion.set_exception(error)
 
-    frame.action._set_wrapper_name(run, frame.action.id)
+    body.action._set_wrapper_name(run, body.action.id)
     join_app(run)().add_done_callback(finish)
-    frame.ctx._track_results(completion)
+    caller_ctx._track_results(completion)
     return results
 
 
