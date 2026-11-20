@@ -77,12 +77,16 @@ def test_per_output_filtering():
 
 @pytest.mark.parametrize('binding', ['student', 'assignment'])
 @pytest.mark.parametrize('coverage', ['matched', 'optional', 'required'])
-def test_subset_input_broadcasts_over_composite_coordinates(binding, coverage):
+@pytest.mark.parametrize('score_coverage', ['matched', 'required'])
+def test_subset_input_broadcasts_over_composite_coordinates(
+    binding, coverage, score_coverage,
+):
     observed = []
 
     def add_offset(
         offset: Annotated[str | None, ForEach['sample':binding:coverage]],
-        data: Annotated[str, ForEach['student', 'assignment']],
+        data: Annotated[str, ForEach[
+            'student'::score_coverage, 'assignment'::score_coverage]],
     ) -> Annotated[str, ForEach['student', 'assignment']]:
         observed.append((data, offset))
         return str(int(data) + (0 if offset is None else int(offset)))
@@ -141,6 +145,30 @@ def test_disjoint_input_bindings_still_form_a_product():
     assert output.view(dict) == {
         's1/a1': '14', 's1/a2': '24', 's2/a1': '15', 's2/a2': '25',
     }
+
+
+def test_empty_product_still_checks_required_coverage():
+    def join_scores(
+        assignments: Annotated[int, ForEach['assignment']],
+        left: Annotated[str, ForEach['sample':'student':'required']],
+        right: Annotated[str, ForEach['sample':'student':'required']],
+    ) -> Annotated[str, ForEach['student', 'assignment']]:
+        pytest.fail('an empty product should have no cells')
+
+    plugin = get_dummy_plugin()
+    with patch.dict(plugin.methods):
+        plugin.methods.register_function(
+            join_scores, inputs={'left': Mapping, 'right': Mapping},
+            parameters={'assignments': Int},
+            outputs={'output': AssignmentScores},
+            name='Join scores', description='',
+        )
+        left = Artifact.import_data('Mapping', {'s1': '4'})
+        right = Artifact.import_data('Mapping', {'s2': '5'})
+        method = plugin.methods['join_scores']
+        with pytest.raises(ValueError, match=r"Required inputs .*right.*s1"):
+            method(0, left, right)
+        assert method(0, left, left).output.view(dict) == {}
 
 
 def test_cell_context_exits_before_staging_outputs():

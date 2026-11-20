@@ -17,7 +17,7 @@ import types
 import rachis.sdk
 import rachis.core.type as qtype
 from rachis.core.archive.provenance import MetadataInfo
-from rachis.core.axis import ForEach
+from rachis.core.axis import ForEach, coordinate_joins
 from .grammar import TypeExp, UnionExp
 from .meta import TypeVarExp
 from .collection import List, Set, Collection
@@ -154,7 +154,6 @@ class PipelineSignature:
     def _configure_mapping(self):
         self.input_patterns = {}
         self.output_patterns = {}
-        self.input_coverage = {}
         for specs, patterns, output in (
             (self.signature_order, self.input_patterns, False),
             (self.outputs, self.output_patterns, True),
@@ -170,17 +169,13 @@ class PipelineSignature:
                 if not self.supports_mapping or len(found) != 1:
                     raise TypeError('Use one ForEach per mapped method view')
                 pattern = patterns[name] = found[0].normalize()
-                rules = set(pattern.coverage)
                 if output:
-                    if rules != {'matched'}:
+                    if any(entry.coverage != 'matched'
+                           for entry in pattern.entries):
                         raise TypeError(
                             'Output axis coverage must be matched')
                 else:
-                    if len(rules) != 1:
-                        raise TypeError(
-                            'A composite input axis needs uniform coverage')
-                    rule = self.input_coverage[name] = rules.pop()
-                    if (rule == 'optional' and
+                    if ('optional' in pattern.coverage and
                             type(None) not in typing.get_args(view)):
                         raise TypeError(f'Optional input {name!r} needs None')
                     if name in self.parameters and (
@@ -202,24 +197,9 @@ class PipelineSignature:
                 raise TypeError(
                     f'Mapped methods do not support CaptureHolder '
                     f'parameters: {name!r}')
-        # Complete coordinate domains own inputs projected onto their subsets.
-        # Independent domains form products during mapping.
-        groups = {frozenset(pattern.bindings): {}
-                  for pattern in self.input_patterns.values()}
-        groups = {axes: rules for axes, rules in groups.items()
-                  if not any(axes < other for other in groups)}
-        bindings = set()
-        for axes in groups:
-            if bindings.intersection(axes):
-                raise TypeError(
-                    'Overlapping mapped inputs need a common composite '
-                    'axis pattern')
-            bindings.update(axes)
-        for name, pattern in self.input_patterns.items():
-            rules = next(rules for axes, rules in groups.items()
-                         if set(pattern.bindings) <= axes)
-            rules[name] = self.input_coverage[name]
-        self.input_groups = tuple(groups.values())
+        self.input_groups = coordinate_joins(self.input_patterns)
+        bindings = {binding for group in self.input_groups
+                    for binding in group.bindings}
         if not bindings or self.output_patterns.keys() != self.outputs.keys():
             raise TypeError('Mapped methods need mapped inputs and outputs')
         for name, pattern in self.output_patterns.items():

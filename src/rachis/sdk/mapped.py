@@ -123,69 +123,31 @@ def _input_index(value, pattern):
     if isinstance(value, int):
         if value < 0:
             raise ValueError('A mapped integer must be nonnegative')
-        return {(i,): i for i in range(value)}
+        axis, = pattern.axes
+        return {Coord(**{axis: i}): i for i in range(value)}
     artifact = value.result()
     if not isinstance(artifact, Artifact):
         raise TypeError('ForEach requires an artifact with registered axes')
     index = {}
     for coord in artifact.coords(*pattern.axes):
-        key = tuple(coord[name] for name in pattern.axes)
-        if key in index:
+        if coord in index:
             raise ValueError(f'Duplicate axis coordinate {coord!r}')
-        index[key] = ArtifactCell(artifact, pattern.as_unbound(), coord)
+        index[coord] = ArtifactCell(artifact, pattern.as_unbound(), coord)
     return index
 
 
-def _includes(rules, present):
-    matched = [present[name] for name, rule in rules.items()
-               if rule == 'matched']
-    optional = [present[name] for name, rule in rules.items()
-                if rule == 'optional']
-    if matched:
-        return all(matched)
-    if optional:
-        return any(optional)
-    return any(present.values())
-
-
-def _check_required(rules, present, coordinate):
-    missing = [name for name, rule in rules.items()
-               if rule == 'required' and not present[name]]
-    if missing:
-        raise ValueError(f'Required inputs {missing!r} lack {coordinate!r}')
-
-
-def _group_plan(signature, inputs, rules):
+def _group_plan(signature, inputs, group):
     patterns = signature.input_patterns
-    bindings = max((patterns[name].bindings for name in rules), key=len)
-    indexes = {}
-    keys = {}
-    for name in rules:
-        pattern = patterns[name]
-        indexes[name] = _input_index(inputs[name], pattern)
-        if len(pattern.bindings) == len(bindings):
-            for coord in indexes[name]:
-                bound = dict(zip(pattern.bindings, coord))
-                keys[tuple(bound[b] for b in bindings)] = None
-    plan = []
-    for key in keys:
-        bound = dict(zip(bindings, key))
-        selected = {
-            name: index.get(tuple(bound[b] for b in patterns[name].bindings))
-            for name, index in indexes.items()
-        }
-        present = {name: value is not None for name, value in selected.items()}
-        if not _includes(rules, present):
-            continue
-        _check_required(rules, present, key)
-        plan.append((bound, selected))
-    return plan
+    return group.align({
+        name: _input_index(inputs[name], patterns[name])
+        for name in group.inputs
+    })
 
 
 def plan_cells(frame, directory):
     signature = frame.action.signature
-    groups = [_group_plan(signature, frame.bound_arguments, rules)
-              for rules in signature.input_groups]
+    groups = [_group_plan(signature, frame.bound_arguments, group)
+              for group in signature.input_groups]
     broadcast = {
         name: value for name, value in frame.bound_arguments.items()
         if name not in signature.input_patterns
@@ -197,12 +159,12 @@ def plan_cells(frame, directory):
         for binding, selected in combination:
             bound.update(binding)
             selections.update(selected)
+        coordinate = Coord(**bound)
         outputs = {
-            name: Coord(**dict(zip(pattern.axes,
-                                   (bound[b] for b in pattern.bindings))))
+            name: pattern.to_axis_coord(coordinate)
             for name, pattern in signature.output_patterns.items()
         }
-        cells[Coord(**bound)] = Cell(
+        cells[coordinate] = Cell(
             directory / f'{number}.cell', selections, outputs)
     return cells, output_axes(frame)
 
