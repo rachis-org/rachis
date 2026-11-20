@@ -24,7 +24,7 @@ def as_future(function):
     return future
 
 
-def result_as_future(value):
+def result_as_future(value, *, into=None):
     """Resolve a result reference, including any prospective collection."""
     from rachis.sdk.proxy import ProxyResult, ProxyResultCollection
     from rachis.sdk.result import ResultCollection
@@ -33,11 +33,12 @@ def result_as_future(value):
     if isinstance(value, proxy_types):
         return after_all(
             (value._future_,), lambda values: value._get_element_(values[0]),
+            into=into,
         )
     if isinstance(value, (ResultCollection, list, dict)):
         proxies, rebuild = Sievable.sieve(value, isinstance=proxy_types)
-        return after_all(map(result_as_future, proxies), rebuild)
-    return as_future(lambda: value)
+        return after_all(map(result_as_future, proxies), rebuild, into=into)
+    return after_all((), lambda _: value, into=into)
 
 
 def join(dependencies, combine, *, ctx):
@@ -50,10 +51,13 @@ def join(dependencies, combine, *, ctx):
     return after_all(dependencies, run)
 
 
-def after_all(dependencies, combine):
-    """Call combine with a tuple of settled values in dependency order."""
+def after_all(dependencies, combine, *, into=None):
+    """Call combine in dependency order and complete a future with its result.
+
+    If supplied, into is the pending future to complete and return.
+    """
     dependencies = tuple(dependencies)
-    future = Future()
+    future = Future() if into is None else into
     lock = Lock()
     remaining = len(dependencies)
 

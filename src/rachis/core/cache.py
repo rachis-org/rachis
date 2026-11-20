@@ -346,22 +346,17 @@ class MEGALock(tm):
         self.lifetime = lifetime
         self.re_entries = 0
 
-        self.thread_lock = threading.Lock()
+        self.thread_lock = threading.RLock()
         self.flufl_lock = _FluflLock(flufl_fp, lifetime=lifetime)
 
     def __enter__(self):
         """We acquire the thread lock first because the flufl lock isn't
         thread-safe which is why we need both locks in the first place
         """
-        if self.re_entries == 0:
-            self.thread_lock.acquire()
-
-            try:
+        self.thread_lock.acquire()
+        try:
+            if self.re_entries == 0:
                 self.flufl_lock.lock()
-            except Exception:
-                self.thread_lock.release()
-                raise
-            else:
                 self._thread_is_done = threading.Event()
                 self._thread = threading.Thread(
                     target=lock_thread,
@@ -369,16 +364,19 @@ class MEGALock(tm):
                           self._thread_is_done),
                     daemon=True)
                 self._thread.start()
-
-        self.re_entries += 1
+            self.re_entries += 1
+        except BaseException:
+            self.thread_lock.release()
+            raise
 
     def __exit__(self, *args):
-        if self.re_entries > 0:
+        try:
             self.re_entries -= 1
-
-        if self.re_entries == 0:
-            self._thread_is_done.set()
-            self.flufl_lock.unlock()
+            if self.re_entries == 0:
+                self._thread_is_done.set()
+                self._thread.join()
+                self.flufl_lock.unlock()
+        finally:
             self.thread_lock.release()
 
     def __getstate__(self):
@@ -396,7 +394,7 @@ class MEGALock(tm):
     def __setstate__(self, state):
         self.__dict__.update(state)
 
-        self.thread_lock = threading.Lock()
+        self.thread_lock = threading.RLock()
         self.flufl_lock = _FluflLock(self.flufl_fp, lifetime=self.lifetime)
 
 

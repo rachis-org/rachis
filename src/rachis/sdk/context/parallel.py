@@ -6,12 +6,16 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+from concurrent.futures import Future
+from copy import copy
 from types import MappingProxyType
 
-from parsl.app.app import python_app
+from parsl.app.app import join_app, python_app
+from parsl.dataflow.errors import JoinError
 
 from rachis.sdk.action import Pipeline
-from rachis.sdk.proxy import Proxy
+from rachis.sdk.futures import result_as_future
+from rachis.sdk.proxy import Proxy, output_proxy
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
 from rachis.sdk.results import Results
 from rachis.sdk.util import Sievable
@@ -65,6 +69,58 @@ def _submit_app(frame, executor):
         worker_frame, inputs=futures)
 
 
+def _submit_pipeline(frame):
+    outputs = [Future() for _ in frame.output_types]
+    results = Results(frame.output_types, (
+        output_proxy(future, None, spec.qiime_type)
+        for future, spec in zip(outputs, frame.output_types.values())
+    ))
+    completion = Future()
+    body = frame.for_worker()
+    body.ctx = copy(frame.ctx)
+
+    def fail_outputs(error):
+        for future in outputs:
+            if not future.done():
+                future.set_exception(error)
+
+    def run():
+        # Child work belongs to the body, which can submit more actions after
+        # the caller has started waiting on its own scope.
+        children = []
+        body.ctx._scopes.append(children)
+        try:
+            with body.ctx.cache:
+                aliases = body()
+        except BaseException as error:
+            fail_outputs(error)
+        else:
+            for alias, output in zip(aliases, outputs):
+                result_as_future(alias, into=output)
+        finally:
+            body.ctx._scopes.pop()
+
+        return [*outputs, *children]
+
+    def finish(job):
+        error = job.exception()
+        if error is None:
+            completion.set_result(None)
+            return
+        if isinstance(error, JoinError):
+            # Surface the invocation's original error at nursery exit.
+            error, _ = error.dependent_exceptions_tids[0]
+        else:
+            # A launch failure leaves nobody to settle the outputs.
+            fail_outputs(error)
+        completion.set_exception(error)
+
+    frame.action._set_wrapper_name(run, frame.action.id)
+    join_app(run)().add_done_callback(finish)
+    frame.ctx._track_results(completion)
+    return results
+
+
 class ParallelContext(Context):
     execution_metadata = MappingProxyType({'type': 'parsl'})
 
@@ -83,15 +139,13 @@ class ParallelContext(Context):
                       for v in PARALLEL_CONFIG.parallel_config.executors}
 
     def _dispatch_action_(self, frame):
-        # Pipeline bodies keep coordinating locally, as before this refactor.
-        # Their child applications still pass through their own outer stacks.
-        if isinstance(frame.action, Pipeline):
-            self.execution_metadata = {'type': 'parsl', 'parsl_type': 'DFK'}
-            return frame()
-
-        if PARALLEL_CONFIG.parallel_config is None:
+        if self.executor_name_type_mapping is None:
             raise ValueError('You must load a parallel config before '
                              'running in parallel.')
+
+        if isinstance(frame.action, Pipeline):
+            self.execution_metadata = {'type': 'parsl', 'parsl_type': 'DFK'}
+            return _submit_pipeline(frame)
 
         executor = self.action_executor_mapping.get(
             frame.action.plugin_id, {}).get(frame.action.id, 'default')

@@ -10,6 +10,7 @@ from concurrent.futures import Future
 from contextlib import contextmanager
 import os
 from tempfile import TemporaryDirectory
+from threading import Event
 import unittest
 from unittest.mock import patch
 
@@ -282,11 +283,14 @@ class TestActionWrappers(unittest.TestCase):
             second = ProxyArtifact(pending, None, IntSequence1)
             return first, second
 
-        with ParallelContext(pipeline) as ctx:
+        with (
+            patch.object(pipeline, '_callable', return_outputs),
+            ParallelConfig(),
+            ParallelContext(pipeline) as ctx,
+        ):
             call = pipeline._outer_bind(lambda: ctx)
             try:
-                with patch.object(pipeline, '_callable', return_outputs):
-                    results = call(1)
+                results = call(1)
                 self.assertEqual(results[0]._future_.result(
                     timeout=5).view(list), [1])
                 self.assertFalse(results[1]._future_.done())
@@ -294,22 +298,69 @@ class TestActionWrappers(unittest.TestCase):
                 pending.set_result(Artifact.import_data(IntSequence1, [2]))
             self.assertEqual(results[1].view(list), [2])
 
+    def test_parallel_pipelines_stream_individual_outputs(self):
+        producer = self.plugin.pipelines['parameter_only_pipeline']
+        consumer = self.plugin.pipelines['optional_artifact_pipeline']
+        release_producer = Event()
+        consumer_submitted = Event()
+        pending = Future()
+        other_output = Artifact.import_data(IntSequence2, [5])
+
+        def produce(ctx, **kwargs):
+            if not release_producer.wait(timeout=10):
+                raise TimeoutError('The consumer did not start')
+            delayed = ProxyArtifact(pending, None, IntSequence2)
+            ready = ctx.make_artifact(IntSequence1, [1, 2, 3, 4])
+            return delayed, ready
+
+        def consume(ctx, int_sequence, single_int):
+            split = ctx.get_action('dummy_plugin', 'split_ints')
+            left = split(int_sequence).left
+            consumer_submitted.set()
+            return left
+
+        with (
+            patch.object(producer, '_callable', produce),
+            patch.object(consumer, '_callable', consume),
+            ParallelConfig(),
+            ParallelContext(None) as ctx,
+        ):
+            try:
+                start = ctx.get_action('dummy_plugin', producer.id)
+                follow = ctx.get_action('dummy_plugin', consumer.id)
+                first = start(1)
+                second = follow(first.bar).ints
+                self.assertTrue(consumer_submitted.wait(timeout=10))
+                release_producer.set()
+                result = second._future_.result(timeout=10)
+                self.assertEqual(result.view(list), [1, 2])
+                self.assertFalse(first.foo._future_.done())
+            finally:
+                release_producer.set()
+                pending.set_result(other_output)
+
     def test_pipeline_alias_waits_for_original_inputs(self):
         pipeline = self.plugin.pipelines['list_pipeline']
         artifact = Artifact.import_data(IntSequence1, [1])
         source = Artifact.import_data(SingleInt, 2)
         pending = Future()
         proxy = ProxyArtifact(pending, None, IntSequence1)
+        inputs_cleared = Event()
 
         def return_outputs(ctx, ints):
             ints.clear()
+            inputs_cleared.set()
             return [source]
 
-        with ParallelContext(pipeline) as ctx:
+        with (
+            patch.object(pipeline, '_callable', return_outputs),
+            ParallelConfig(),
+            ParallelContext(pipeline) as ctx,
+        ):
             call = pipeline._outer_bind(lambda: ctx)
             try:
-                with patch.object(pipeline, '_callable', return_outputs):
-                    output = call([proxy]).output
+                output = call([proxy]).output
+                self.assertTrue(inputs_cleared.wait(timeout=5))
                 self.assertFalse(output._future_.done())
             finally:
                 pending.set_result(artifact)
