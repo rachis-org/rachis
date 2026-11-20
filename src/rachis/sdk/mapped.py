@@ -93,6 +93,51 @@ class CellReference(PendingCell):
 
 
 @dataclass(frozen=True)
+class CellPrefix(PendingCell, Sievable):
+    coordinate: Coord
+    writer: type
+    reader: type
+    reader_format: type
+    members: tuple
+
+    def _sieve(self, visit):
+        traversal = tuple((coord, visit(cell)) for coord, cell in self.members)
+
+        def rebuild(replacements):
+            return replace(self, members=tuple(
+                (coord, rebuild_cell(replacements))
+                for coord, rebuild_cell in traversal
+            ))
+
+        return rebuild
+
+    def resolve(self):
+        chunks = tuple((coord, view)
+                       for coord, cell in self.members
+                       if (view := cell.resolve()) is not None)
+        return _PrefixView(self, chunks) if chunks else None
+
+
+@dataclass(frozen=True)
+class _PrefixView(CellView):
+    prefix: CellPrefix
+    chunks: tuple
+
+    @contextmanager
+    def open(self):
+        directory = self.prefix.writer.write(
+            (coord, view.load()) for coord, view in self.chunks)
+        readable = directory
+        if type(directory) is not self.prefix.reader_format:
+            source = transform.ModelType.from_view_type(type(directory))
+            target = transform.ModelType.from_view_type(
+                self.prefix.reader_format)
+            readable = source.make_transformation(target)(directory)
+        axis = self.prefix.reader(readable.path, mode='r')
+        yield axis[self.prefix.coordinate]
+
+
+@dataclass(frozen=True)
 class Cell:
     path: Path
     inputs: dict
@@ -172,7 +217,8 @@ class MappedProxyArtifact(ProxyArtifact):
             return None
         if self._pattern.axes == pattern.axes:
             return self._cells
-        return None
+        return project_cell_prefixes(
+            self.type, self._pattern, pattern, self._cells)
 
     def _with_future(self, future, qiime_type):
         return type(self)(future, None, qiime_type, self._pattern, self._cells)
@@ -236,6 +282,28 @@ class MappedProvenance(ActionProvenanceCapture):
         recorder = super().transformation_recorder(name)
         self.transformers[name].extend(previous)
         return recorder
+
+
+def project_cell_prefixes(semantic_type, source, target, cells):
+    """Group prospective cells by a registered prefix of their axis path."""
+    length = len(target.axes)
+    if source.axes[:length] != target.axes:
+        return None
+    axes = PluginManager().get_axes(semantic_type)
+    reader_record = axes.get(target.as_unbound())
+    if reader_record is None:
+        return None
+    writer = axes[source.as_unbound()].axis
+    groups = {}
+    for key, cell in cells.items():
+        coord = Coord(**dict(zip(source.axes, key)))
+        groups.setdefault(key[:length], []).append((coord, cell))
+    return {
+        key: CellPrefix(Coord(**dict(zip(target.axes, key))), writer,
+                        reader_record.axis, reader_record.directory_format,
+                        tuple(members))
+        for key, members in groups.items()
+    }
 
 
 def _input_index(value, pattern):
