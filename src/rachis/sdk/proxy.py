@@ -221,9 +221,10 @@ class ProxyResultCollection(Proxy):
         return self._get_element_(self._future_.result())
 
 
-def output_proxy(future, selector, qiime_type):
+def output_proxy(future, selector, qiime_type, *,
+                 artifact_proxy=ProxyArtifact):
     if is_collection_type(qiime_type):
         return ProxyResultCollection(future, selector, qiime_type)
     if is_visualization_type(qiime_type):
         return ProxyVisualization(future, selector, qiime_type)
-    return ProxyArtifact(future, selector, qiime_type)
+    return artifact_proxy(future, selector, qiime_type)
