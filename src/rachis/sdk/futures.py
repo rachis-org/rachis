@@ -34,7 +34,7 @@ def result_as_future(value):
         return after_all(
             (value._future_,), lambda values: value._get_element_(values[0]),
         )
-    if isinstance(value, (ResultCollection, list)):
+    if isinstance(value, (ResultCollection, list, dict)):
         proxies, rebuild = Sievable.sieve(value, isinstance=proxy_types)
         return after_all(map(result_as_future, proxies), rebuild)
     return as_future(lambda: value)

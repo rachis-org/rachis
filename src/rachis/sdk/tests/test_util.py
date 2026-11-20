@@ -7,14 +7,28 @@
 # ----------------------------------------------------------------------------
 
 import unittest
+from concurrent.futures import Future
 
 import rachis
 import rachis.sdk
 
+from rachis.sdk.futures import result_as_future
+from rachis.sdk.proxy import ProxyArtifact
 from rachis.sdk.util import Sievable, validate_result_collection_keys
 
 
 class TestUtil(unittest.TestCase):
+    def test_result_as_future_resolves_dictionary(self):
+        upstream = Future()
+        proxy = ProxyArtifact(upstream, None)
+        result = result_as_future({'input': proxy, 'parameter': 2})
+
+        self.assertFalse(result.done())
+        value = object()
+        upstream.set_result(value)
+        self.assertEqual(result.result(timeout=1),
+                         {'input': value, 'parameter': 2})
+
     def test_sieve_rebuilds_independently(self):
         collection = rachis.sdk.ResultCollection({'key': 'pending'})
         arguments = {'inputs': [collection], 'parameter': 7}
