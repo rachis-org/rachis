@@ -24,8 +24,7 @@ import rachis.sdk
 from rachis.sdk.futures import as_future, join, result_as_future
 from rachis.sdk.iresult import IResult
 from rachis.sdk.proxy import (
-    ProxyResult, ProxyResultCollection, ProxyResults, contains_proxy,
-    output_proxy,
+    ProxyResult, ProxyResultCollection, contains_proxy, output_proxy,
 )
 from rachis.sdk.result import Artifact, ResultCollection, ChecksumCache
 from rachis.sdk.results import Results
@@ -312,7 +311,7 @@ def pipeline_alias_wrapper(frame):
         else:
             proxies[name] = output_proxy(future, None, qiime_type)
 
-    frame.results = ProxyResults._from_named(proxies, frame.output_types)
+    frame.results = Results._from_named(proxies)
 
 
 # TODO: validation on these params via data.yaml in distributions

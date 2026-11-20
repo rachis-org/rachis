@@ -8,9 +8,12 @@
 
 import pickle
 import unittest
+from concurrent.futures import Future
+from types import SimpleNamespace
 
+from rachis.core.testing.type import IntSequence1
 from rachis.sdk import Results
-from rachis.sdk.proxy import ProxyResults
+from rachis.sdk.proxy import ProxyArtifact
 
 
 class TestResults(unittest.TestCase):
@@ -63,11 +66,37 @@ class TestResults(unittest.TestCase):
             r.baz
 
     def test_result_helpers_do_not_shadow_output_names(self):
-        outputs = {'result': 42, 'from_named': 43}
-        results = ProxyResults._from_named(outputs, outputs.keys())
+        outputs = {'result': 42, 'from_named': 43, '_completion_future': 44,
+                   '_future_': 45}
+        results = Results._from_named(outputs)
         for named in (results, results._result()):
             self.assertEqual(named.result, 42)
             self.assertEqual(named.from_named, 43)
+            self.assertEqual(named._completion_future, 44)
+            self.assertEqual(named._future_, 45)
+
+    def test_pending_results_project_from_shared_future(self):
+        spec = SimpleNamespace(qiime_type=IntSequence1)
+        signature = {'left': spec, 'right': spec}
+        future = Future()
+        pending = Results._from_future(future, signature)
+
+        left, right = pending
+        self.assertIsInstance(left, ProxyArtifact)
+        self.assertIs(left, pending.left)
+        self.assertIs(right, pending.right)
+        self.assertIs(left._future_, future)
+        self.assertIs(right._future_, future)
+        self.assertIs(left.type, IntSequence1)
+
+        realized = Results(signature, [42, 43])
+        future.set_result(realized)
+        self.assertIs(pending._result(), realized)
+        self.assertEqual(pending._asdict(), {'left': 42, 'right': 43})
+        self.assertEqual(pending, realized)
+        self.assertEqual(realized, pending)
+        self.assertEqual(left.result(), 42)
+        self.assertEqual(right.result(), 43)
 
     def test_per_instance_field_attributes(self):
         # Field attributes are added to a `Results` instance, not the type.

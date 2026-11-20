@@ -24,7 +24,7 @@ from rachis.plugin import Collection
 from rachis.sdk import Artifact, ResultCollection, Results
 from rachis.sdk.context import Context, ParallelContext
 from rachis.sdk.parallel_config import ParallelConfig
-from rachis.sdk.proxy import ProxyArtifact, ProxyResultCollection, ProxyResults
+from rachis.sdk.proxy import ProxyArtifact, ProxyResultCollection
 
 
 class TestActionWrappers(unittest.TestCase):
@@ -166,7 +166,7 @@ class TestActionWrappers(unittest.TestCase):
             def _dispatch_action_(self, frame):
                 future = Future()
                 pending.append((frame.for_worker(), future))
-                return ProxyResults(future, frame.output_types)
+                return Results._from_future(future, frame.output_types)
 
         action = self.plugin.methods['split_ints']
         artifact = Artifact.import_data(IntSequence1, [1, 2, 3])
@@ -187,7 +187,7 @@ class TestActionWrappers(unittest.TestCase):
                 results = call(argument)
                 frame, dispatched = pending.pop()
 
-                self.assertIs(results._future_, dispatched)
+                self.assertIs(Results._completion_future(results), dispatched)
                 self.assertFalse(dispatched.done())
                 self.assertIsNone(frame.provenance)
                 self.assertIs(frame.bound_arguments['ints'], argument)

@@ -7,7 +7,7 @@
 # ----------------------------------------------------------------------------
 
 from rachis.sdk.iresult import IResult
-from rachis.sdk.futures import after_all, join, result_as_future
+from rachis.sdk.futures import join, result_as_future
 
 import rachis.core.transform as transform
 from rachis.core.type.util import is_visualization_type, is_collection_type
@@ -213,92 +213,6 @@ class ProxyResultCollection(Proxy):
 
     def result(self):
         return self._get_element_(self._future_.result())
-
-
-class ProxyResults(Proxy):
-    """This represents future results that are being returned by a Parsl app
-    """
-    def __init__(self, future, signature):
-        """We have the future results and the outputs portion of the signature
-        of the action creating the results
-        """
-        self._future_ = future
-        self._signature_ = signature
-        self._named_ = None
-
-    @classmethod
-    def _from_named(cls, proxies, signature):
-        from rachis.sdk.results import Results
-
-        names = tuple(signature)
-        joined = after_all(
-            (result_as_future(proxies[name]) for name in names),
-            lambda outputs: Results(names, outputs))
-        results = cls(joined, signature)
-        results._named_ = proxies
-        return results
-
-    def __iter__(self):
-        """Give us a ProxyArtifact for each result in the future
-        """
-        for s in self._signature_:
-            yield self._create_proxy(s)
-
-    def __getattr__(self, attr):
-        """Get a particular ProxyArtifact out of the future
-        """
-        return self._create_proxy(attr)
-
-    def __getitem__(self, index):
-        return self._create_proxy(list(self._signature_.keys())[index])
-
-    def __repr__(self):
-        lines = []
-        lines.append('%s (name = value)' % self.__class__.__name__)
-        lines.append('')
-
-        max_len = -1
-        for field in self._signature_:
-            if len(field) > max_len:
-                max_len = len(field)
-
-        for field, value in zip(self._signature_, self):
-            field_padding = ' ' * (max_len - len(field))
-            lines.append('%s%s = %r' % (field, field_padding, value))
-
-        max_len = -1
-        for line in lines:
-            if len(line) > max_len:
-                max_len = len(line)
-        lines[1] = '-' * max_len
-
-        return '\n'.join(lines)
-
-    def __eq__(self, other):
-        """ Overriding the one on Proxy because we have _result not result
-        """
-        return self._result() == other._result()
-
-    def _asdict(self):
-        return self._result()._asdict()
-
-    def _result(self):
-        """Wait for the results and return them, or raise their exception.
-
-        Within a parallel pipeline, use ``with ctx:`` to wait for calls in a
-        scope and catch failures around that scope. A top-level
-        ``.parallel()`` call returns realized ``Results``.
-        """
-        return self._future_.result()
-
-    def _create_proxy(self, selector):
-        """Create a ProxyResult for the element of the ProxyResults being
-           requested
-        """
-        if self._named_ is not None:
-            return self._named_[selector]
-        qiime_type = self._signature_[selector].qiime_type
-        return output_proxy(self._future_, selector, qiime_type)
 
 
 def output_proxy(future, selector, qiime_type):

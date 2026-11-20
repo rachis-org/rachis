@@ -15,7 +15,7 @@ from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
-from rachis.sdk.proxy import ProxyResults, contains_proxy
+from rachis.sdk.proxy import contains_proxy
 
 
 def _validate_collection(collection_order):
@@ -72,8 +72,8 @@ class Context(IContext):
         return frame()._result()
 
     def _track_results(self, results):
-        if isinstance(results, ProxyResults):
-            results = results._future_
+        if isinstance(results, rachis.sdk.Results):
+            results = rachis.sdk.Results._completion_future(results)
         if isinstance(results, Future):
             ctx = self
             while ctx is not None and not ctx._scopes:

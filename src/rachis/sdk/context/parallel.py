@@ -11,8 +11,9 @@ from types import MappingProxyType
 from parsl.app.app import python_app
 
 from rachis.sdk.action import Pipeline
-from rachis.sdk.proxy import Proxy, ProxyResults
+from rachis.sdk.proxy import Proxy
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
+from rachis.sdk.results import Results
 from rachis.sdk.util import Sievable
 
 from .base import Context
@@ -99,4 +100,6 @@ class ParallelContext(Context):
             'parsl_type': self.executor_name_type_mapping[executor],
         }
 
-        return ProxyResults(_submit_app(frame, executor), frame.output_types)
+        return Results._from_future(
+            _submit_app(frame, executor), frame.output_types,
+        )
