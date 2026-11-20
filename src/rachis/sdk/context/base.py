@@ -72,14 +72,17 @@ class Context(IContext):
         return frame()._result()
 
     def _track_results(self, results):
+        ctx = self
+        while ctx is not None and not ctx._scopes:
+            ctx = ctx._parent
+        if ctx is None:
+            return
+
+        futures = ctx._scopes[-1]
         if isinstance(results, rachis.sdk.Results):
-            results = rachis.sdk.Results._completion_future(results)
-        if isinstance(results, Future):
-            ctx = self
-            while ctx is not None and not ctx._scopes:
-                ctx = ctx._parent
-            if ctx is not None:
-                ctx._scopes[-1].append(results)
+            futures.extend(rachis.sdk.Results._futures(results))
+        elif isinstance(results, Future):
+            futures.append(results)
 
     def __enter__(self):
         """Start a scope for action results tracked through this context."""

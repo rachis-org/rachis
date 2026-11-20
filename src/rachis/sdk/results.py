@@ -7,11 +7,8 @@
 # ----------------------------------------------------------------------------
 
 from rachis.sdk.futures import after_all, result_as_future
-from rachis.sdk.proxy import output_proxy
-
-
-# Signature fields must be identifiers, so they cannot shadow this state.
-_COMPLETION_FUTURE = 'completion future'
+from rachis.sdk.proxy import ProxyResult, ProxyResultCollection, output_proxy
+from rachis.sdk.util import Sievable
 
 
 # This class provides an interface similar to a `namedtuple` type. We can't use
@@ -27,13 +24,13 @@ class Results(tuple):
     Provides an interface similar to a ``namedtuple`` type (e.g. fields are
     accessible as attributes).
 
-    Pending results contain typed output proxies and carry a completion future.
+    Pending outputs are represented by typed proxies.
     Users should not need to instantiate this class directly.
 
     """
 
     # Subclassing `tuple` requires `__new__` override.
-    def __new__(cls, fields, values, *, future=None):
+    def __new__(cls, fields, values):
         fields = tuple(fields)
         values = tuple(values)
 
@@ -53,8 +50,6 @@ class Results(tuple):
         # Must set attributes this way because `__setattr__` prevents
         # setting directly (necessary for immutability).
         object.__setattr__(self, '_fields', fields)
-        if future is not None:
-            object.__setattr__(self, _COMPLETION_FUTURE, future)
 
         # Attach field names as instance attributes.
         for field, value in zip(fields, values):
@@ -68,17 +63,7 @@ class Results(tuple):
             output_proxy(future, name, spec.qiime_type)
             for name, spec in signature.items()
         )
-        return cls(signature, outputs, future=future)
-
-    @classmethod
-    def _from_named(cls, outputs):
-        fields = tuple(outputs)
-        values = tuple(outputs.values())
-        future = after_all(
-            map(result_as_future, values),
-            lambda realized: cls(fields, realized),
-        )
-        return cls(fields, values, future=future)
+        return cls(signature, outputs)
 
     def __getnewargs__(self):
         """Arguments to pass to `__new__`. Used by copy and pickle."""
@@ -140,10 +125,20 @@ class Results(tuple):
         result = self._result()
         return dict(zip(result._fields, result))
 
-    def _completion_future(self):
-        return getattr(self, _COMPLETION_FUTURE, None)
+    def _sieve_proxies(self):
+        return Sievable.sieve(
+            list(self), isinstance=(ProxyResult, ProxyResultCollection),
+        )
+
+    def _futures(self):
+        """Return distinct backing futures in output order."""
+        proxies, _ = Results._sieve_proxies(self)
+        return tuple(dict.fromkeys(proxy._future_ for proxy in proxies))
 
     def _result(self):
         """Return realized results, waiting for completion when needed."""
-        future = Results._completion_future(self)
-        return self if future is None else future.result()
+        proxies, rebuild = Results._sieve_proxies(self)
+        if not proxies:
+            return self
+        values = after_all(map(result_as_future, proxies), rebuild).result()
+        return type(self)(self._fields, values)

@@ -187,7 +187,7 @@ class TestActionWrappers(unittest.TestCase):
                 results = call(argument)
                 frame, dispatched = pending.pop()
 
-                self.assertIs(Results._completion_future(results), dispatched)
+                self.assertEqual(Results._futures(results), (dispatched,))
                 self.assertFalse(dispatched.done())
                 self.assertIsNone(frame.provenance)
                 self.assertIs(frame.bound_arguments['ints'], argument)

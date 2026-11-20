@@ -311,7 +311,7 @@ def pipeline_alias_wrapper(frame):
         else:
             proxies[name] = output_proxy(future, None, qiime_type)
 
-    frame.results = Results._from_named(proxies)
+    frame.results = Results(proxies, proxies.values())
 
 
 # TODO: validation on these params via data.yaml in distributions

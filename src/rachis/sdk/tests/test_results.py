@@ -68,7 +68,7 @@ class TestResults(unittest.TestCase):
     def test_result_helpers_do_not_shadow_output_names(self):
         outputs = {'result': 42, 'from_named': 43, '_completion_future': 44,
                    '_future_': 45}
-        results = Results._from_named(outputs)
+        results = Results(outputs, outputs.values())
         for named in (results, results._result()):
             self.assertEqual(named.result, 42)
             self.assertEqual(named.from_named, 43)
@@ -91,7 +91,8 @@ class TestResults(unittest.TestCase):
 
         realized = Results(signature, [42, 43])
         future.set_result(realized)
-        self.assertIs(pending._result(), realized)
+        self.assertEqual(Results._futures(pending), (future,))
+        self.assertEqual(pending._result(), realized)
         self.assertEqual(pending._asdict(), {'left': 42, 'right': 43})
         self.assertEqual(pending, realized)
         self.assertEqual(realized, pending)
