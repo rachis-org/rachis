@@ -245,12 +245,18 @@ class ParallelContext(Context):
     def _dispatch_cells_(self, cells, *, cleanup):
         if not cells:
             return {}, ()
+        batches = tuple(tuple(batch) for batch in self._batches(cells))
+        scheduled = [coord for batch in batches for coord in batch]
+        if len(scheduled) != len(cells) or set(scheduled) != cells.keys():
+            raise ValueError('Batches must partition the planned cells')
         futures = {coord: Future() for coord in cells}
         executor = self._get_executor(next(iter(cells.values())).action)
         pending = {}
         jobs = []
         try:
-            for batch in self._batches(cells):
+            for batch in batches:
+                if not batch:
+                    continue
                 job = _submit_batch(
                     (cells[coord] for coord in batch),
                     executor)

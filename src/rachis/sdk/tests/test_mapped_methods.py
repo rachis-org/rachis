@@ -36,7 +36,7 @@ from rachis.sdk.action import FramePhase
 from rachis.sdk.context import Context, ParallelContext
 from rachis.sdk.context.parallel import _submit_batch
 from rachis.sdk.futures import after_all, as_future
-from rachis.sdk.mapped import commit_attempt, read_commit
+from rachis.sdk.mapped import commit_attempt, coordinate_index, read_commit
 from rachis.sdk.parallel_config import ParallelConfig
 from rachis.sdk.proxy import ProxyArtifact
 
@@ -780,6 +780,22 @@ def test_filterable_prefix_uses_realized_range_before_artifact(tmp_path):
     assert totals.view(dict) == {'s1': '4'}
 
 
+def test_incompatible_axis_path_waits_for_artifact():
+    artifact = Artifact.import_data('AssignmentScores', {'s1/a1': '4'})
+    published = Future()
+    index = as_future(lambda: (ForEach['assignment', 'student'], {}, False))
+    proxy = ProxyArtifact(
+        published, None, AssignmentScores, coordinate_index=index)
+
+    ready = coordinate_index(proxy, ForEach['student'], ctx=Context())
+    assert not ready.done()
+    published.set_result(artifact)
+    cells = ready.result(timeout=5).cells
+    assert tuple(cells) == (Coord(student='s1'),)
+    with cells[Coord(student='s1')].open() as view:
+        assert view == {'a1': '4'}
+
+
 @pytest.mark.parametrize('coverage', ['optional', 'required'])
 def test_optional_broadcast_does_not_restore_filtered_composite_cells(
     coverage, tmp_path,
@@ -935,7 +951,8 @@ def test_range_alignment_excludes_failed_cells_before_dispatch(tmp_path):
         data = Artifact.import_data(
             'Mapping', {'s1': '4', 's2': '-5', 's3': 'invalid'})
         roster = Artifact.import_data('Mapping', {'s1': 'yes', 's2': 'yes'})
-        with (pytest.raises(RuntimeError, match='Mapped cell.*s3.*failed'),
+        failure = 'Mapped cell.*s3.*failed'
+        with (pytest.raises(RuntimeError, match=failure),
               ParallelContext(None) as ctx):
             filter_samples = ctx.get_action('dummy_plugin', 'filter_samples')
             producer = filter_samples(data).retained
@@ -947,8 +964,18 @@ def test_range_alignment_excludes_failed_cells_before_dispatch(tmp_path):
             with cell.open() as value:
                 assert value == '4'
 
-        for output in (producer, consumer):
-            with pytest.raises(RuntimeError, match='Mapped cell.*s3.*failed'):
+            with pytest.raises(RuntimeError, match=failure):
+                consumer._future_.result(timeout=5)
+            increment = ctx.get_action('dummy_plugin', 'increment_samples')
+            final = increment(consumer, 1).output
+            _, index, _ = final._coordinate_index.result(timeout=5)
+            assert tuple(index) == (Coord(sample='s1'),)
+            cell = index[Coord(sample='s1')].future.result(timeout=5)
+            with cell.open() as value:
+                assert value == '5'
+
+        for output in (producer, consumer, final):
+            with pytest.raises(RuntimeError, match=failure):
                 output.result()
     assert observed == [('4', 'yes')]
 

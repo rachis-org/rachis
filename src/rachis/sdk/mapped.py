@@ -6,7 +6,12 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
-"""Bind coordinate calls and assemble their committed cells locally."""
+"""Bind coordinate calls before dispatch and assemble their outputs locally.
+
+Each worker enters the ordinary callable runner and commits a value, absence,
+or failure after the evaluation wrappers unwind. Downstream binding can use
+the cell futures while artifact assembly waits for publication prerequisites.
+"""
 
 import copy
 import csv
