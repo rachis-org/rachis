@@ -18,6 +18,7 @@ import rachis.sdk
 import rachis.core.type as qtype
 from rachis.core.archive.provenance import MetadataInfo
 from rachis.core.axis import ForEach
+from rachis.core.axis_coverage import coordinate_joins
 from .grammar import TypeExp, UnionExp
 from .meta import TypeVarExp
 from .collection import List, Set, Collection
@@ -202,24 +203,14 @@ class PipelineSignature:
                 raise TypeError(
                     f'Mapped methods do not support CaptureHolder '
                     f'parameters: {name!r}')
-        # Complete coordinate domains own inputs projected onto their subsets.
-        # Independent domains form products during mapping.
-        groups = {frozenset(pattern.bindings): {}
-                  for pattern in self.input_patterns.values()}
-        groups = {axes: rules for axes, rules in groups.items()
-                  if not any(axes < other for other in groups)}
-        bindings = set()
-        for axes in groups:
-            if bindings.intersection(axes):
-                raise TypeError(
-                    'Overlapping mapped inputs need a common composite '
-                    'axis pattern')
-            bindings.update(axes)
-        for name, pattern in self.input_patterns.items():
-            rules = next(rules for axes, rules in groups.items()
-                         if set(pattern.bindings) <= axes)
-            rules[name] = self.input_coverage[name]
-        self.input_groups = tuple(groups.values())
+        input_bindings = {
+            name: pattern.bindings
+            for name, pattern in self.input_patterns.items()
+        }
+        self.input_groups = coordinate_joins(input_bindings,
+                                             self.input_coverage)
+        bindings = {binding for group in self.input_groups
+                    for binding in group.bindings}
         if not bindings or self.output_patterns.keys() != self.outputs.keys():
             raise TypeError('Mapped methods need mapped inputs and outputs')
         for name, pattern in self.output_patterns.items():

@@ -136,56 +136,31 @@ def _input_index(value, pattern):
     return index
 
 
-def _includes(rules, present):
-    matched = [present[name] for name, rule in rules.items()
-               if rule == 'matched']
-    optional = [present[name] for name, rule in rules.items()
-                if rule == 'optional']
-    if matched:
-        return all(matched)
-    if optional:
-        return any(optional)
-    return any(present.values())
-
-
-def _check_required(rules, present, coordinate):
-    missing = [name for name, rule in rules.items()
-               if rule == 'required' and not present[name]]
+def _check_required(missing, coordinate):
     if missing:
-        raise ValueError(f'Required inputs {missing!r} lack {coordinate!r}')
+        raise ValueError(
+            f'Required inputs {list(missing)!r} lack {coordinate!r}')
 
 
-def _group_plan(signature, inputs, rules):
+def _group_selections(signature, inputs, group):
     patterns = signature.input_patterns
-    bindings = max((patterns[name].bindings for name in rules), key=len)
-    indexes = {}
-    keys = {}
-    for name in rules:
-        pattern = patterns[name]
-        indexes[name] = _input_index(inputs[name], pattern)
-        if len(pattern.bindings) == len(bindings):
-            for coord in indexes[name]:
-                bound = dict(zip(pattern.bindings, coord))
-                keys[tuple(bound[b] for b in bindings)] = None
-    plan = []
-    for key in keys:
-        bound = dict(zip(bindings, key))
-        selected = {
-            name: index.get(tuple(bound[b] for b in patterns[name].bindings))
-            for name, index in indexes.items()
-        }
-        present = {name: value is not None for name, value in selected.items()}
-        if not _includes(rules, present):
-            continue
-        _check_required(rules, present, key)
-        plan.append((bound, selected))
-    return plan
+    return group.select({
+        name: _input_index(inputs[name], patterns[name])
+        for name in group.inputs
+    })
+
+
+def _group_plan(signature, inputs, group):
+    selections = _group_selections(signature, inputs, group)
+    for bound, selected, missing in selections:
+        _check_required(missing, tuple(bound.values()))
+        yield bound, selected
 
 
 def plan_cells(frame, directory):
     signature = frame.action.signature
-    groups = [_group_plan(signature, frame.bound_arguments, rules)
-              for rules in signature.input_groups]
+    groups = [_group_plan(signature, frame.bound_arguments, group)
+              for group in signature.input_groups]
     broadcast = {
         name: value for name, value in frame.bound_arguments.items()
         if name not in signature.input_patterns
