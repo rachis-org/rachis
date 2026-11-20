@@ -125,7 +125,7 @@ class Context(IContext):
         if owner is not None:
             owner.callback(cleanup.pop_all().close)
 
-    def _dispatch_cells_(self, cells):
+    def _dispatch_cells_(self, cells, *, cleanup):
         """Take ownership of cell frames and return a future per coordinate."""
         return {coord: as_future(cell) for coord, cell in cells.items()}
 

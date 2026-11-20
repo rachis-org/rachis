@@ -8,10 +8,14 @@
 
 from contextlib import contextmanager
 from concurrent.futures import Future
+from tempfile import TemporaryDirectory
 from threading import Event, current_thread
 from typing import Annotated
 from unittest.mock import patch
 
+from parsl import Config
+from parsl.executors import ThreadPoolExecutor
+from parsl.serialize import pack_apply_message, unpack_apply_message
 import pytest
 import dill
 
@@ -22,8 +26,16 @@ from rachis.plugin import CaptureHolder, Int
 from rachis.sdk import MappedMethod, Results
 from rachis.sdk.context import Context, ParallelContext
 from rachis.sdk.futures import as_future
+from rachis.sdk.mapped import MappedProxyArtifact
 from rachis.sdk.parallel_config import ParallelConfig
 from rachis.sdk.proxy import ProxyArtifact
+
+
+class SerializingExecutor(ThreadPoolExecutor):
+    def submit(self, func, resource_specification, *args, **kwargs):
+        message = pack_apply_message(func, args, kwargs)
+        func, args, kwargs = unpack_apply_message(message)
+        return super().submit(func, resource_specification, *args, **kwargs)
 
 
 @pytest.mark.parametrize('capture_type', [CaptureHolder, CaptureHolder[int]])
@@ -234,7 +246,7 @@ def test_deferred_cells_gather_locally_and_keep_their_workspace():
         def _dispatch_action_(self, frame):
             return frame()
 
-        def _dispatch_cells_(self, cells):
+        def _dispatch_cells_(self, cells, *, cleanup):
             futures = {}
             for coord, cell in cells.items():
                 future = futures[coord] = Future()
@@ -264,7 +276,7 @@ def test_deferred_cells_gather_locally_and_keep_their_workspace():
 
 def test_serialized_cells_resume_at_evaluation():
     class SerializingContext(Context):
-        def _dispatch_cells_(self, cells):
+        def _dispatch_cells_(self, cells, *, cleanup):
             return {
                 coord: as_future(dill.loads(dill.dumps(cell)))
                 for coord, cell in cells.items()
@@ -349,3 +361,161 @@ def test_cell_workspace_is_removed_when_evaluation_fails():
             method._outer_bind(lambda: ObservedContext(method))(data, 1)
     assert workspaces
     assert all(not path.exists() for path in workspaces)
+
+
+@pytest.mark.parametrize('through_pipeline', [False, True])
+def test_parsl_resolves_a_coordinate_through_the_dag_before_batch_exit(
+    through_pipeline,
+):
+    plugin = get_dummy_plugin()
+    pipeline = plugin.pipelines['mapped_sample_pipeline']
+    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '-5'})
+    downstream_committed = Event()
+    order = []
+    invocations = []
+    inner_apply = MappedMethod._inner_apply
+
+    def retain_samples(ctx, data):
+        return ctx.get_action('dummy_plugin', 'filter_samples')(data).retained
+
+    def increment_retained(ctx, data):
+        retained, = ctx.get_action('dummy_plugin', 'retain_samples')(data)
+        increment = ctx.get_action('dummy_plugin', 'increment_samples')
+        intermediate, = increment(retained, 1)
+        return increment(intermediate, 2).output
+
+    @contextmanager
+    def observe_invocation(frame):
+        yield
+        results = frame.results
+        assert isinstance(results, Results)
+        for output in results:
+            assert isinstance(output, MappedProxyArtifact)
+        invocations.append(frame.action.id)
+        if (frame.action.id == 'increment_samples'
+                and frame.bound_arguments['amount'] == 2):
+            ready = results.output._cells['s1',].future
+            ready.add_done_callback(mark_committed)
+
+    def mark_committed(future):
+        future.result()
+        order.append('third-stage s1')
+        downstream_committed.set()
+
+    def batches(ctx, cells):
+        if ctx.action_obj.id == 'filter_samples':
+            yield tuple(cells)
+        else:
+            for cell in cells:
+                yield (cell,)
+
+    def observe_cell(self, frame):
+        coord = frame.coordinate
+        if frame.action.id == 'filter_samples' and coord.sample == 's2':
+            # Block the producer app itself until the third stage commits s1.
+            assert downstream_committed.wait(timeout=10), (
+                'downstream s1 waited for the producer batch')
+            order.append('producer s2')
+        return inner_apply(self, frame)
+
+    with patch.dict(plugin.pipelines), TemporaryDirectory() as run_dir:
+        plugin.pipelines.register_function(
+            retain_samples, inputs={'data': Mapping}, parameters={},
+            outputs={'retained': Mapping}, name='Retain samples',
+            description='',
+        )
+        config = Config(
+            executors=[SerializingExecutor(label='default', max_threads=3)],
+            run_dir=run_dir,
+        )
+        pipeline_body = (increment_retained if through_pipeline
+                         else pipeline._callable)
+        with (patch.object(pipeline, '_callable', pipeline_body),
+              patch.object(ParallelContext, '_batches', batches),
+              patch.object(MappedMethod, 'inner_bind_wrappers',
+                           (observe_invocation,
+                            *MappedMethod.inner_bind_wrappers)),
+              patch.object(MappedMethod, '_inner_apply', observe_cell),
+              ParallelConfig(config)):
+            result = pipeline.parallel(data).output
+
+    assert order == ['third-stage s1', 'producer s2']
+    assert invocations == [
+        'filter_samples', 'increment_samples', 'increment_samples']
+    assert result.view(dict) == {'s1': '7'}
+
+
+def test_parallel_root_cleans_up_mapped_work_after_pipeline_error(tmp_path):
+    pipeline = get_dummy_plugin().pipelines['mapped_sample_pipeline']
+    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
+    commits = []
+
+    def fail_after_dispatch(ctx, data):
+        ctx.get_action('dummy_plugin', 'filter_samples')(data)
+        raise ValueError('pipeline failed after dispatch')
+
+    @contextmanager
+    def observe_commit(frame):
+        yield
+        assert frame.cell.path.is_file()
+        commits.append(frame.cell.path)
+
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    with (patch.object(pipeline, '_callable', fail_after_dispatch),
+          patch.object(MappedMethod, 'inner_apply_wrappers',
+                       (observe_commit, *MappedMethod.inner_apply_wrappers)),
+          ParallelConfig(config)):
+        with pytest.raises(ValueError, match='pipeline failed after dispatch'):
+            pipeline.parallel(data)
+
+        assert len(commits) == 2
+        assert all(not path.parent.exists() for path in commits)
+
+
+def test_parallel_proxy_surfaces_mapped_finalization_error(tmp_path):
+    data = Artifact.import_data('Mapping', {'s1': 'invalid'})
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    with ParallelConfig(config):
+        with (pytest.raises(RuntimeError, match='Mapped cell .* failed'),
+              ParallelContext(None) as ctx):
+            action = ctx.get_action('dummy_plugin', 'filter_samples')
+            result = action(data)
+        with pytest.raises(RuntimeError, match='Mapped cell .* failed'):
+            result.retained.result()
+
+
+def test_batch_continues_after_a_cell_fails(tmp_path):
+    from rachis.sdk.mapped import CellOutcome, read_outcome
+
+    data = Artifact.import_data('Mapping', {'s1': 'invalid', 's2': '4'})
+    outcomes = {}
+
+    @contextmanager
+    def observe_commit(frame):
+        try:
+            yield
+        finally:
+            outcomes[frame.coordinate.sample] = read_outcome(frame.cell.path)
+
+    def one_batch(ctx, cells):
+        yield tuple(cells)
+
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    with (patch.object(ParallelContext, '_batches', one_batch),
+          patch.object(MappedMethod, 'inner_apply_wrappers',
+                       (observe_commit, *MappedMethod.inner_apply_wrappers)),
+          ParallelConfig(config)):
+        with (pytest.raises(RuntimeError, match='Mapped cell.*s1.*failed'),
+              ParallelContext(None) as ctx):
+            ctx.get_action('dummy_plugin', 'filter_samples')(data)
+    assert isinstance(outcomes['s1'], Exception)
+    assert isinstance(outcomes['s2'], CellOutcome)

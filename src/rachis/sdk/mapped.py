@@ -6,9 +6,17 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+"""Mapped binding surrounds Context dispatch with planning and result assembly.
+
+Cell frames resume the ordinary inner-application runner. Its wrappers bind
+realized inputs, open views, and publish cell outcomes. The binding stack joins
+those outcomes locally to assemble artifacts, without dispatching finalization.
+"""
+
 import copy
 import csv
-from concurrent.futures import wait
+from concurrent.futures import Future, wait
+import os
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from itertools import product
@@ -31,7 +39,9 @@ from rachis.sdk.action import (
 )
 from rachis.sdk.plugin_manager import PluginManager
 from rachis.sdk.futures import after_all, join, result_as_future
-from rachis.sdk.proxy import ProxyResult, ProxyResultCollection
+from rachis.sdk.proxy import (
+    ProxyArtifact, ProxyResult, ProxyResultCollection,
+)
 from rachis.sdk.result import Artifact, ResultCollection
 from rachis.sdk.results import Results
 from rachis.sdk.util import Sievable
@@ -55,6 +65,30 @@ class ArtifactCell(CellView):
     def open(self):
         with self.artifact._axis(self.pattern) as (axis, _):
             yield axis[self.coord]
+
+
+class PendingCell:
+    """A prospective input whose presence is determined at execution."""
+
+
+@dataclass(frozen=True)
+class CommittedCell:
+    outcome: object
+    name: str
+
+    def resolve(self):
+        if self.outcome is None:
+            return None
+        return self.outcome.outputs[self.name]
+
+
+@dataclass(frozen=True)
+class CellReference(PendingCell):
+    future: object
+    name: str
+
+    def resolve(self):
+        return CommittedCell(self.future.result(), self.name).resolve()
 
 
 @dataclass(frozen=True)
@@ -104,6 +138,92 @@ class CellFrame(Frame):
 
         self.output_types = parent.output_types
 
+
+def read_outcome(path):
+    with path.open('rb') as stream:
+        return dill.load(stream)
+
+
+def commit_outcome(frame, outcome):
+    """Publish a cell result atomically for readers outside the batch."""
+    path = frame.cell.path
+    with tempfile.TemporaryDirectory(dir=path.parent) as directory:
+        manifest = Path(directory) / 'outcome'
+        with manifest.open('wb') as stream:
+            dill.dump(outcome, stream)
+        try:
+            os.link(manifest, path)
+        except FileExistsError:
+            if isinstance(outcome, CellOutcome):
+                shutil.rmtree(frame.workspace)
+            outcome = read_outcome(path)
+    return outcome
+
+
+class MappedProxyArtifact(ProxyArtifact):
+    def __init__(self, future, selector, qiime_type, pattern, cells):
+        super().__init__(future, selector, qiime_type)
+        self._pattern = pattern
+        self._cells = cells
+
+    def _mapped_cells(self, pattern):
+        if self._future_.done():
+            return None
+        if self._pattern.axes == pattern.axes:
+            return self._cells
+        return None
+
+    def _with_future(self, future, qiime_type):
+        return type(self)(future, None, qiime_type, self._pattern, self._cells)
+
+
+class DeferredProxyArtifact(ProxyArtifact):
+    """An output published before its producing frame returns its proxy."""
+
+    def __init__(self, future, selector, qiime_type, *, source=None):
+        super().__init__(future, selector, qiime_type)
+        self._source = Future() if source is None else source
+
+    def _with_future(self, future, qiime_type):
+        return type(self)(future, None, qiime_type, source=self._source)
+
+    def _coordinate_source(self, pattern):
+        ready = Future()
+
+        def reveal(done):
+            try:
+                source = done.result()
+                if isinstance(source, DeferredProxyArtifact):
+                    source._source.add_done_callback(reveal)
+                    return
+                if isinstance(source, MappedProxyArtifact):
+                    cells = source._mapped_cells(pattern)
+                    if cells is not None:
+                        ready.set_result(MappedProxyArtifact(
+                            self._future_, self._selector_, self.type,
+                            pattern, cells,
+                        ))
+                        return
+                result_as_future(self, into=ready)
+            except BaseException as error:
+                ready.set_exception(error)
+
+        self._source.add_done_callback(reveal)
+        return ready
+
+
+def coordinate_source(value, pattern):
+    """Return a coordinate source or a future for it."""
+    if isinstance(value, DeferredProxyArtifact):
+        return value._coordinate_source(pattern)
+    if (isinstance(value, MappedProxyArtifact)
+            and value._mapped_cells(pattern) is not None):
+        return value
+    if isinstance(value, ProxyResult):
+        return result_as_future(value)
+    return value
+
+
 class MappedProvenance(ActionProvenanceCapture):
     def make_execution_section(self):
         execution = super().make_execution_section()
@@ -124,6 +244,10 @@ def _input_index(value, pattern):
         if value < 0:
             raise ValueError('A mapped integer must be nonnegative')
         return {(i,): i for i in range(value)}
+    if hasattr(value, '_mapped_cells'):
+        cells = value._mapped_cells(pattern)
+        if cells is not None:
+            return cells
     artifact = value.result()
     if not isinstance(artifact, Artifact):
         raise TypeError('ForEach requires an artifact with registered axes')
@@ -153,7 +277,9 @@ def _group_selections(signature, inputs, group):
 def _group_plan(signature, inputs, group):
     selections = _group_selections(signature, inputs, group)
     for bound, selected, missing in selections:
-        _check_required(missing, tuple(bound.values()))
+        if missing and not any(isinstance(value, PendingCell)
+                               for value in selected.values()):
+            _check_required(missing, tuple(bound.values()))
         yield bound, selected
 
 
@@ -198,10 +324,54 @@ def _as_view(value, annotation, name, trace):
         f'No cell transformation from {type(value)} to {annotation}')
 
 
+class _CellComplete(Exception):
+    """Unwind cell binding when no callable evaluation is needed."""
+
+
+@contextmanager
+def cell_commit_wrapper(frame):
+    try:
+        yield
+    except _CellComplete:
+        if frame.cell.path.is_file():
+            frame.results = read_outcome(frame.cell.path)
+            if isinstance(frame.results, Exception):
+                raise frame.results
+            return
+        frame.results = None
+    except Exception as error:
+        commit_outcome(frame, error)
+        raise
+    frame.results = commit_outcome(frame, frame.results)
+    if isinstance(frame.results, Exception):
+        raise frame.results
+
+
+@contextmanager
+def cell_binding_wrapper(frame):
+    if frame.cell.path.is_file():
+        raise _CellComplete
+    frame.bound_arguments = {
+        name: value.resolve()
+        if isinstance(value, (PendingCell, CommittedCell)) else value
+        for name, value in frame.bound_arguments.items()
+    }
+    for group in frame.action.signature.input_groups:
+        present = {name for name in group.inputs
+                   if frame.bound_arguments[name] is not None}
+        missing = group.coverage(present)
+        if missing is None:
+            raise _CellComplete
+        _check_required(missing, frame.coordinate)
+    yield
+
+
 @contextmanager
 def cell_error_wrapper(frame):
     try:
         yield
+    except _CellComplete:
+        raise
     except Exception as error:
         raise RuntimeError(f'Mapped cell {frame.coordinate!r} failed: '
                            f'{error}') from error
@@ -347,6 +517,17 @@ def mapped_plan_wrapper(frame):
 
 
 @contextmanager
+def validate_mapped_coverage_wrapper(frame):
+    # Realized coverage may still reject an invocation with an empty plan.
+    signature = frame.action.signature
+    for group in signature.input_groups:
+        selections = _group_selections(signature, frame.bound_arguments, group)
+        for bound, _, missing in selections:
+            _check_required(missing, tuple(bound.values()))
+    yield
+
+
+@contextmanager
 def archive_mapped_outputs_wrapper(frame):
     yield
 
@@ -391,6 +572,7 @@ def gather_cells_wrapper(frame):
             prepare_callable_arguments_wrapper(completed),
             archive_mapped_outputs_wrapper(completed),
             provenance_wrapper(completed),
+            validate_mapped_coverage_wrapper(completed),
             mapped_transforms_wrapper(completed),
         ):
             completed.results = _write_outputs(completed)
@@ -407,7 +589,18 @@ def gather_cells_wrapper(frame):
         (inputs_ready,
          *(futures[coord] for coord in frame.cells)), assemble, ctx=frame.ctx)
     frame.workspace_cleanup.callback(wait, (future,))
-    frame.results = Results._from_future(future, frame.output_types)
+    outputs = []
+    patterns = frame.action.signature.output_patterns
+    for name, spec in frame.output_types.items():
+        cells = {
+            tuple(cell.outputs[name].values()):
+            CellReference(futures[coord], name)
+            for coord, cell in frame.cells.items()
+        }
+        outputs.append(MappedProxyArtifact(
+            future, name, spec.qiime_type, patterns[name], cells,
+        ))
+    frame.results = Results(frame.output_types, outputs)
 
 
 class MappedMethod(Method):
@@ -421,7 +614,9 @@ class MappedMethod(Method):
         mapped_plan_wrapper,
     )
     inner_apply_wrappers = (
+        cell_commit_wrapper,
         cell_error_wrapper,
+        cell_binding_wrapper,
         cell_workspace_wrapper,
         cell_provenance_wrapper,
         cell_views_wrapper,
@@ -435,5 +630,6 @@ class MappedMethod(Method):
                 coord: CellFrame(frame, cell, frame.axes)
                 for coord, cell in frame.cells.items()
             }
-            frame.results = frame.ctx._dispatch_cells_(cell_frames)
+            frame.results = frame.ctx._dispatch_cells_(
+                cell_frames, cleanup=frame.workspace_cleanup)
         return frame.results
