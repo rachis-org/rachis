@@ -12,6 +12,7 @@ import pandas as pd
 from .format import (
     FourIntsDirectoryFormat,
     MappingDirectoryFormat,
+    OldMappingDirFmt,
     IntSequenceFormat,
     IntSequenceFormatV2,
     IntSequenceDirectoryFormat,
@@ -130,6 +131,13 @@ def _11(data: dict) -> MappingDirectoryFormat:
     df = MappingDirectoryFormat()
     df.mapping.write_data(data, dict)
     return df
+
+
+@dummy_plugin.register_transformer
+def upgrade_mapping_format(old: OldMappingDirFmt) -> MappingDirectoryFormat:
+    current = MappingDirectoryFormat()
+    current.mapping.write_data(old.mapping.view(MappingFormat), MappingFormat)
+    return current
 
 
 @dummy_plugin.register_transformer
