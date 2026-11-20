@@ -265,25 +265,27 @@ class ParallelContext(Context):
 
     def _dispatch_cells_(self, cells, *, cleanup):
         if not cells:
-            return {}
+            return {}, ()
         futures = {coord: Future() for coord in cells}
         pending = {}
+        jobs = []
         try:
             for batch in self._batches(cells):
                 job = _submit_batch(
                     (cells[coord] for coord in batch),
                     self._get_executor(self.action_obj))
+                jobs.append(job)
                 pending.update((cells[coord].cell.path, (futures[coord], job))
                                for coord in batch)
         finally:
-            if pending:
+            if jobs:
                 # A batch can still use the workspace after publishing a cell.
-                cleanup.callback(wait, {job for _, job in pending.values()})
+                cleanup.callback(wait, jobs)
                 watcher = Thread(target=_watch_cell_commits, args=(pending,),
                                  daemon=True)
                 watcher.start()
                 cleanup.callback(watcher.join)
-        return futures
+        return futures, jobs
 
     def _batches(self, cells):
         for coord in cells:

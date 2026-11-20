@@ -27,7 +27,7 @@ from rachis.plugin import CaptureHolder, Int
 from rachis.sdk import MappedMethod, Results
 from rachis.sdk.context import Context, ParallelContext
 from rachis.sdk.context.parallel import _submit_batch
-from rachis.sdk.futures import as_future
+from rachis.sdk.futures import after_all, as_future
 from rachis.sdk.mapped import (
     CellOutcome, CommittedCell, MappedProxyArtifact, commit_outcome,
     read_outcome,
@@ -256,7 +256,7 @@ def test_deferred_cells_gather_locally_and_keep_their_workspace():
             for coord, cell in cells.items():
                 future = futures[coord] = Future()
                 pending.append((cell, future))
-            return futures
+            return futures, ()
 
     with DeferredContext() as ctx:
         with DeferredContext(method, parent=ctx) as child:
@@ -285,7 +285,7 @@ def test_serialized_cells_resume_at_evaluation():
             return {
                 coord: as_future(dill.loads(dill.dumps(cell)))
                 for coord, cell in cells.items()
-            }
+            }, ()
 
     method = get_dummy_plugin().methods['increment_samples']
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
@@ -534,6 +534,64 @@ def test_pending_subset_broadcasts_before_producer_batch_finishes(coverage):
     assert result.view(dict) == expected
 
 
+@pytest.mark.parametrize('coverage', ['optional', 'required'])
+def test_optional_broadcast_does_not_restore_filtered_composite_cells(
+    coverage, tmp_path,
+):
+    retained_called = Event()
+    observed = []
+
+    def filter_scores(
+        data: Annotated[str, ForEach['student', 'assignment']],
+    ) -> Annotated[str | None, ForEach['student', 'assignment']]:
+        if int(data) < 0:
+            assert retained_called.wait(timeout=5)
+            return None
+        return data
+
+    def add_offset(
+        data: Annotated[str | None, ForEach[
+            'student'::coverage, 'assignment'::coverage]],
+        offset: Annotated[str | None, ForEach['sample':'student':'optional']],
+    ) -> Annotated[str, ForEach['student', 'assignment']]:
+        observed.append((data, offset))
+        if data is not None:
+            retained_called.set()
+        return str(int(data or 0) + int(offset or 0))
+
+    plugin = get_dummy_plugin()
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=3)],
+        run_dir=str(tmp_path),
+    )
+    with patch.dict(plugin.methods):
+        plugin.methods.register_function(
+            filter_scores, inputs={'data': AssignmentScores}, parameters={},
+            outputs={'retained': AssignmentScores},
+            name='Filter scores', description='',
+        )
+        plugin.methods.register_function(
+            add_offset, inputs={'data': AssignmentScores, 'offset': Mapping},
+            parameters={}, outputs={'output': AssignmentScores},
+            name='Add an optional offset', description='',
+        )
+        scores = Artifact.import_data(
+            'AssignmentScores', {'s1/a1': '4', 's1/a2': '-5'})
+        offsets = Artifact.import_data('Mapping', {'s1': '10'})
+        with ParallelConfig(config), ParallelContext(None) as ctx:
+            retained = ctx.get_action('dummy_plugin', 'filter_scores')(
+                scores).retained
+            output = ctx.get_action('dummy_plugin', 'add_offset')(
+                retained, offsets).output
+
+    assert observed == [('4', '10')]
+    assert output.view(dict) == {'s1/a1': '14'}
+    records = output._archiver.provenance_dir / 'action' / 'coordinates.tsv'
+    assert records.read_text().splitlines() == [
+        'student\tassignment\tattempt\toutcome', 's1\ta1\t1\tcompleted',
+    ]
+
+
 def test_parallel_root_cleans_up_mapped_work_after_pipeline_error(tmp_path):
     pipeline = get_dummy_plugin().pipelines['mapped_sample_pipeline']
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
@@ -624,6 +682,49 @@ def test_parallel_proxy_surfaces_mapped_finalization_error(tmp_path):
             result.retained.result()
 
 
+def test_late_batch_failure_invalidates_artifacts_after_cell_commit(tmp_path):
+    data = Artifact.import_data('Mapping', {'s1': '4'})
+    consumer_committed = Event()
+    batch_exit = Future()
+    inner_apply = MappedMethod._inner_apply
+
+    def hold_producer_batch_open(cells, executor):
+        cells = tuple(cells)
+        job = _submit_batch(cells, executor)
+        if cells[0].action.id == 'filter_samples':
+            return after_all((job, batch_exit), lambda _: None)
+        return job
+
+    def observe_consumer(self, frame):
+        outcome = inner_apply(self, frame)
+        if self.id == 'increment_samples':
+            consumer_committed.set()
+        return outcome
+
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    with (patch('rachis.sdk.context.parallel._submit_batch',
+                hold_producer_batch_open),
+          patch.object(MappedMethod, '_inner_apply', observe_consumer),
+          ParallelConfig(config)):
+        with (pytest.raises(RuntimeError, match='producer batch failed'),
+              ParallelContext(None) as ctx):
+            producer = ctx.get_action('dummy_plugin', 'filter_samples')(
+                data).retained
+            consumer = ctx.get_action('dummy_plugin', 'increment_samples')(
+                producer, 1).output
+            try:
+                assert consumer_committed.wait(timeout=5)
+            finally:
+                batch_exit.set_exception(RuntimeError('producer batch failed'))
+
+        for output in (producer, consumer):
+            with pytest.raises(RuntimeError, match='producer batch failed'):
+                output.result()
+
+
 def test_batch_continues_after_a_cell_fails(tmp_path):
     data = Artifact.import_data('Mapping', {'s1': 'invalid', 's2': '4'})
     outcomes = {}
@@ -681,7 +782,7 @@ def test_cell_outcomes_are_reused_without_evaluation_or_publication(outcome):
                     assert repeated.result() is None
                 else:
                     assert repeated.result().outputs['output'].load() == '5'
-            return futures
+            return futures, ()
 
     with patch('rachis.sdk.mapped.commit_outcome',
                wraps=commit_outcome) as publish:

@@ -526,7 +526,7 @@ def gather_cells_wrapper(frame):
     # Assembly owns its state while dispatch retains the exterior result.
     completed = copy.copy(frame)
 
-    def assemble(inputs, *outcomes):
+    def assemble(inputs, outcomes, _):
         completed.bound_arguments = inputs
         completed.outcomes = dict(zip(completed.cells, outcomes, strict=True))
         with (
@@ -546,9 +546,12 @@ def gather_cells_wrapper(frame):
     inputs_ready = after_all(
         map(result_as_future, proxies), rebuild_inputs,
     )
+    cells_ready = after_all((futures[coord] for coord in frame.cells), tuple)
+    # Readers can use committed cells while a batch is still running.
+    batches_ready = after_all(frame.batch_futures, lambda _: None)
     future = join(
-        (inputs_ready,
-         *(futures[coord] for coord in frame.cells)), assemble, ctx=frame.ctx)
+        (inputs_ready, cells_ready, batches_ready), assemble, ctx=frame.ctx,
+    )
     frame.workspace_cleanup.callback(wait, (future,))
     outputs = []
     patterns = frame.action.signature.output_patterns
@@ -588,7 +591,7 @@ class MappedMethod(Method):
                 coord: CellFrame(frame, cell, frame.axes)
                 for coord, cell in frame.cells.items()
             }
-            frame.results = frame.ctx._dispatch_cells_(
+            frame.results, frame.batch_futures = frame.ctx._dispatch_cells_(
                 cell_frames, cleanup=frame.workspace_cleanup)
         return frame.results
 
