@@ -65,7 +65,7 @@ def _submit_app(frame, executor):
 
 
 class ParallelContext(Context):
-    execution_ctx = MappingProxyType({'type': 'parsl'})
+    execution_metadata = MappingProxyType({'type': 'parsl'})
 
     def __init__(self, action_obj, parent=None):
         super(ParallelContext, self).__init__(action_obj, parent=parent)
@@ -85,7 +85,7 @@ class ParallelContext(Context):
         # Pipeline bodies keep coordinating locally, as before this refactor.
         # Their child applications still pass through their own outer stacks.
         if isinstance(frame.action, Pipeline):
-            self.execution_ctx = {'type': 'parsl', 'parsl_type': 'DFK'}
+            self.execution_metadata = {'type': 'parsl', 'parsl_type': 'DFK'}
             return frame()
 
         if PARALLEL_CONFIG.parallel_config is None:
@@ -94,7 +94,7 @@ class ParallelContext(Context):
 
         executor = self.action_executor_mapping.get(
             frame.action.plugin_id, {}).get(frame.action.id, 'default')
-        self.execution_ctx = {
+        self.execution_metadata = {
             'type': 'parsl',
             'parsl_type': self.executor_name_type_mapping[executor],
         }

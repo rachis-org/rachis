@@ -18,13 +18,13 @@ def _subprocess_apply(frame):
     # Activate the transported cache so the worker Context uses that cache.
     with frame.ctx.cache:
         ctx = Context(frame.action)
-        ctx.execution_ctx = dict(frame.ctx.execution_ctx)
+        ctx.execution_metadata = dict(frame.ctx.execution_metadata)
         frame.ctx = ctx
         return ctx._dispatch_action_(frame)
 
 
 class AsynchronousContext(Context):
-    execution_ctx = MappingProxyType({'type': 'asynchronous'})
+    execution_metadata = MappingProxyType({'type': 'asynchronous'})
     outer_bind_wrappers = (cache_lookup_wrapper,)
 
     def _dispatch_action_(self, frame):

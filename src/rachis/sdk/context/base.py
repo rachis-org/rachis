@@ -46,7 +46,7 @@ def cache_lookup_wrapper(frame):
 class Context(IContext):
     outer_bind_wrappers = (cache_lookup_wrapper,)
     inner_apply_wrappers = ()
-    execution_ctx = MappingProxyType({'type': 'synchronous'})
+    execution_metadata = MappingProxyType({'type': 'synchronous'})
 
     def __init__(self, action_obj=None, parent=None):
         if parent is not None:
@@ -66,7 +66,7 @@ class Context(IContext):
         self.action_obj = action_obj
         self._parent = parent
         self._scopes = []
-        self.execution_ctx = dict(type(self).execution_ctx)
+        self.execution_metadata = dict(type(self).execution_metadata)
 
     def _dispatch_action_(self, frame):
         return frame()._result()

@@ -421,7 +421,8 @@ class TestActionWrappers(unittest.TestCase):
 
         self.assertEqual(len(contexts), 2)
         self.assertIsNot(contexts[0], contexts[1])
-        self.assertIsNot(contexts[0].execution_ctx, contexts[1].execution_ctx)
+        self.assertIsNot(contexts[0].execution_metadata,
+                         contexts[1].execution_metadata)
 
     def test_serialized_frame_resumes_application_without_rebinding(self):
         @contextmanager

@@ -130,7 +130,7 @@ def prepare_callable_arguments_wrapper(frame):
 def provenance_wrapper(frame):
     action = frame.action
     provenance = frame.provenance = action._ProvCaptureCls(
-        action.type, action.plugin_id, action.id, frame.ctx.execution_ctx)
+        action.type, action.plugin_id, action.id, frame.ctx.execution_metadata)
     inputs = {}
     for name in action.signature.inputs:
         value = frame.transformed_arguments[name]
