@@ -14,6 +14,8 @@ exception after evaluation unwinds. The binding stack joins outcomes locally
 to assemble artifacts, without dispatching finalization.
 """
 
+from __future__ import annotations
+
 import copy
 import csv
 from concurrent.futures import Future, wait
@@ -74,7 +76,7 @@ class PendingCell:
 
 @dataclass(frozen=True)
 class CommittedCell:
-    outcome: object
+    outcome: CellOutcome | None
     name: str
 
     def resolve(self):
@@ -85,7 +87,7 @@ class CommittedCell:
 
 @dataclass(frozen=True)
 class CellReference(PendingCell):
-    future: object
+    future: Future
     name: str
 
     def resolve(self):
@@ -170,7 +172,7 @@ class StoredView(CellView):
 
 @dataclass(frozen=True)
 class CellOutcome:
-    outputs: dict
+    outputs: dict[str, StoredView | None]
     transforms: tuple = ()
 
 
@@ -213,7 +215,8 @@ class MappedProxyArtifact(ProxyArtifact):
         self._cells = cells
 
     def _mapped_cells(self, pattern):
-        if self._future_.done():
+        if (self._future_.done() and not self._future_.cancelled()
+                and self._future_.exception() is None):
             return None
         if self._pattern.axes == pattern.axes:
             return self._cells
