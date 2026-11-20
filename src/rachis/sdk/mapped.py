@@ -10,7 +10,7 @@ import copy
 import csv
 from concurrent.futures import wait
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import product
 from pathlib import Path
 import shutil
@@ -98,7 +98,7 @@ class CellFrame(Frame):
     def __init__(self, parent, cell, axes):
         super().__init__(parent.action, parent.ctx, cell.inputs,
                          phase=FramePhase.INNER_APPLY)
-        self.cell = cell
+        self.cell = replace(cell, inputs={})
         self.coordinate = next(iter(cell.outputs.values()))
         self.axes = axes
 

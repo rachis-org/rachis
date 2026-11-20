@@ -8,6 +8,7 @@
 
 from contextlib import contextmanager
 from concurrent.futures import Future
+from threading import Event, current_thread
 from typing import Annotated
 from unittest.mock import patch
 
@@ -19,8 +20,10 @@ from rachis.core.testing.type import AssignmentScores, Mapping
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.plugin import CaptureHolder, Int
 from rachis.sdk import MappedMethod, Results
-from rachis.sdk.context import Context
+from rachis.sdk.context import Context, ParallelContext
 from rachis.sdk.futures import as_future
+from rachis.sdk.parallel_config import ParallelConfig
+from rachis.sdk.proxy import ProxyArtifact
 
 
 @pytest.mark.parametrize('capture_type', [CaptureHolder, CaptureHolder[int]])
@@ -243,6 +246,61 @@ def test_serialized_cells_resume_at_evaluation():
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
     call = method._outer_bind(lambda: SerializingContext(method))
     assert call(data, 1).output.view(dict) == {'s1': '5', 's2': '6'}
+
+
+def test_parsl_plans_ready_coordinates_before_broadcast_inputs_arrive():
+    source = Future()
+    broadcast = Future()
+    planned = Event()
+    planning_threads = []
+    cell_threads = []
+
+    def add_offsets(
+        data: Annotated[str, ForEach['sample']], offsets: dict,
+    ) -> Annotated[str, ForEach['sample']]:
+        cell_threads.append(current_thread())
+        return str(int(data) + int(offsets['amount']))
+
+    @contextmanager
+    def observe_plan(frame):
+        assert source.done()
+        planning_threads.append(current_thread())
+        planned.set()
+        yield
+
+    plugin = get_dummy_plugin()
+    data = Artifact.import_data(Mapping, {'s1': '4', 's2': '5'})
+    offsets = Artifact.import_data(Mapping, {'amount': '10'})
+    with patch.dict(plugin.methods):
+        plugin.methods.register_function(
+            add_offsets, inputs={'data': Mapping, 'offsets': Mapping},
+            parameters={}, outputs={'output': Mapping},
+            name='Add offsets to samples', description='',
+        )
+        method = plugin.methods['add_offsets']
+        with (
+            patch.object(method, 'inner_bind_wrappers',
+                         (*method.inner_bind_wrappers, observe_plan)),
+            ParallelConfig(),
+            ParallelContext(None) as ctx,
+        ):
+            try:
+                call = ctx.get_action('dummy_plugin', method.id)
+                result = call(ProxyArtifact(source, None, Mapping),
+                              ProxyArtifact(broadcast, None, Mapping))
+                assert not planned.is_set()
+                source.set_result(data)
+                assert planned.wait(timeout=5)
+                assert not cell_threads
+            finally:
+                if not source.done():
+                    source.set_result(data)
+                broadcast.set_result(offsets)
+
+        assert result.output.view(dict) == {'s1': '14', 's2': '15'}
+        assert len(cell_threads) == 2
+        planner, = planning_threads
+        assert planner not in cell_threads
 
 
 def test_cell_workspace_is_removed_when_evaluation_fails():
