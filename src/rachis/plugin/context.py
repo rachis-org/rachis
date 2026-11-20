@@ -9,6 +9,13 @@ import abc
 
 
 class IContext(metaclass=abc.ABCMeta):
+    def __enter__(self):
+        """Open a scope for action calls made through this context."""
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        """Wait for results from this scope and surface any failure."""
+
     @abc.abstractmethod
     def get_action(self, plugin: str, action: str):
         """Return a function matching the callable API of an action.

@@ -81,9 +81,12 @@ class _List(_1DCollectionBase):
         values not its keys.
         """
         from rachis import ResultCollection
+        from rachis.sdk.proxy import ProxyResultCollection
 
         contained_expr = self_expr.fields[0]
 
+        if isinstance(value, ProxyResultCollection):
+            return value.type.fields[0] <= contained_expr
         if isinstance(value, self._view) and len(value) > 0:
             return all(v in contained_expr for v in value)
         # The List's default type is unsurprisingly list, but we also want to
@@ -121,9 +124,12 @@ class _Collection(_1DCollectionBase):
         values not its keys.
         """
         from rachis import ResultCollection
+        from rachis.sdk.proxy import ProxyResultCollection
 
         contained_expr = self_expr.fields[0]
 
+        if isinstance(value, ProxyResultCollection):
+            return value.type.fields[0] <= contained_expr
         if (isinstance(value, ResultCollection) or
                 isinstance(value, self._view)) and len(value) > 0:
             return all(v in contained_expr for v in value.values())

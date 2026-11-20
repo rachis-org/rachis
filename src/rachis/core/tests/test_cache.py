@@ -382,6 +382,7 @@ class TestCache(unittest.TestCase):
         with self.cache:
             with pool:
                 ref = Artifact.import_data(IntSequence1, [0, 1, 2])
+            self.assertIs(get_cache(), self.cache)
 
         uuid = str(ref.uuid)
         self.assertIn(uuid, os.listdir(self.cache.data))
@@ -389,9 +390,15 @@ class TestCache(unittest.TestCase):
 
     def test_pool_no_cache_set(self):
         pool = self.cache.create_pool('pool')
+        restored = dill.loads(dill.dumps(self.cache))
+        default = get_cache()
 
         with pool:
+            with restored:
+                self.assertIs(get_cache(), self.cache)
+            self.assertIs(get_cache(), self.cache)
             ref = Artifact.import_data(IntSequence1, [0, 1, 2])
+        self.assertIs(get_cache(), default)
 
         uuid = str(ref.uuid)
         self.assertIn(uuid, os.listdir(self.cache.data))
@@ -417,6 +424,16 @@ class TestCache(unittest.TestCase):
                                         f'{self.cache.path}'):
                 with cache:
                     pass
+
+    def test_reenter_cache_restores_outer_scope(self):
+        default = get_cache()
+        with self.cache:
+            with self.assertRaisesRegex(ValueError, 'inner cache scope'):
+                with self.cache:
+                    self.assertIs(get_cache(), self.cache)
+                    raise ValueError('inner cache scope')
+            self.assertIs(get_cache(), self.cache)
+        self.assertIs(get_cache(), default)
 
     def test_enter_multiple_pools(self):
         pool1 = self.cache.create_pool('pool1')

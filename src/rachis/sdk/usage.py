@@ -46,6 +46,7 @@ from rachis import sdk
 from rachis.core.type import (
     is_semantic_type, is_visualization_type, is_collection_type
 )
+from rachis.sdk.util import Sievable
 
 
 def assert_usage_var_type(usage_variable, *valid_types):
@@ -312,27 +313,16 @@ class UsageInputs:
         UsageVariable.to_interface_name
         UsageVariable.execute
         """
-        result = {}
+        def mapped(variable):
+            assert_usage_var_type(variable, 'artifact', 'artifact_collection',
+                                  'visualization_collection',
+                                  'metadata', 'column')
+            return function(variable)
 
-        def mapped(v):
-            if isinstance(v, UsageVariable):
-                assert_usage_var_type(v, 'artifact', 'artifact_collection',
-                                      'visualization_collection',
-                                      'metadata', 'column')
-                v = function(v)
-            return v
-
-        for name, value in self.items():
-            if isinstance(value, (list, set)):
-                collection_type = type(value)
-                value = [mapped(v) for v in value]
-                value = collection_type(value)
-            else:
-                value = mapped(value)
-
-            result[name] = value
-
-        return result
+        variables, rebuild = Sievable.sieve(
+            self.values, isinstance=UsageVariable,
+        )
+        return rebuild(map(mapped, variables))
 
 
 class UsageOutputNames:

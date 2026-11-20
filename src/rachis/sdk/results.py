@@ -6,6 +6,12 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+from rachis.sdk.futures import after_all, result_as_future
+from rachis.sdk.proxy import (
+    Proxy, ProxyResult, ProxyResultCollection, output_proxy,
+)
+from rachis.sdk.util import Sievable
+
 
 # This class provides an interface similar to a `namedtuple` type. We can't use
 # `namedtuple` directly because each `Action` will return a `Results` object
@@ -20,6 +26,7 @@ class Results(tuple):
     Provides an interface similar to a ``namedtuple`` type (e.g. fields are
     accessible as attributes).
 
+    Pending outputs are represented by typed proxies.
     Users should not need to instantiate this class directly.
 
     """
@@ -52,6 +59,14 @@ class Results(tuple):
 
         return self
 
+    @classmethod
+    def _from_future(cls, future, signature):
+        outputs = (
+            output_proxy(future, name, spec.qiime_type)
+            for name, spec in signature.items()
+        )
+        return cls(signature, outputs)
+
     def __getnewargs__(self):
         """Arguments to pass to `__new__`. Used by copy and pickle."""
         # `tuple(self)` returns `values`.
@@ -74,10 +89,14 @@ class Results(tuple):
     def __eq__(self, other):
         # Results with different field names should not compare equal, even if
         # their values are equal.
-        return (
-            isinstance(other, Results) and
-            self._fields == other._fields and
-            tuple(self) == tuple(other)
+        if not isinstance(other, Results) or self._fields != other._fields:
+            return False
+        return all(
+            left is right or (
+                not isinstance(left, Proxy) and not isinstance(right, Proxy)
+                and left == right
+            )
+            for left, right in zip(self, other)
         )
 
     def __ne__(self, other):
@@ -111,9 +130,20 @@ class Results(tuple):
     def _asdict(self):
         return dict(zip(self._fields, self))
 
+    def _sieve_proxies(self):
+        return Sievable.sieve(
+            list(self), isinstance=(ProxyResult, ProxyResultCollection),
+        )
+
+    def _futures(self):
+        """Return distinct backing futures in output order."""
+        proxies, _ = Results._sieve_proxies(self)
+        return tuple(dict.fromkeys(proxy._future_ for proxy in proxies))
+
     def _result(self):
-        """ This exists to provide a standardized interface with ProxyResults.
-            Check the 'result' method on ProxyResults for a full
-            explanation.
-        """
-        return self
+        """Return realized results, waiting for completion when needed."""
+        proxies, rebuild = Results._sieve_proxies(self)
+        if not proxies:
+            return self
+        values = after_all(map(result_as_future, proxies), rebuild).result()
+        return type(self)(self._fields, values)

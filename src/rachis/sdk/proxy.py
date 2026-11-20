@@ -7,6 +7,7 @@
 # ----------------------------------------------------------------------------
 
 from rachis.sdk.iresult import IResult
+from rachis.sdk.futures import join, result_as_future
 
 import rachis.core.transform as transform
 from rachis.core.type.util import is_visualization_type, is_collection_type
@@ -23,6 +24,18 @@ class Proxy:
         return not (self == other)
 
 
+def contains_proxy(value):
+    from rachis.sdk.result import ResultCollection
+
+    if isinstance(value, Proxy):
+        return True
+    if isinstance(value, (dict, ResultCollection)):
+        return any(contains_proxy(item) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_proxy(item) for item in value)
+    return False
+
+
 class ProxyResult(Proxy, IResult):
     def __init__(self, future, selector, qiime_type=None):
         """We have a future that represents the results of some QIIME 2 action,
@@ -31,7 +44,6 @@ class ProxyResult(Proxy, IResult):
         self._future_ = future
         self._selector_ = selector
         self._qiime_type_ = qiime_type
-        self._alias_hook = None
 
     def __repr__(self):
         if self._qiime_type_ is None:
@@ -44,25 +56,19 @@ class ProxyResult(Proxy, IResult):
         return hash(self.uuid)
 
     def _alias(self, name, provenance, ctx, qiime_type=None):
-        """We don't want to alias immediately because aliasing is a blocking
-        operation. Calling alias on a Proxy adds a hook that will create the
-        alias when the result on the Proxy is requested
-        """
         if self._qiime_type_ is not None:
             self._assert_alias_type_refines_realized_type(
                 qiime_type, self._qiime_type_)
 
-        alias_type = (
-            qiime_type if qiime_type is not None else self._qiime_type_
-        )
+        future = join(
+            (result_as_future(self),),
+            lambda result: result._alias(name, provenance, ctx, qiime_type),
+            ctx=ctx)
+        alias_type = self._qiime_type_ if qiime_type is None else qiime_type
+        return self._with_future(future, alias_type)
 
-        def _alias_hook():
-            result = new._get_element_(new._future_.result())
-            return result._alias(name, provenance, ctx, qiime_type)
-
-        new = self.__class__(self._future_, self._selector_, alias_type)
-        new._alias_hook = _alias_hook
-        return new
+    def _with_future(self, future, qiime_type):
+        return self.__class__(future, None, qiime_type)
 
     @property
     def _archiver(self):
@@ -91,10 +97,6 @@ class ProxyResult(Proxy, IResult):
         return self._archiver.citations
 
     def result(self):
-        if self._alias_hook:
-            # Create our alias on result request if a hook has been added
-            return self._alias_hook()
-
         return self._get_element_(self._future_.result())
 
     def _get_element_(self, results):
@@ -204,96 +206,18 @@ class ProxyResultCollection(Proxy):
     def _get_element_(self, results):
         """Get the result we want off of the future we have
         """
+        # Pipeline aliases have their own future for the collection.
+        if self._selector_ is None:
+            return results
         return getattr(results, self._selector_)
 
     def result(self):
         return self._get_element_(self._future_.result())
 
 
-class ProxyResults(Proxy):
-    """This represents future results that are being returned by a Parsl app
-    """
-    def __init__(self, future, signature):
-        """We have the future results and the outputs portion of the signature
-        of the action creating the results
-        """
-        self._future_ = future
-        self._signature_ = signature
-
-    def __iter__(self):
-        """Give us a ProxyArtifact for each result in the future
-        """
-        for s in self._signature_:
-            yield self._create_proxy(s)
-
-    def __getattr__(self, attr):
-        """Get a particular ProxyArtifact out of the future
-        """
-        return self._create_proxy(attr)
-
-    def __getitem__(self, index):
-        return self._create_proxy(list(self._signature_.keys())[index])
-
-    def __repr__(self):
-        lines = []
-        lines.append('%s (name = value)' % self.__class__.__name__)
-        lines.append('')
-
-        max_len = -1
-        for field in self._signature_:
-            if len(field) > max_len:
-                max_len = len(field)
-
-        for field, value in zip(self._signature_, self):
-            field_padding = ' ' * (max_len - len(field))
-            lines.append('%s%s = %r' % (field, field_padding, value))
-
-        max_len = -1
-        for line in lines:
-            if len(line) > max_len:
-                max_len = len(line)
-        lines[1] = '-' * max_len
-
-        return '\n'.join(lines)
-
-    def __eq__(self, other):
-        """ Overriding the one on Proxy because we have _result not result
-        """
-        return self._result() == other._result()
-
-    def _asdict(self):
-        return self.result()._asdict()
-
-    def _result(self):
-        """If you are calling an action in a try-except block in a pipeline,
-           you need to call this method on the Results object returned by the
-           action.
-
-           This is because if the Pipeline was executed with parsl, we need to
-           block on the action in the try-except to ensure we get the result
-           and raise the potential exception while we are still inside of the
-           try-except. Otherwise we would just get the exception whenever the
-           future resolved which would likely be outside of the try-except, so
-           the exception would be raised and not caught.
-
-           If you call an action in the Python API using parsl inside of a
-           context manager (a withed in Cache for instance) you also must call
-           this method there to ensure you get you don't start using a
-           different cache/pool/whatever before your future resolves.
-        """
-        return self._future_.result()
-
-    def _create_proxy(self, selector):
-        """Create a ProxyResult for the element of the ProxyResults being
-           requested
-        """
-        qiime_type = self._signature_[selector].qiime_type
-
-        if is_collection_type(qiime_type):
-            return ProxyResultCollection(
-                self._future_, selector, qiime_type)
-        elif is_visualization_type(qiime_type):
-            return ProxyVisualization(
-                self._future_, selector, qiime_type)
-
-        return ProxyArtifact(self._future_, selector, qiime_type)
+def output_proxy(future, selector, qiime_type):
+    if is_collection_type(qiime_type):
+        return ProxyResultCollection(future, selector, qiime_type)
+    if is_visualization_type(qiime_type):
+        return ProxyVisualization(future, selector, qiime_type)
+    return ProxyArtifact(future, selector, qiime_type)

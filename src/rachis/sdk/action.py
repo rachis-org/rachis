@@ -6,10 +6,13 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
-import abc
+import copy
 import inspect
 import tempfile
 import textwrap
+from contextlib import contextmanager, ExitStack
+from enum import Enum
+from itertools import chain
 from types import FunctionType
 
 import dill
@@ -18,37 +21,226 @@ from typing import Mapping, TypedDict, Union
 from types import MappingProxyType
 
 import rachis.sdk
+from rachis.sdk.futures import as_future, join, result_as_future
+from rachis.sdk.iresult import IResult
+from rachis.sdk.proxy import (
+    ProxyResult, ProxyResultCollection, contains_proxy, output_proxy,
+)
 from rachis.sdk.result import Artifact, ResultCollection, ChecksumCache
+from rachis.sdk.results import Results
 import rachis.core.type as qtype
+from rachis.core.type.util import contains_generic_base
 import rachis.core.archive as archive
 from rachis.core.util import (LateBindingAttribute, tuplize,
                               create_collection_name)
 from rachis.core.cite import CitationRecord
 
 
-def _coerce_pipeline_outputs(ctx, outputs):
-    """Ensure all futures are resolved and all collections are of type
-       ResultCollection
+class FramePhase(Enum):
+    INNER_APPLY = 'inner_apply'
+    FINISHED = 'finished'
+
+
+class Frame:
+    """Serializable continuation and runtime state for one application.
+
+    Binding establishes the inputs and next phase before dispatch. The
+    receiving Context calls the frame to enter that phase's wrapper stack.
+    Live stacks and resources belong to the process applying the frame.
     """
-    coerced_outputs = []
 
-    for output in outputs:
-        # Ensure collection outputs are ResultCollection
-        if isinstance(output, dict) or isinstance(output, list):
-            output = rachis.sdk.ResultCollection(output)
+    def __init__(self, action, ctx, bound_arguments, *, phase):
+        self.action = action
+        self.ctx = ctx
+        self.bound_arguments = bound_arguments
+        self.phase = phase
+        self.transformed_arguments = None
+        self.output_types = None
+        self.results = None
+        self.provenance = None
+        self.ready_provenance = None
 
-        # Handle proxy outputs if root
-        if ctx._parent is None and output is not None:
-            output = output.result()
+    def __call__(self):
+        phase = self.phase
+        self.phase = FramePhase.FINISHED
+        match phase:
+            case FramePhase.INNER_APPLY:
+                return self.action._inner_apply(self)
+            case FramePhase.FINISHED:
+                raise RuntimeError('Cannot call a finished frame')
+            case _:
+                raise ValueError(f'Unknown frame phase: {phase!r}')
 
-            # Handle proxies as elements of collections
-            if isinstance(output, rachis.sdk.ResultCollection):
-                for key, value in output.items():
-                    output[key] = value.result()
 
-        coerced_outputs.append(output)
+@contextmanager
+def track_results_wrapper(frame):
+    yield
+    # Observe the exterior result after all result adapters have unwound.
+    frame.ctx._track_results(frame.results)
 
-    return tuple(coerced_outputs)
+
+@contextmanager
+def deprecation_wrapper(frame):
+    action = frame.action
+    if action.deprecated:
+        with rachis.core.util.warning() as warn:
+            warn(action._build_deprecation_message(), FutureWarning)
+    if action.migrated:
+        with rachis.core.util.warning() as warn:
+            warn(action._build_migration_message(), FutureWarning)
+    yield
+
+
+@contextmanager
+def bind_signature_wrapper(frame):
+    signature = frame.action.signature
+    arguments = frame.bound_arguments
+    signature.check_types(**arguments)
+    frame.output_types = signature.solve_output(**arguments)
+    frame.bound_arguments = signature.normalize_arguments(**arguments)
+    yield
+
+
+@contextmanager
+def prepare_callable_arguments_wrapper(frame):
+    signature = frame.action.signature
+    arguments = frame.transformed_arguments = frame.bound_arguments.copy()
+    for name, spec in signature.inputs.items():
+        argument = arguments[name]
+        if isinstance(argument, ProxyResultCollection):
+            argument = argument.result()
+        if isinstance(argument, ResultCollection):
+            if not argument:
+                raise TypeError(
+                    f'Parameter {name!r} received an empty collection.')
+            arguments[name] = signature._shape_collection_input(argument, spec)
+    yield
+
+
+@contextmanager
+def provenance_wrapper(frame):
+    action = frame.action
+    provenance = frame.provenance = action._ProvCaptureCls(
+        action.type, action.plugin_id, action.id, frame.ctx.execution_metadata)
+    inputs = {}
+    for name in action.signature.inputs:
+        value = frame.transformed_arguments[name]
+        if isinstance(value, ResultCollection):
+            value = ResultCollection(dict(value.items()))
+        elif isinstance(value, (list, set)):
+            value = value.copy()
+        inputs[name] = value
+    for name, spec in action.signature.parameters.items():
+        provenance.add_parameter(name, spec.qiime_type,
+                                 frame.bound_arguments[name])
+
+    yield
+
+    def record_inputs(*values):
+        cache = ChecksumCache()
+        for name, value in zip(inputs, values):
+            if isinstance(value, Artifact):
+                cache.cache_artifact(value)
+            elif isinstance(value, ResultCollection):
+                cache.cache_result_collection(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Artifact):
+                        cache.cache_artifact(item)
+            provenance.add_input(name, value)
+        return provenance
+
+    if contains_proxy(inputs):
+        frame.ready_provenance = join(
+            map(result_as_future, inputs.values()), record_inputs,
+            ctx=frame.ctx)
+    else:
+        frame.ready_provenance = as_future(
+            lambda: record_inputs(*inputs.values()))
+
+
+@contextmanager
+def input_transform_wrapper(frame):
+    signature = frame.action.signature
+    arguments = frame.transformed_arguments
+    recorder_for = frame.provenance.transformation_recorder
+
+    for name in signature.inputs:
+        arguments[name] = signature._transform_input(
+            name, arguments[name], recorder_for)
+    yield
+
+
+@contextmanager
+def capture_holders_wrapper(frame):
+    arguments = frame.transformed_arguments
+    captures = []
+    for name, spec in frame.action.signature.parameters.items():
+        if contains_generic_base(qtype.CaptureHolder, spec.view_type):
+            capture = qtype.CaptureHolder(
+                name, arguments[name], spec.qiime_type, frame.provenance)
+            arguments[name] = capture
+            captures.append(capture)
+
+    yield
+
+    for capture in captures:
+        if not capture.is_set:
+            raise ValueError(
+                f"The capture parameter '{capture._name}' never had a "
+                "value set for it"
+            )
+
+
+def checked_return_values(value, expected):
+    values = tuplize(value)
+    actual = len(values)
+    if actual != expected:
+        raise TypeError(
+            "Number of returned values must match number of outputs: "
+            f"{actual} != {expected}")
+    return values
+
+
+@contextmanager
+def method_output_wrapper(frame):
+    yield
+    views = checked_return_values(frame.results, len(frame.output_types))
+    provenance = frame.ready_provenance.result()
+    outputs = frame.action.signature.coerce_given_outputs(
+        views, frame.output_types, frame.ctx, provenance.fork)
+    frame.results = Results(frame.output_types, outputs)
+
+
+@contextmanager
+def visualization_wrapper(frame):
+    with tempfile.TemporaryDirectory(prefix='rachis-temp-') as temp_dir:
+        frame.transformed_arguments['output_dir'] = temp_dir
+        yield
+        if frame.results is not None:
+            raise TypeError(
+                "Visualizer %r should not return anything. "
+                "Received %r as a return value."
+                % (frame.action, frame.results))
+        provenance = frame.ready_provenance.result()
+        visualization = rachis.sdk.Visualization._from_data_dir(
+            temp_dir, provenance.fork('visualization'))
+        frame.results = Results(
+            frame.output_types, (frame.ctx.add_reference(visualization),))
+
+
+def _validate_pipeline_output(output):
+    if isinstance(output, (dict, list)):
+        output = ResultCollection(output)
+    if isinstance(output, ProxyResultCollection):
+        return output
+    values = output.values() if isinstance(output, ResultCollection) else (
+        output,)
+    for value in values:
+        if not isinstance(value, IResult):
+            raise TypeError(f'Pipelines must return `Result` objects, '
+                            f'not {type(value)}')
+    return output
 
 
 def _intersect_pipeline_output_type(expected, output_type, output_name):
@@ -60,6 +252,58 @@ def _intersect_pipeline_output_type(expected, output_type, output_name):
     raise TypeError(
         "Expected output %s to be of type %r, received %r"
         % (output_name, expected, output_type))
+
+
+def _alias_pipeline_output(name, qiime_type, output, provenance, ctx):
+    if qiime_type.name == 'Collection':
+        aliased = ResultCollection()
+        size = len(output)
+        for idx, (key, value) in enumerate(output.items()):
+            member = create_collection_name(name=name, key=key,
+                                            idx=idx, size=size)
+            refined_type = _intersect_pipeline_output_type(
+                qiime_type.fields[0], value.type,
+                "%r member %r" % (name, key))
+            aliased[str(key)] = value._alias(
+                member, provenance, ctx, refined_type)
+        return aliased
+    refined_type = _intersect_pipeline_output_type(
+        qiime_type, output.type, repr(name))
+    return output._alias(name, provenance, ctx, refined_type)
+
+
+@contextmanager
+def pipeline_call_wrapper(frame):
+    frame.transformed_arguments['ctx'] = frame.ctx
+    yield
+
+    outputs = checked_return_values(frame.results, len(frame.output_types))
+    frame.results = tuple(map(_validate_pipeline_output, outputs))
+
+
+@contextmanager
+def pipeline_alias_wrapper(frame):
+    yield
+
+    ctx = frame.ctx
+    proxies = {}
+    for output, (name, spec) in zip(frame.results, frame.output_types.items()):
+        qiime_type = spec.qiime_type
+
+        def alias(resolved, provenance, name=name, qiime_type=qiime_type):
+            return _alias_pipeline_output(
+                name, qiime_type, resolved, provenance, ctx)
+
+        future = join((result_as_future(output), frame.ready_provenance),
+                      alias, ctx=ctx)
+        if isinstance(output, ProxyResult):
+            refined_type = _intersect_pipeline_output_type(
+                qiime_type, output.type, repr(name))
+            proxies[name] = output._with_future(future, refined_type)
+        else:
+            proxies[name] = output_proxy(future, None, qiime_type)
+
+    frame.results = Results(proxies, proxies.values())
 
 
 # TODO: validation on these params via data.yaml in distributions
@@ -97,27 +341,25 @@ def _validate_and_freeze_migrated(migrated: Union[bool, Mapping[str, str]]):
     return MappingProxyType(normalized)
 
 
-class Action(metaclass=abc.ABCMeta):
+class Action:
     """QIIME 2 Action"""
     type = 'action'
     _ProvCaptureCls = archive.ActionProvenanceCapture
+    _initial_frame_phase = FramePhase.INNER_APPLY
+
+    # Outer wrappers run where an application is requested. Inner wrappers run
+    # where its callable is evaluated. Context wrappers enter after the
+    # action's wrappers in each stack.
+    outer_bind_wrappers = (
+        track_results_wrapper,
+        deprecation_wrapper,
+        bind_signature_wrapper,
+    )
+    inner_apply_wrappers = (prepare_callable_arguments_wrapper,)
 
     __call__ = LateBindingAttribute('_dynamic_call')
     asynchronous = LateBindingAttribute('_dynamic_async')
     parallel = LateBindingAttribute('_dynamic_parsl')
-
-    # Executes a callable on the provided `view_args`, wrapping and returning
-    # the callable's outputs. In other words, executes the "view API", wrapping
-    # and returning the outputs as the "artifact API". `view_args` is a dict
-    # mapping parameter name to unwrapped value (i.e. view). `view_args`
-    # contains an entry for each parameter accepted by the wrapper. It is the
-    # executor's responsibility to perform any additional transformations on
-    # these parameters, or provide extra parameters, in order to execute the
-    # callable. `output_types` is an OrderedDict mapping output name to QIIME
-    # type (e.g. semantic type).
-    @abc.abstractmethod
-    def _callable_executor_(self, ctx, view_args, output_types):
-        raise NotImplementedError
 
     # Private constructor
     @classmethod
@@ -170,9 +412,10 @@ class Action(metaclass=abc.ABCMeta):
 
         self.id = callable.__name__
         self._wrapper_signature = self.signature.to_inspect_signature()
-        self._dynamic_call = self._callable_action_wrapper()
-        self._dynamic_async = self._get_async_wrapper()
-        # This a temp thing to play with parsl before integrating more deeply
+        self._dynamic_call = self._outer_bind(
+            lambda: rachis.sdk.Context(self), name='__call__')
+        self._dynamic_async = self._outer_bind(
+            lambda: rachis.sdk.AsynchronousContext(self), name='asynchronous')
         self._dynamic_parsl = self._get_parsl_wrapper()
 
     def _validate_capture_holders(self, signature):
@@ -245,143 +488,52 @@ class Action(metaclass=abc.ABCMeta):
     def __setstate__(self, state):
         self.__init(**dill.loads(state))
 
-    def _bind(self, context_factory, execution_ctx={'type': 'synchronous'}):
-        """Bind an action to a Context factory, returning a decorated function.
-
-        This is a very primitive API and should be used primarily by the
-        framework and very advanced interfaces which need deep control over
-        the calling semantics of pipelines and garbage collection.
-
-        The basic idea behind this is outlined as follows:
-
-        Every action is defined as an *instance* that a plugin constructs.
-        This means that `self` represents the internal details as to what
-        the action is. If you need to associate additional state with the
-        *application* of an action, you cannot mutate `self` without
-        changing all future applications. So there needs to be an
-        additional instance variable that can serve as the state of a given
-        application. We call this a Context object. It is also important
-        that each application of an action has *independent* state, so
-        providing an instance of Context won't work. We need a factory.
-
-        Parameterizing the context is necessary because it is possible for
-        an action to call other actions. The details need to be coordinated
-        behind the scenes to the user, so we can parameterize the behavior
-        by providing different context factories to `bind` at different
-        points in the "call stack".
-
-        """
+    def _outer_bind(self, context_factory, *, name=None):
+        """Build the callable that enters the outer stack and dispatches."""
         def bound_callable(*args, **kwargs):
+            bound = self._wrapper_signature.bind(*args, **kwargs)
+            bound.apply_defaults()
             ctx = context_factory()
-            provenance = self._ProvCaptureCls(
-                self.type, self.plugin_id, self.id, execution_ctx)
+            frame = Frame(self, ctx, bound.arguments,
+                          phase=self._initial_frame_phase)
 
-            if self.deprecated:
-                with rachis.core.util.warning() as warn:
-                    warn(self._build_deprecation_message(), FutureWarning)
+            with ExitStack() as wrappers:
+                for wrapper in chain(self.outer_bind_wrappers,
+                                     ctx.outer_bind_wrappers):
+                    wrappers.enter_context(wrapper(frame))
+                if frame.results is None:
+                    # Dispatch owns the continuation while outer wrappers
+                    # observe the caller-facing result on this frame.
+                    frame.results = ctx._dispatch_action_(copy.copy(frame))
 
-            if self.migrated:
-                with rachis.core.util.warning() as warn:
-                    warn(self._build_migration_message(), FutureWarning)
+            return frame.results
 
-            # Type management
-            collated_inputs = self.signature.collate_inputs(*args, **kwargs)
-            self.signature.check_types(**collated_inputs)
-            output_types = self.signature.solve_output(**collated_inputs)
-            callable_args = self.signature.coerce_user_input(**collated_inputs)
-
-            # validate and cache checksums
-            checksum_cache = ChecksumCache()
-            for input in collated_inputs.values():
-                if isinstance(input, Artifact):
-                    checksum_cache.cache_artifact(input)
-                elif isinstance(input, ResultCollection):
-                    checksum_cache.cache_result_collection(input)
-
-            callable_args, captures = \
-                self.signature.transform_and_add_callable_args_to_prov(
-                    provenance, **callable_args)
-
-            outputs = self._callable_executor_(
-                ctx, callable_args, output_types, provenance)
-
-            self._ensure_captures_set(captures)
-
-            if len(outputs) != len(self.signature.outputs):
-                raise ValueError(
-                    "Number of callable outputs must match number of "
-                    "outputs defined in signature: %d != %d" %
-                    (len(outputs), len(self.signature.outputs)))
-
-            # Wrap in a Results object mapping output name to value so
-            # users have access to outputs by name or position.
-            results = rachis.sdk.Results(
-                self.signature.outputs.keys(), outputs)
-
-            return results
-
-        bound_callable = self._rewrite_wrapper_signature(bound_callable)
         self._set_wrapper_properties(bound_callable)
-        self._set_wrapper_name(bound_callable, self.id)
+        self._set_wrapper_name(bound_callable, name or self.id)
         return bound_callable
 
-    def _ensure_captures_set(self, captures):
-        '''
-        Ensure all capture parameters have a value set. Either passed in by the
-        caller or captured in the Action.
-
-        captures : List[Str]
-            List of all params that are CaptureHolders
-
-        Raises : ValueError
-            If the CaptureHolder never had a value set
-        '''
-        for capture in captures:
-            if not capture.is_set:
-                raise ValueError(
-                    f"The capture parameter '{capture._name}' never had a "
-                    "value set for it"
-                )
-
-    def _callable_action_wrapper(self):
-        # This is a "root" level invocation (not a nested call within a
-        # pipeline), so no special factory is needed.
-        callable_wrapper = self._bind(lambda: rachis.sdk.Context(self))
-        self._set_wrapper_name(callable_wrapper, '__call__')
-        return callable_wrapper
-
-    def _get_async_wrapper(self):
-        def async_wrapper(*args, **kwargs):
-            return rachis.sdk.AsynchronousContext(self)._dispatch_(
-                *args, **kwargs)
-
-        async_wrapper = self._rewrite_wrapper_signature(async_wrapper)
-        self._set_wrapper_properties(async_wrapper)
-        self._set_wrapper_name(async_wrapper, 'asynchronous')
-        return async_wrapper
+    def _inner_apply(self, frame):
+        """Execute a prepared application in its execution Context."""
+        wrappers = chain(self.inner_apply_wrappers,
+                         frame.ctx.inner_apply_wrappers)
+        with ExitStack() as stack:
+            for wrapper in wrappers:
+                stack.enter_context(wrapper(frame))
+            frame.results = self._callable(**frame.transformed_arguments)
+        return frame.results
 
     def _get_parsl_wrapper(self):
         def parsl_wrapper(*args, **kwargs):
-            # TODO: Maybe make this a warning instead?
             if not isinstance(self, Pipeline):
                 raise ValueError('Only pipelines may be run in parallel')
+            with rachis.sdk.ParallelContext(self) as ctx:
+                call = self._outer_bind(lambda: ctx)
+                results = call(*args, **kwargs)
+            return results._result()
 
-            # TODO: could call callable_action here instead and do index check
-            return rachis.sdk.ParallelContext(self)._dispatch_(*args, **kwargs)
-
-        parsl_wrapper = self._rewrite_wrapper_signature(parsl_wrapper)
         self._set_wrapper_properties(parsl_wrapper)
-        self._set_wrapper_name(parsl_wrapper, 'parsl')
+        self._set_wrapper_name(parsl_wrapper, 'parallel')
         return parsl_wrapper
-
-    def _rewrite_wrapper_signature(self, wrapper):
-        def signature_wrapper(*args, **kwargs):
-            bound = self._wrapper_signature.bind(*args, **kwargs)
-            # ensures that provenance has all default arguments.
-            bound.apply_defaults()
-            return wrapper(*bound.args, **bound.kwargs)
-
-        return signature_wrapper
 
     def _set_wrapper_name(self, wrapper, name):
         wrapper.__name__ = wrapper.__qualname__ = name
@@ -477,30 +629,13 @@ class Method(Action):
 
     type = 'method'
 
-    # Abstract method implementations:
-
-    def _callable_executor_(self, ctx, view_args, output_types, provenance):
-        output_views = self._callable(**view_args)
-        output_views = tuplize(output_views)
-
-        # TODO this won't work if the user has annotated their "view API" to
-        # return a `typing.Tuple` with some number of components. Python will
-        # return a tuple when there are multiple return values, and this length
-        # check will fail because the tuple as a whole should be matched up to
-        # a single output type instead of its components. This is an edgecase
-        # due to how Python handles multiple returns, and can be worked around
-        # by using something like `typing.List` instead.
-        if len(output_views) != len(output_types):
-            raise TypeError(
-                "Number of output views must match number of output "
-                "semantic types: %d != %d"
-                % (len(output_views), len(output_types)))
-
-        output_artifacts = \
-            self.signature.coerce_given_outputs(output_views, output_types,
-                                                ctx, provenance)
-
-        return tuple(output_artifacts)
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
+        method_output_wrapper,
+        provenance_wrapper,
+        input_transform_wrapper,
+        capture_holders_wrapper,
+    )
 
     @classmethod
     def _init(
@@ -533,21 +668,13 @@ class Visualizer(Action):
 
     type = 'visualizer'
 
-    # Abstract method implementations:
-
-    def _callable_executor_(self, ctx, view_args, output_types, provenance):
-        with tempfile.TemporaryDirectory(prefix='rachis-temp-') as temp_dir:
-            ret_val = self._callable(output_dir=temp_dir, **view_args)
-            if ret_val is not None:
-                raise TypeError(
-                    "Visualizer %r should not return anything. "
-                    "Received %r as a return value." % (self, ret_val))
-            provenance.output_name = 'visualization'
-            viz = rachis.sdk.Visualization._from_data_dir(temp_dir,
-                                                          provenance)
-            viz = ctx.add_reference(viz)
-
-            return (viz, )
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
+        visualization_wrapper,
+        provenance_wrapper,
+        input_transform_wrapper,
+        capture_holders_wrapper,
+    )
 
     @classmethod
     def _init(cls, callable, inputs, parameters, plugin_id, name, description,
@@ -565,72 +692,13 @@ class Pipeline(Action):
     type = 'pipeline'
     _ProvCaptureCls = archive.PipelineProvenanceCapture
 
-    def _callable_executor_(self, ctx, view_args, output_types, provenance):
-        outputs = self._callable(ctx, **view_args)
-        # Just make sure we have an iterable even if there was only one output
-        outputs = tuplize(outputs)
-
-        # Make sure any collections returned are in the form of
-        # ResultCollections and resolve proxies if this is the root pipeline
-        outputs = _coerce_pipeline_outputs(ctx, outputs)
-
-        # This condition *is* tested by the caller of _callable_executor_, but
-        # the kinds of errors a plugin developer see will make more sense if
-        # this check happens before the subtype check. Otherwise forgetting an
-        # output would more likely error as a wrong type, which while correct,
-        # isn't root of the problem.
-        if len(outputs) != len(output_types):
-            raise TypeError(
-                "Number of outputs must match number of output "
-                "semantic types: %d != %d"
-                % (len(outputs), len(output_types)))
-
-        message = "Pipelines must return `Result` objects, not %s"
-        for output in outputs:
-            if isinstance(output, rachis.sdk.ResultCollection):
-                for elem in output.values():
-                    if not isinstance(elem, rachis.sdk.IResult):
-                        raise TypeError(message % type(elem))
-            elif not isinstance(output, rachis.sdk.IResult):
-                raise TypeError(message % type(output))
-
-        results = []
-
-        # If we don't have a Collection, we should have a Result, if we
-        # have neither, or our types can't be reconciled, something bad
-        # happened
-        for output, (name, spec) in zip(outputs, output_types.items()):
-            if spec.qiime_type.name == 'Collection':
-                size = len(output)
-                aliased_output = rachis.sdk.ResultCollection()
-                element_type = spec.qiime_type.fields[0]
-
-                for idx, (key, value) in enumerate(output.items()):
-                    collection_name = create_collection_name(
-                        name=name, key=key, idx=idx, size=size)
-                    refined_type = _intersect_pipeline_output_type(
-                        element_type, value.type, "%r member %r" % (name, key))
-                    aliased_result = \
-                        value._alias(collection_name, provenance, ctx,
-                                     refined_type)
-
-                    aliased_output[str(key)] = aliased_result
-                results.append(aliased_output)
-            else:
-                refined_type = _intersect_pipeline_output_type(
-                    spec.qiime_type, output.type, repr(name))
-                aliased_result = output._alias(
-                    name, provenance, ctx, refined_type)
-
-                results.append(aliased_result)
-
-        if len(results) != len(self.signature.outputs):
-            raise ValueError(
-                "Number of callable outputs must match number of "
-                "outputs defined in signature: %d != %d" %
-                (len(results), len(self.signature.outputs)))
-
-        return tuple(results)
+    inner_apply_wrappers = (
+        *Action.inner_apply_wrappers,
+        pipeline_alias_wrapper,
+        provenance_wrapper,
+        pipeline_call_wrapper,
+        capture_holders_wrapper,
+    )
 
     @classmethod
     def _init(cls, callable, inputs, parameters, outputs, plugin_id, name,
