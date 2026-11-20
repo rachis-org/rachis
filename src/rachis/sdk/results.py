@@ -7,7 +7,9 @@
 # ----------------------------------------------------------------------------
 
 from rachis.sdk.futures import after_all, result_as_future
-from rachis.sdk.proxy import ProxyResult, ProxyResultCollection, output_proxy
+from rachis.sdk.proxy import (
+    Proxy, ProxyResult, ProxyResultCollection, output_proxy,
+)
 from rachis.sdk.util import Sievable
 
 
@@ -87,11 +89,15 @@ class Results(tuple):
     def __eq__(self, other):
         # Results with different field names should not compare equal, even if
         # their values are equal.
-        if not isinstance(other, Results):
+        if not isinstance(other, Results) or self._fields != other._fields:
             return False
-        left = self._result()
-        right = other._result()
-        return left._fields == right._fields and tuple(left) == tuple(right)
+        return all(
+            left is right or (
+                not isinstance(left, Proxy) and not isinstance(right, Proxy)
+                and left == right
+            )
+            for left, right in zip(self, other)
+        )
 
     def __ne__(self, other):
         return not (self == other)
@@ -122,8 +128,7 @@ class Results(tuple):
         return '\n'.join(lines)
 
     def _asdict(self):
-        result = self._result()
-        return dict(zip(result._fields, result))
+        return dict(zip(self._fields, self))
 
     def _sieve_proxies(self):
         return Sievable.sieve(

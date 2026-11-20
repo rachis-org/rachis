@@ -10,6 +10,7 @@ import pickle
 import unittest
 from concurrent.futures import Future
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from rachis.core.testing.type import IntSequence1
 from rachis.sdk import Results
@@ -90,12 +91,24 @@ class TestResults(unittest.TestCase):
         self.assertIs(left.type, IntSequence1)
 
         realized = Results(signature, [42, 43])
+        with (
+            patch.object(Results, '_result', side_effect=AssertionError),
+            patch.object(ProxyArtifact, 'result', side_effect=AssertionError),
+        ):
+            outputs = pending._asdict()
+            self.assertIs(outputs['left'], left)
+            self.assertIs(outputs['right'], right)
+            self.assertEqual(pending, Results(signature, [left, right]))
+            self.assertNotEqual(pending,
+                                Results._from_future(future, signature))
+            self.assertNotEqual(pending, Results(['other'], [left]))
+            self.assertNotEqual(pending, realized)
+            self.assertNotEqual(realized, pending)
+
         future.set_result(realized)
         self.assertEqual(Results._futures(pending), (future,))
         self.assertEqual(pending._result(), realized)
-        self.assertEqual(pending._asdict(), {'left': 42, 'right': 43})
-        self.assertEqual(pending, realized)
-        self.assertEqual(realized, pending)
+        self.assertNotEqual(pending, realized)
         self.assertEqual(left.result(), 42)
         self.assertEqual(right.result(), 43)
 
