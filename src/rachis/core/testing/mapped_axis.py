@@ -97,3 +97,24 @@ def mapped_sample_pipeline(ctx, data):
     intermediate, = increment(retained, 1)
     final, = increment(intermediate, 2)
     return final
+
+
+def filter_scores(
+    data: Annotated[str, ForEach['student', 'assignment']],
+) -> Annotated[str | None, ForEach['student', 'assignment']]:
+    return data if int(data) >= 0 else None
+
+
+def sum_scores(
+    data: Annotated[dict, ForEach['student']],
+) -> Annotated[str, ForEach['sample':'student']]:
+    return str(sum(map(int, data.values())))
+
+
+def mapped_scores_pipeline(ctx, data):
+    filter_scores = ctx.get_action('dummy_plugin', 'filter_scores')
+    sum_scores = ctx.get_action('dummy_plugin', 'sum_scores')
+    filtered, = filter_scores(data)
+    totals, = sum_scores(filtered)
+    output, = ctx.get_action('dummy_plugin', 'increment_samples')(totals, 1)
+    return filtered, output
