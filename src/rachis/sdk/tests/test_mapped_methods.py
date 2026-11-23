@@ -16,10 +16,13 @@ import pytest
 import dill
 
 from rachis import Artifact, ForEach
+from rachis.core.archive import Archiver, ImportProvenanceCapture
+from rachis.core.testing.format import OldMappingDirFmt
 from rachis.core.testing.type import AssignmentScores, Mapping
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.plugin import CaptureHolder, Int
-from rachis.sdk import MappedMethod, Results
+from rachis.plugin.plugin import TransformerRecord
+from rachis.sdk import MappedMethod, PluginManager, Results
 from rachis.sdk.context import Context, ParallelContext
 from rachis.sdk.futures import as_future
 from rachis.sdk.parallel_config import ParallelConfig
@@ -73,6 +76,56 @@ def test_per_output_filtering():
     assert records.read_text().splitlines() == [
         'sample\tattempt\toutcome', 's1\t1\tcompleted', 's2\t1\tfiltered',
     ]
+
+
+def test_mapped_provenance_appends_axis_and_cell_transformations():
+    def read_score(score: str) -> int:
+        return int(score)
+
+    def write_score(score: int) -> str:
+        return str(score)
+
+    def increment(
+        data: Annotated[int, ForEach['sample']],
+    ) -> Annotated[int, ForEach['sample']]:
+        return data + 1
+
+    old = OldMappingDirFmt()
+    old.mapping.write_data({'s1': '4'}, dict)
+    data = Artifact._from_archiver(Archiver.from_data(
+        Mapping, OldMappingDirFmt, data_initializer=old.path._move_or_copy,
+        provenance_capture=ImportProvenanceCapture()))
+    plugin = get_dummy_plugin()
+    transformers = {
+        str: {int: TransformerRecord(read_score, plugin, ())},
+        int: {str: TransformerRecord(write_score, plugin, ())},
+    }
+    with (patch.dict(plugin.methods),
+          patch.dict(PluginManager().transformers, transformers)):
+        plugin.methods.register_function(
+            increment, inputs={'data': Mapping}, parameters={},
+            outputs={'output': Mapping}, name='Increment', description='')
+        output = plugin.methods['increment'](data).output
+    assert output.view(dict) == {'s1': '5'}
+    action = output._archiver.provenance_dir / 'action' / 'action.yaml'
+    provenance = action.read_text().split('transformers:', 1)[1]
+    assert provenance.index('from: OldMappingDirFmt') < provenance.index(
+        'from: builtins:str')
+    assert provenance.index('from: builtins:int') < provenance.index(
+        'from: MappingDirectoryFormat')
+
+
+def test_transformer_recorders_append_and_forks_own_their_lists():
+    capture = ImportProvenanceCapture()
+    record = capture.transformation_recorder('return')
+    record(None, 'outer', None, 'axis', None)
+    first = capture.fork()
+    second = capture.fork()
+    first.transformation_recorder('return')(None, 'axis', None, 'cell', None)
+    assert [record['to'] for record in first.transformers['return']] == [
+        'axis', 'cell']
+    assert [record['to'] for record in second.transformers['return']] == [
+        'axis']
 
 
 @pytest.mark.parametrize('binding', ['student', 'assignment'])

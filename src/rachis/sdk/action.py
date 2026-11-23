@@ -104,19 +104,25 @@ def bind_signature_wrapper(frame):
     yield
 
 
+def prepare_artifact_argument(signature, name, argument):
+    if isinstance(argument, ProxyResultCollection):
+        argument = argument.result()
+    if isinstance(argument, ResultCollection):
+        if not argument:
+            raise TypeError(
+                f'Parameter {name!r} received an empty collection.')
+        argument = signature._shape_collection_input(
+            argument, signature.inputs[name])
+    return argument
+
+
 @contextmanager
 def prepare_callable_arguments_wrapper(frame):
     signature = frame.action.signature
     arguments = frame.transformed_arguments = frame.bound_arguments.copy()
-    for name, spec in signature.inputs.items():
-        argument = arguments[name]
-        if isinstance(argument, ProxyResultCollection):
-            argument = argument.result()
-        if isinstance(argument, ResultCollection):
-            if not argument:
-                raise TypeError(
-                    f'Parameter {name!r} received an empty collection.')
-            arguments[name] = signature._shape_collection_input(argument, spec)
+    for name in signature.inputs:
+        arguments[name] = prepare_artifact_argument(
+            signature, name, arguments[name])
     yield
 
 

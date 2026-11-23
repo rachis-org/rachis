@@ -11,6 +11,7 @@ import csv
 from concurrent.futures import wait
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
+from functools import partial
 from itertools import product
 from pathlib import Path
 import shutil
@@ -23,25 +24,23 @@ import dill
 from rachis.core import transform
 from rachis.core.archive.provenance import ActionProvenanceCapture
 from rachis.core.axis import Coord
-from rachis.core.type.util import is_collection_type
 from rachis.plugin.model.base import FormatBase
 from rachis.sdk.action import (
     Frame, FramePhase, Method, checked_return_values,
-    prepare_callable_arguments_wrapper, provenance_wrapper,
+    prepare_artifact_argument, prepare_callable_arguments_wrapper,
+    provenance_wrapper,
 )
 from rachis.sdk.plugin_manager import PluginManager
-from rachis.sdk.futures import after_all, join, result_as_future
-from rachis.sdk.proxy import ProxyResult, ProxyResultCollection
-from rachis.sdk.result import Artifact, ResultCollection
+from rachis.sdk.futures import join, result_as_future
+from rachis.sdk.result import Artifact
 from rachis.sdk.results import Results
-from rachis.sdk.util import Sievable
 
 
 class CellView:
     """A cell view whose backing resources survive through output staging."""
 
     @contextmanager
-    def open(self):
+    def open(self, recorder=None):
         yield self.load()
 
 
@@ -52,8 +51,8 @@ class ArtifactCell(CellView):
     coord: Coord
 
     @contextmanager
-    def open(self):
-        with self.artifact._axis(self.pattern) as (axis, _):
+    def open(self, recorder=None):
+        with self.artifact._axis(self.pattern, recorder) as (axis, _):
             yield axis[self.coord]
 
 
@@ -110,13 +109,6 @@ class MappedProvenance(ActionProvenanceCapture):
         execution['coordinates'] = self.coordinates
         return execution
 
-    def transformation_recorder(self, name):
-        previous = self.transformers.get(name, ())
-        recorder = super().transformation_recorder(name)
-        self.transformers[name].extend(previous)
-        return recorder
-
-
 def _input_index(value, pattern):
     if value is None:
         return {}
@@ -169,7 +161,7 @@ def plan_cells(frame, directory):
     return cells, output_axes(frame)
 
 
-def _as_view(value, annotation, name, trace):
+def _as_view(value, annotation, recorder):
     candidates = get_args(annotation) if type(None) in get_args(annotation) \
         else (annotation,)
     source = transform.ModelType.from_view_type(type(value))
@@ -178,9 +170,7 @@ def _as_view(value, annotation, name, trace):
             continue
         target = transform.ModelType.from_view_type(view_type)
         if source.has_transformation(target):
-            result = source.make_transformation(target)(value)
-            trace.append((name, type(value), view_type))
-            return result
+            return source.make_transformation(target, recorder=recorder)(value)
     raise TypeError(
         f'No cell transformation from {type(value)} to {annotation}')
 
@@ -206,41 +196,48 @@ def cell_workspace_wrapper(frame):
 
 @contextmanager
 def cell_provenance_wrapper(frame):
-    frame.provenance = SimpleNamespace(transforms=[])
+    transforms = []
+    frame.provenance = SimpleNamespace(
+        transformation_recorder=partial(_cell_recorder, transforms))
     yield
-    frame.results = CellOutcome(
-        frame.results, tuple(frame.provenance.transforms))
+    frame.results = CellOutcome(frame.results, tuple(transforms))
+
+
+def _cell_recorder(transforms, name):
+    def record(transformer_record, input_name, input_record, output_name,
+               output_record):
+        # Identify the transformer's registered types, even when the model
+        # wrapped it to adapt a single-file directory format.
+        key = None
+        if transformer_record is not None:
+            annotations = transformer_record.transformer.__annotations__.copy()
+            target = annotations.pop('return')
+            source, = annotations.values()
+            key = (source, target)
+        transforms.append((name, input_name, output_name, key))
+
+    return record
 
 
 @contextmanager
 def cell_views_wrapper(frame):
     signature = frame.action.signature
+    recorder_for = frame.provenance.transformation_recorder
     with ExitStack() as views:
         frame.transformed_arguments = {}
         for name, spec in signature.signature_order.items():
             value = frame.bound_arguments[name]
             if name in signature.input_patterns:
+                recorder = recorder_for(name)
                 if isinstance(value, CellView):
-                    value = views.enter_context(value.open())
+                    value = views.enter_context(value.open(recorder))
                 if value is not None:
-                    value = _as_view(
-                        value, spec.view_type, name,
-                        frame.provenance.transforms)
+                    value = _as_view(value, spec.view_type, recorder)
                 elif type(None) not in get_args(spec.view_type):
                     raise TypeError(f'Input {name!r} does not accept None')
-            elif name in signature.inputs and value is not None:
-                if is_collection_type(spec.qiime_type):
-                    if isinstance(value, ProxyResultCollection):
-                        value = value.result()
-                    if isinstance(value, ResultCollection):
-                        value = signature._shape_collection_input(value, spec)
-                    if isinstance(value, list):
-                        value = [item._view(spec.view_type) for item in value]
-                    else:
-                        value = type(value)({key: item._view(spec.view_type)
-                                             for key, item in value.items()})
-                else:
-                    value = value._view(spec.view_type)
+            elif name in signature.inputs:
+                value = prepare_artifact_argument(signature, name, value)
+                value = signature._transform_input(name, value, recorder_for)
             frame.transformed_arguments[name] = value
 
         yield
@@ -263,8 +260,8 @@ def cell_views_wrapper(frame):
                                 f'received {type(value)!r}')
             axis_view = get_type_hints(frame.axes[name].__getitem__)['return']
             if axis_view is not view_type:
-                value = _as_view(value, axis_view, ('return', name),
-                                 frame.provenance.transforms)
+                value = _as_view(
+                    value, axis_view, recorder_for(('return', name)))
             outputs[name] = StoredView.save(
                 value, frame.workspace / str(index))
         frame.results = outputs
@@ -279,12 +276,15 @@ def output_axes(frame):
     }
 
 
-def _record_transforms(provenance, name, pairs):
-    if pairs:
+def _record_transforms(provenance, name, records):
+    if records:
         recorder = provenance.transformation_recorder(name)
-        for source, target in sorted(pairs, key=repr):
-            transform.ModelType.from_view_type(source).make_transformation(
-                transform.ModelType.from_view_type(target), recorder=recorder)
+        manager = PluginManager()
+        for source, target, key in records:
+            transformer = (None if key is None else
+                           manager.transformers[key[0]][key[1]])
+            recorder(transformer, source, manager.views.get(source),
+                     target, manager.views.get(target))
 
 
 @contextmanager
@@ -294,8 +294,8 @@ def mapped_transforms_wrapper(frame):
     for outcome in frame.outcomes.values():
         if outcome is None:
             continue
-        for name, source, target in outcome.transforms:
-            frame.transforms.setdefault(name, set()).add((source, target))
+        for name, source, target, key in outcome.transforms:
+            frame.transforms.setdefault(name, {})[source, target, key] = None
     for name in frame.action.signature.inputs:
         _record_transforms(provenance, name, frame.transforms.get(name))
     yield
@@ -328,12 +328,6 @@ def mapped_workspace_wrapper(frame):
 
 
 @contextmanager
-def mapped_plan_wrapper(frame):
-    frame.cells, frame.axes = plan_cells(frame, frame.directory)
-    yield
-
-
-@contextmanager
 def archive_mapped_outputs_wrapper(frame):
     yield
 
@@ -362,7 +356,8 @@ def archive_mapped_outputs_wrapper(frame):
 
 
 @contextmanager
-def gather_cells_wrapper(frame):
+def mapped_cells_wrapper(frame):
+    frame.cells, frame.axes = plan_cells(frame, frame.directory)
     yield
     futures = frame.results
     if futures.keys() != frame.cells.keys():
@@ -383,13 +378,7 @@ def gather_cells_wrapper(frame):
             completed.results = _write_outputs(completed)
         return completed.results
 
-    proxies, rebuild_inputs = Sievable.sieve(
-        frame.bound_arguments,
-        isinstance=(ProxyResult, ProxyResultCollection),
-    )
-    inputs_ready = after_all(
-        map(result_as_future, proxies), rebuild_inputs,
-    )
+    inputs_ready = result_as_future(frame.bound_arguments)
     future = join(
         (inputs_ready,
          *(futures[coord] for coord in frame.cells)), assemble, ctx=frame.ctx)
@@ -404,8 +393,7 @@ class MappedMethod(Method):
     _initial_frame_phase = FramePhase.INNER_BIND
     inner_bind_wrappers = (
         mapped_workspace_wrapper,
-        gather_cells_wrapper,
-        mapped_plan_wrapper,
+        mapped_cells_wrapper,
     )
     inner_apply_wrappers = (
         cell_error_wrapper,

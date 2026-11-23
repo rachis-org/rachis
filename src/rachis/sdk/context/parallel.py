@@ -93,6 +93,7 @@ def _submit_batch(cells, executor):
 def _join_exception(job):
     error = job.exception()
     if isinstance(error, JoinError):
+        # Surface the invocation's original error at scope exit.
         error, _ = error.dependent_exceptions_tids[0]
     return error
 

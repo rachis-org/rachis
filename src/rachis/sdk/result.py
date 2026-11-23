@@ -474,7 +474,7 @@ class Artifact(Result):
 
         return coordinates()
 
-    def _axis(self, pattern):
+    def _axis(self, pattern, recorder=None):
         """Open an axis while retaining its backing directory path."""
         record = rachis.sdk.PluginManager().get_axis(self.type, pattern)
 
@@ -482,7 +482,7 @@ class Artifact(Result):
         def open_axis():
             directory = self._archiver.data_dir
             if self.format is not record.directory_format:
-                directory = self._view(record.directory_format).path
+                directory = self._view(record.directory_format, recorder).path
             yield record.axis(directory, mode='r'), directory
 
         return open_axis()
