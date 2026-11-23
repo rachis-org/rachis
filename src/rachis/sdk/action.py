@@ -60,6 +60,7 @@ class Frame:
         self.results = None
         self.provenance = None
         self.ready_provenance = None
+        self.coordinate_indexes = None
 
     def __call__(self):
         phase = self.phase

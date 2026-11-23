@@ -233,7 +233,7 @@ def test_cell_context_exits_before_staging_outputs():
     @contextmanager
     def observe(frame):
         yield
-        assert not frame.cell.path.exists()
+        assert not (frame.workspace / 'outputs').exists()
         observed.append(frame.results)
         events.append(frame.coordinate.sample)
 
@@ -241,6 +241,8 @@ def test_cell_context_exits_before_staging_outputs():
     def observe_invocation(frame):
         events.append('mapped-enter')
         yield
+        assert all(coord is cell.coordinate
+                   for coord, cell in frame.cells.items())
         assert len(frame.results) == 2
         assert all(future.done() for future in frame.results.values())
         events.append('mapped-exit')
@@ -300,7 +302,7 @@ def test_deferred_cells_gather_locally_and_keep_their_workspace():
             completion, = Results._futures(result)
             try:
                 assert not completion.done()
-                directory = pending[0][0].cell.path.parent
+                directory = pending[0][0].path.parent
                 assert directory.is_dir()
             finally:
                 for cell, future in reversed(pending):

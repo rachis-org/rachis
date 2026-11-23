@@ -98,7 +98,7 @@ def _join_exception(job):
     return error
 
 
-def _submit_coordinator(body, coordinate_inputs):
+def _submit_coordinator(body, coordinate_indexes=None):
     results = Results(body.output_types, (
         output_proxy(Future(), None, spec.qiime_type)
         for spec in body.output_types.values()
@@ -114,13 +114,11 @@ def _submit_coordinator(body, coordinate_inputs):
             if not future.done():
                 future.set_exception(error)
 
-    def run(*sources):
+    def run(indexes):
         # Child work belongs to the body, which can submit more actions after
         # the caller has started waiting on its own scope.
         children = []
-        body.bound_arguments = body.bound_arguments | dict(
-            zip(coordinate_inputs, sources, strict=True),
-        )
+        body.coordinate_indexes = indexes
         with ExitStack() as cleanup:
             body.ctx._scopes.append((children, cleanup))
             try:
@@ -147,7 +145,7 @@ def _submit_coordinator(body, coordinate_inputs):
             completion.set_exception(error)
 
     body.action._set_wrapper_name(run, body.action.id)
-    join_app(run)(*coordinate_inputs.values()).add_done_callback(finish)
+    join_app(run)(coordinate_indexes).add_done_callback(finish)
     caller_ctx._track_results(completion)
     return results
 
@@ -176,7 +174,7 @@ class ParallelContext(Context):
 
         if isinstance(frame.action, Pipeline):
             self.execution_metadata = {'type': 'parsl', 'parsl_type': 'DFK'}
-            return _submit_coordinator(frame, {})
+            return _submit_coordinator(frame)
 
         executor = self._get_executor(frame.action)
         self.execution_metadata = {
@@ -185,12 +183,8 @@ class ParallelContext(Context):
         }
 
         if isinstance(frame.action, MappedMethod):
-            coordinates = {}
-            for name in frame.action.signature.input_patterns:
-                value = frame.bound_arguments[name]
-                coordinates[name] = (result_as_future(value)
-                                     if isinstance(value, Proxy) else value)
-            return _submit_coordinator(frame, coordinates)
+            indexes = frame.action._prepare_coordinate_indexes(frame)
+            return _submit_coordinator(frame, indexes)
 
         # Parsl resolves upstream dependencies before the worker applies them.
         return Results._from_future(

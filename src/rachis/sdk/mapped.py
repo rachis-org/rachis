@@ -10,14 +10,14 @@ import copy
 import csv
 from concurrent.futures import wait
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
 from itertools import product
 from pathlib import Path
 import shutil
 import tempfile
 from types import SimpleNamespace
-from typing import get_args, get_type_hints
+from typing import Callable, get_args
 
 import dill
 
@@ -31,83 +31,74 @@ from rachis.sdk.action import (
     provenance_wrapper,
 )
 from rachis.sdk.plugin_manager import PluginManager
-from rachis.sdk.futures import join, result_as_future
+from rachis.sdk.futures import after_all, join, result_as_future
 from rachis.sdk.result import Artifact
 from rachis.sdk.results import Results
 
 
+@dataclass(frozen=True)
 class CellView:
     """A cell view whose backing resources survive through output staging."""
 
-    @contextmanager
+    opener: Callable
+
     def open(self, recorder=None):
-        yield self.load()
+        return self.opener(recorder=recorder)
 
 
-@dataclass(frozen=True)
-class ArtifactCell(CellView):
-    artifact: Artifact
-    pattern: object
-    coord: Coord
-
-    @contextmanager
-    def open(self, recorder=None):
-        with self.artifact._axis(self.pattern, recorder) as (axis, _):
-            yield axis[self.coord]
+@contextmanager
+def _open_artifact_cell(artifact, pattern, coord, recorder=None):
+    with artifact._axis(pattern, recorder) as (axis, _):
+        yield axis[coord]
 
 
-@dataclass(frozen=True)
-class Cell:
-    path: Path
-    inputs: dict
-    outputs: dict
+@contextmanager
+def _open_staged_view(path, view_type=None, recorder=None):
+    if view_type is not None:
+        yield view_type(path, mode='r')
+    else:
+        yield _read_record(path)
 
 
-@dataclass(frozen=True)
-class StoredView(CellView):
-    path: Path
-    format: type | None = None
-
-    @classmethod
-    def save(cls, value, path):
-        if isinstance(value, FormatBase):
-            if Path(value.path).is_dir():
-                shutil.copytree(value.path, path)
-            else:
-                shutil.copyfile(value.path, path)
-            return cls(path, type(value))
-        with path.open('wb') as stream:
-            dill.dump(value, stream)
-        return cls(path)
-
-    def load(self):
-        if self.format is not None:
-            return self.format(self.path, mode='r')
-        with self.path.open('rb') as stream:
-            return dill.load(stream)
-
-
-@dataclass(frozen=True)
-class CellOutcome:
-    outputs: dict
-    transforms: tuple = ()
+def _stage_view(value, path):
+    if isinstance(value, FormatBase):
+        if Path(value.path).is_dir():
+            shutil.copytree(value.path, path)
+        else:
+            shutil.copyfile(value.path, path)
+        return CellView(partial(_open_staged_view, path, type(value)))
+    _write_record(path, value)
+    return CellView(partial(_open_staged_view, path))
 
 
 class CellFrame(Frame):
-    def __init__(self, parent, cell, axes):
-        super().__init__(parent.action, parent.ctx, cell.inputs,
+    def __init__(self, parent, coordinate, inputs, outputs, path,
+                 output_view_types):
+        super().__init__(parent.action, parent.ctx, inputs,
                          phase=FramePhase.INNER_APPLY)
-        self.cell = replace(cell, inputs={})
-        self.coordinate = next(iter(cell.outputs.values()))
-        self.axes = axes
-
+        self.path = path
+        self.output_coordinates = outputs
+        self.coordinate = coordinate
+        self.output_view_types = output_view_types
         self.output_types = parent.output_types
+
+
+def _read_record(path):
+    with path.open('rb') as stream:
+        return dill.load(stream)
+
+
+def _write_record(path, value):
+    with path.open('wb') as stream:
+        dill.dump(value, stream)
+
 
 class MappedProvenance(ActionProvenanceCapture):
     def make_execution_section(self):
         execution = super().make_execution_section()
         execution['coordinates'] = self.coordinates
         return execution
+
 
 def _input_index(value, pattern):
     if value is None:
@@ -117,35 +108,39 @@ def _input_index(value, pattern):
             raise ValueError('A mapped integer must be nonnegative')
         axis, = pattern.axes
         return {Coord(**{axis: i}): i for i in range(value)}
-    artifact = value.result()
-    if not isinstance(artifact, Artifact):
+    if not isinstance(value, Artifact):
         raise TypeError('ForEach requires an artifact with registered axes')
     index = {}
-    for coord in artifact.coords(*pattern.axes):
-        if coord in index:
-            raise ValueError(f'Duplicate axis coordinate {coord!r}')
-        index[coord] = ArtifactCell(artifact, pattern.as_unbound(), coord)
+    path = pattern.as_unbound()
+    with value._axis(path) as (axis, _):
+        for coord in axis:
+            if coord in index:
+                raise ValueError(f'Duplicate axis coordinate {coord!r}')
+            index[coord] = CellView(partial(
+                _open_artifact_cell, value, path, coord))
     return index
 
 
-def _group_plan(signature, inputs, group):
-    patterns = signature.input_patterns
-    return group.align({
-        name: _input_index(inputs[name], patterns[name])
-        for name in group.inputs
-    })
+def _index_argument(value, pattern, *, ctx, into=None):
+    def build(values):
+        with ctx.cache:
+            return _input_index(values[0], pattern)
+
+    return after_all((result_as_future(value),), build, into=into)
 
 
-def plan_cells(frame, directory):
+def plan_cells(frame, indexes, directory):
     signature = frame.action.signature
-    groups = [_group_plan(signature, frame.bound_arguments, group)
-              for group in signature.input_groups]
+    groups = [group.align(indexes) for group in signature.input_groups]
+    combinations = product(*groups)
     broadcast = {
         name: value for name, value in frame.bound_arguments.items()
         if name not in signature.input_patterns
     }
+    axes = output_axes(frame)
+    output_view_types = {name: axis.view_type for name, axis in axes.items()}
     cells = {}
-    for number, combination in enumerate(product(*groups)):
+    for number, combination in enumerate(combinations):
         bound = {}
         selections = dict(broadcast)
         for binding, selected in combination:
@@ -156,9 +151,11 @@ def plan_cells(frame, directory):
             name: pattern.to_axis_coord(coordinate)
             for name, pattern in signature.output_patterns.items()
         }
-        cells[coordinate] = Cell(
-            directory / f'{number}.cell', selections, outputs)
-    return cells, output_axes(frame)
+        path = directory / f'{number}.cell'
+        cells[coordinate] = CellFrame(
+            frame, coordinate, selections, outputs, path, output_view_types,
+        )
+    return cells, axes
 
 
 def _as_view(value, annotation, recorder):
@@ -176,22 +173,19 @@ def _as_view(value, annotation, recorder):
 
 
 @contextmanager
-def cell_error_wrapper(frame):
+def cell_workspace_wrapper(frame):
+    """Stage one invocation's views and trace in its attempt directory."""
+    frame.workspace = Path(tempfile.mkdtemp(dir=frame.path.parent))
     try:
         yield
-    except Exception as error:
+        _write_record(frame.workspace / 'outputs', frame.results)
+    except BaseException as error:
+        shutil.rmtree(frame.workspace)
+        if not isinstance(error, Exception):
+            raise
         raise RuntimeError(f'Mapped cell {frame.coordinate!r} failed: '
                            f'{error}') from error
-
-
-@contextmanager
-def cell_workspace_wrapper(frame):
-    frame.workspace = Path(tempfile.mkdtemp(dir=frame.cell.path.parent))
-    try:
-        yield
-    except BaseException:
-        shutil.rmtree(frame.workspace)
-        raise
+    frame.results = frame.workspace
 
 
 @contextmanager
@@ -200,7 +194,7 @@ def cell_provenance_wrapper(frame):
     frame.provenance = SimpleNamespace(
         transformation_recorder=partial(_cell_recorder, transforms))
     yield
-    frame.results = CellOutcome(frame.results, tuple(transforms))
+    _write_record(frame.workspace / 'transformers', tuple(transforms))
 
 
 def _cell_recorder(transforms, name):
@@ -258,11 +252,11 @@ def cell_views_wrapper(frame):
             if type(value) is not view_type:
                 raise TypeError(f'Output {name!r} expected {view_type!r}, '
                                 f'received {type(value)!r}')
-            axis_view = get_type_hints(frame.axes[name].__getitem__)['return']
+            axis_view = frame.output_view_types[name]
             if axis_view is not view_type:
                 value = _as_view(
                     value, axis_view, recorder_for(('return', name)))
-            outputs[name] = StoredView.save(
+            outputs[name] = _stage_view(
                 value, frame.workspace / str(index))
         frame.results = outputs
 
@@ -271,7 +265,7 @@ def output_axes(frame):
     manager = PluginManager()
     return {
         name: manager.get_axis(
-            frame.output_types[name].qiime_type, pattern).axis
+            frame.output_types[name].qiime_type, pattern)
         for name, pattern in frame.action.signature.output_patterns.items()
     }
 
@@ -291,10 +285,9 @@ def _record_transforms(provenance, name, records):
 def mapped_transforms_wrapper(frame):
     provenance = frame.provenance
     frame.transforms = {}
-    for outcome in frame.outcomes.values():
-        if outcome is None:
-            continue
-        for name, source, target, key in outcome.transforms:
+    for attempt, _ in frame.attempts.values():
+        records = _read_record(attempt / 'transformers')
+        for name, source, target, key in records:
             frame.transforms.setdefault(name, {})[source, target, key] = None
     for name in frame.action.signature.inputs:
         _record_transforms(provenance, name, frame.transforms.get(name))
@@ -305,13 +298,13 @@ def _write_outputs(frame):
     outputs = []
     for name in frame.output_types:
         selected = [
-            (frame.cells[coord].outputs[name], outcome.outputs[name])
-            for coord, outcome in frame.outcomes.items()
-            if outcome is not None
+            (frame.cells[coord].output_coordinates[name], views[name])
+            for coord, (_, views) in frame.attempts.items()
         ]
-        chunks = ((coord, value.load()) for coord, value in selected
-                  if value is not None)
-        outputs.append((frame.axes[name].write(chunks), selected))
+        with ExitStack() as resources:
+            chunks = ((coord, resources.enter_context(view.open()))
+                      for coord, view in selected if view is not None)
+            outputs.append((frame.axes[name].axis.write(chunks), selected))
     return outputs
 
 
@@ -357,7 +350,8 @@ def archive_mapped_outputs_wrapper(frame):
 
 @contextmanager
 def mapped_cells_wrapper(frame):
-    frame.cells, frame.axes = plan_cells(frame, frame.directory)
+    frame.cells, frame.axes = plan_cells(
+        frame, frame.coordinate_indexes, frame.directory)
     yield
     futures = frame.results
     if futures.keys() != frame.cells.keys():
@@ -366,9 +360,9 @@ def mapped_cells_wrapper(frame):
     # Assembly owns its state while dispatch retains the exterior result.
     completed = copy.copy(frame)
 
-    def assemble(inputs, *outcomes):
+    def assemble(inputs, attempts):
         completed.bound_arguments = inputs
-        completed.outcomes = dict(zip(completed.cells, outcomes, strict=True))
+        completed.attempts = dict(zip(completed.cells, attempts, strict=True))
         with (
             prepare_callable_arguments_wrapper(completed),
             archive_mapped_outputs_wrapper(completed),
@@ -379,11 +373,17 @@ def mapped_cells_wrapper(frame):
         return completed.results
 
     inputs_ready = result_as_future(frame.bound_arguments)
-    future = join(
-        (inputs_ready,
-         *(futures[coord] for coord in frame.cells)), assemble, ctx=frame.ctx)
+    attempts = [after_all((futures[coord],), _read_attempt)
+                for coord in frame.cells]
+    cells_ready = after_all(attempts, tuple)
+    future = join((inputs_ready, cells_ready), assemble, ctx=frame.ctx)
     frame.workspace_cleanup.callback(wait, (future,))
     frame.results = Results._from_future(future, frame.output_types)
+
+
+def _read_attempt(values):
+    attempt, = values
+    return attempt, _read_record(attempt / 'outputs')
 
 
 class MappedMethod(Method):
@@ -396,19 +396,27 @@ class MappedMethod(Method):
         mapped_cells_wrapper,
     )
     inner_apply_wrappers = (
-        cell_error_wrapper,
         cell_workspace_wrapper,
         cell_provenance_wrapper,
         cell_views_wrapper,
     )
 
+    def _prepare_coordinate_indexes(self, frame):
+        """Resolve mapped indexes independently of broadcast arguments."""
+        indexes = {
+            name: _index_argument(frame.bound_arguments[name], pattern,
+                                  ctx=frame.ctx)
+            for name, pattern in self.signature.input_patterns.items()
+        }
+        return after_all(indexes.values(), lambda values:
+                         dict(zip(indexes, values, strict=True)))
+
     def _inner_bind(self, frame):
+        if frame.coordinate_indexes is None:
+            frame.coordinate_indexes = self._prepare_coordinate_indexes(
+                frame).result()
         with ExitStack() as stack:
             for wrapper in self.inner_bind_wrappers:
                 stack.enter_context(wrapper(frame))
-            cell_frames = {
-                coord: CellFrame(frame, cell, frame.axes)
-                for coord, cell in frame.cells.items()
-            }
-            frame.results = frame.ctx._dispatch_cells_(cell_frames)
+            frame.results = frame.ctx._dispatch_cells_(frame.cells)
         return frame.results
