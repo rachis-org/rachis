@@ -90,8 +90,8 @@ ArtifactClassRecord = collections.namedtuple(
     'ArtifactClassRecord', ['semantic_type', 'format', 'plugin', 'description',
                             'examples', 'type_expression'])
 AxisRecord = collections.namedtuple(
-    'AxisRecord', ['semantic_type', 'pattern', 'axis', 'directory_format',
-                   'plugin'])
+    'AxisRecord', ['semantic_type', 'pattern', 'axis', 'view_type',
+                   'directory_format', 'plugin'])
 ValidatorRecord = collections.namedtuple(
     'ValidatorRecord', ['validator', 'view', 'plugin', 'context'])
 
@@ -617,7 +617,10 @@ class Plugin:
         self.axes.update(registrations)
 
     def register_axes(self, semantic_type, axes):
-        """Register coordinate patterns for a concrete artifact type."""
+        """Register coordinate patterns for a type, including another plugin's.
+
+        See `register_artifact_class` for the axis contract.
+        """
         self.axes.update(self._axis_registrations(semantic_type, axes))
 
     def _axis_registrations(self, semantic_type, axes):
@@ -629,12 +632,12 @@ class Plugin:
             if (not isinstance(pattern, ForEach)
                     or pattern != pattern.as_unbound()):
                 raise TypeError('Axis registration requires plain axis names')
-            directory_format = validate_axis_protocol(axis)
+            view_type, directory_format = validate_axis_protocol(axis)
             key = (semantic_type, pattern)
             if key in self.axes:
                 raise ValueError(f'Axis {pattern.axes!r} already registered')
             registrations[key] = AxisRecord(semantic_type, pattern, axis,
-                                            directory_format, self)
+                                            view_type, directory_format, self)
         return registrations
 
 

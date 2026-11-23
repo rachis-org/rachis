@@ -128,7 +128,7 @@ class ForEach(metaclass=_ForEachMeta):
 
 
 def validate_axis_protocol(axis):
-    """Check the axis protocol and return its declared directory format."""
+    """Check the axis protocol and return its view and directory types."""
     from rachis.plugin.model import DirectoryFormat
 
     if not isinstance(axis, type) or not all(
@@ -171,4 +171,4 @@ def validate_axis_protocol(axis):
     if (not isinstance(directory_format, type)
             or not issubclass(directory_format, DirectoryFormat)):
         raise TypeError(f'{axis.__name__}.write must return a DirectoryFormat')
-    return directory_format
+    return view, directory_format

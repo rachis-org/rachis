@@ -7,6 +7,7 @@
 # ----------------------------------------------------------------------------
 
 from collections.abc import Iterable
+from unittest.mock import patch
 
 import pytest
 
@@ -16,6 +17,8 @@ from rachis.core.testing.format import MappingDirectoryFormat, OldMappingDirFmt
 from rachis.core.testing.mapped_axis import SampleMappingAxis
 from rachis.core.testing.type import Mapping
 from rachis.core.testing.util import get_dummy_plugin
+from rachis.plugin import Plugin
+from rachis.sdk import PluginManager
 
 
 def test_registered_axis_and_coordinate_views():
@@ -25,6 +28,7 @@ def test_registered_axis_and_coordinate_views():
     assert record.axis is SampleMappingAxis
     assert record.semantic_type == data.type
     assert record.pattern == ForEach['sample']
+    assert record.view_type is str
     assert record.directory_format is MappingDirectoryFormat
     assert record.plugin is plugin
     assert data.axes() == [('sample',)]
@@ -125,6 +129,37 @@ def test_for_each_bindings():
 def test_axis_registration_rejects_bound_keys(pattern):
     with pytest.raises(TypeError, match='requires plain axis names'):
         get_dummy_plugin().register_axes(Mapping, {pattern: SampleMappingAxis})
+
+
+def test_plugin_can_extend_axes_of_another_plugins_artifact():
+    class RowAxis(SampleMappingAxis):
+        def __iter__(self) -> Iterable[Coord]:
+            return (Coord(row=key) for key in self.data)
+
+        def __getitem__(self, coord: Coord) -> str:
+            return self.data[coord.row]
+
+        @classmethod
+        def write(
+            cls, chunks: Iterable[tuple[Coord, str]],
+        ) -> MappingDirectoryFormat:
+            return super().write(
+                (Coord(sample=coord.row), value) for coord, value in chunks)
+
+    plugin = Plugin(name='axis-extension', version='1.0.0',
+                    website='https://example.com', package=__package__,
+                    project_name='axis-extension')
+    plugin.register_axes(Mapping, {ForEach['row']: RowAxis})
+    manager = PluginManager()
+    with (patch.dict(manager.plugins), patch.dict(manager._plugin_by_id),
+          patch.dict(manager.axes)):
+        manager.add_plugin(plugin)
+        record = manager.get_axis(Mapping, ForEach['row'])
+        assert record.plugin is plugin
+        assert record.view_type is str
+        data = Artifact.import_data(Mapping, {'s1': '4'})
+        assert data.axes() == [('sample',), ('row',)]
+        assert data.view(str, row='s1') == '4'
 
 
 def test_axis_registration_rejects_inconsistent_cell_annotations():
