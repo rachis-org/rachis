@@ -585,6 +585,10 @@ class Plugin:
           when indexed by a coordinate. Its ``write(chunks)`` class method
           accepts ``(Coord, view)`` pairs and returns the directory format the
           implementation reads.
+          Writing cells preserves their coordinate keys through archive
+          conversion. A registered leading prefix must give the same view
+          and presence after writing just its surviving descendants as
+          after writing the complete artifact.
 
         Returns
         -------
@@ -606,7 +610,8 @@ class Plugin:
             raise TypeError("Only a single type can be registered at a time "
                             "with register_artifact_class. Registration "
                             "attempted for %s." % str(semantic_type))
-        registrations = self._axis_registrations(semantic_type, axes or {})
+        registrations = (self._axis_registrations(semantic_type, axes)
+                         if axes is not None else {})
         self._register_artifact_class(
             semantic_type, directory_format, description, examples)
         self.axes.update(registrations)

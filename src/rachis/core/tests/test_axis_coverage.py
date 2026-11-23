@@ -84,6 +84,16 @@ def test_projected_match_filters_the_complete_optional_domain():
     ]
 
 
+def test_presence_inputs_include_domain_drivers_and_coverage_checks():
+    join = CoordinateJoin(
+        {'scores': ('student', 'assignment'), 'offset': ('student',),
+         'weight': ('assignment',), 'roster': ('student',)},
+        {'scores': 'optional', 'offset': 'optional',
+         'weight': 'required', 'roster': 'matched'},
+    )
+    assert join.presence_inputs == {'scores', 'weight', 'roster'}
+
+
 @pytest.mark.parametrize(('rule', 'left', 'right'), [
     ('matched', {('s1',): 1}, {('s2',): 2}),
     ('optional', {}, {}),

@@ -55,6 +55,11 @@ class CoordinateJoin:
             name for name in self._complete if rules[name] == 'optional')
         self._domain = (complete & self._matched) or optional or complete
 
+    @property
+    def presence_inputs(self):
+        """Names whose realized keys can change coverage."""
+        return self._domain | self._matched | frozenset(self._required)
+
     def coverage(self, present):
         """Return missing required inputs, or None for an excluded key."""
         if self._domain.isdisjoint(present) or not self._matched <= present:
