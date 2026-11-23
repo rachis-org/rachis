@@ -588,7 +588,10 @@ class Cache:
             self._thread.start()
 
     def __enter__(self):
-        """Activate this cache or borrow the active cache at the same path."""
+        """Select the cache returned by get_cache for this invocation.
+
+        A nested scope at the same path borrows the active cache.
+        """
         active = getattr(_CACHE, 'cache', None)
         if active is None:
             _CACHE.cache = self
@@ -600,7 +603,7 @@ class Cache:
         _CACHE.depth = getattr(_CACHE, 'depth', 0) + 1
 
     def __exit__(self, *args):
-        """Clear the active cache when its last scope exits."""
+        """Return get_cache to the default when the last scope exits."""
         _CACHE.depth -= 1
         if _CACHE.depth == 0:
             _CACHE.cache = None
@@ -1606,7 +1609,10 @@ class Pool:
         self.cache._named_pool_ = self
 
     def __exit__(self, *args):
-        """Unset the named pool and restore the previous cache selection."""
+        """Unset the named pool and restore the previous cache selection.
+
+        If the pool opened the first scope, get_cache returns the default.
+        """
         _CACHE.depth -= 1
         _CACHE.cache = self.previously_entered_cache
         self.cache._named_pool_ = None

@@ -141,7 +141,11 @@ class Results(tuple):
         return tuple(dict.fromkeys(proxy._future_ for proxy in proxies))
 
     def _result(self):
-        """Return realized results, waiting for completion when needed."""
+        """Return realized results, waiting for completion when needed.
+
+        Resolve inside a try block to catch deferred action errors there.
+        An enclosing context scope also surfaces tracked errors on exit.
+        """
         proxies, rebuild = Results._sieve_proxies(self)
         if not proxies:
             return self

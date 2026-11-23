@@ -56,6 +56,7 @@ class ProxyResult(Proxy, IResult):
         return hash(self.uuid)
 
     def _alias(self, name, provenance, ctx, qiime_type=None):
+        """Create the alias once the producing result is available."""
         if self._qiime_type_ is not None:
             self._assert_alias_type_refines_realized_type(
                 qiime_type, self._qiime_type_)

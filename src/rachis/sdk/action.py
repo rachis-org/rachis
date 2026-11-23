@@ -489,9 +489,14 @@ class Action:
         self.__init(**dill.loads(state))
 
     def _outer_bind(self, context_factory, *, name=None):
-        """Build the callable that enters the outer stack and dispatches."""
+        """Bind an action to a context factory and build its callable.
+
+        A registered action is shared across calls. The factory gives each
+        application its own context and lets pipelines coordinate nested calls.
+        """
         def bound_callable(*args, **kwargs):
             bound = self._wrapper_signature.bind(*args, **kwargs)
+            # Include default arguments in the invocation's provenance.
             bound.apply_defaults()
             ctx = context_factory()
             frame = Frame(self, ctx, bound.arguments,
@@ -692,6 +697,7 @@ class Pipeline(Action):
     type = 'pipeline'
     _ProvCaptureCls = archive.PipelineProvenanceCapture
 
+    # Pipeline inputs are artifacts. Their annotations describe the interface.
     inner_apply_wrappers = (
         *Action.inner_apply_wrappers,
         pipeline_alias_wrapper,
