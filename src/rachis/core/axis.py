@@ -95,6 +95,9 @@ class _ForEachMeta(type):
         axes = {entry.axis for entry in pattern}
         if not axes or len(axes) != len(pattern):
             raise ValueError('ForEach requires distinct axis names')
+        if len({entry.binding for entry in pattern}) != len(pattern):
+            raise ValueError(
+                'ForEach must use unique bindings in each pattern')
         if len({entry.coverage for entry in pattern}) != 1:
             raise TypeError('A composite axis needs uniform coverage')
         return cls(tuple(pattern), bound)
@@ -133,10 +136,7 @@ class ForEach(metaclass=_ForEachMeta):
         return self.entries[0].coverage
 
     def normalize(self):
-        """Use the bound form of the pattern and validate binding names."""
-        if len(set(self.bindings)) != len(self.entries):
-            raise ValueError(
-                'ForEach must use unique bindings in each pattern')
+        """Return the explicitly bound form of the pattern."""
         return replace(self, _bound=True)
 
     def as_unbound(self):
@@ -205,16 +205,19 @@ class CoordinateJoin:
         complete = frozenset(self._complete)
         optional = frozenset(
             name for name in self._complete if rules[name] == 'optional')
-        self._domain = (complete & self._matched) or optional or complete
+        self._domain_inputs = (
+            (complete & self._matched) or optional or complete
+        )
 
     @property
-    def presence_inputs(self):
+    def coverage_inputs(self):
         """Names whose realized keys can change coverage."""
-        return self._domain | self._matched | frozenset(self._required)
+        return self._domain_inputs | self._matched | frozenset(self._required)
 
     def coverage(self, present):
         """Return missing required inputs, or None for an excluded key."""
-        if self._domain.isdisjoint(present) or not self._matched <= present:
+        if (self._domain_inputs.isdisjoint(present)
+                or not self._matched <= present):
             return None
         return tuple(name for name in self._required if name not in present)
 

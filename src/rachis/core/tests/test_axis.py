@@ -72,7 +72,7 @@ def test_for_each_bindings():
     assert normalized.normalize() == normalized
     assert normalized.as_unbound() == pattern
     with pytest.raises(ValueError, match='unique bindings'):
-        ForEach['student':'assignment', 'assignment'].normalize()
+        ForEach['student':'assignment', 'assignment']
     with pytest.raises(TypeError, match='bindings must be strings'):
         ForEach['student':1]
     with pytest.raises(TypeError, match='Invalid axis name'):
@@ -176,14 +176,14 @@ def test_projected_match_filters_the_complete_optional_domain():
     ]
 
 
-def test_presence_inputs_include_domain_drivers_and_coverage_checks():
+def test_coverage_inputs_include_domain_drivers_and_coverage_checks():
     join = CoordinateJoin({
         'scores': ForEach['student'::'optional', 'assignment'::'optional'],
         'offset': ForEach['student'::'optional'],
         'weight': ForEach['assignment'::'required'],
         'roster': ForEach['student'],
     })
-    assert join.presence_inputs == {'scores', 'weight', 'roster'}
+    assert join.coverage_inputs == {'scores', 'weight', 'roster'}
 
 
 @pytest.mark.parametrize(('rule', 'left', 'right'), [
