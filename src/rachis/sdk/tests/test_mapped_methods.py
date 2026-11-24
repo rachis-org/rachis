@@ -15,12 +15,14 @@ from unittest.mock import patch
 import pytest
 import dill
 
-from rachis import Artifact, ForEach
+from rachis import Artifact, ForEach, Metadata
 from rachis.core.archive import Archiver, ImportProvenanceCapture
 from rachis.core.testing.format import OldMappingDirFmt
 from rachis.core.testing.type import AssignmentScores, Mapping
 from rachis.core.testing.util import get_dummy_plugin
+from rachis.core.util import load_action_yaml
 from rachis.plugin import CaptureHolder, Int
+from rachis.plugin import Metadata as MetadataType
 from rachis.plugin.plugin import TransformerRecord
 from rachis.sdk import MappedMethod, PluginManager, Results
 from rachis.sdk.context import Context, ParallelContext
@@ -71,9 +73,39 @@ def test_per_output_filtering():
     retained, all_samples = method(data)
     assert retained.view(dict) == {'s1': '4'}
     assert all_samples.view(dict) == {'s1': '4', 's2': '-5'}
-    records = retained._archiver.provenance_dir / 'action' / 'coordinates.tsv'
+    action_dir = retained._archiver.provenance_dir / 'action'
+    records = action_dir / 'cell-coordinates.tsv'
     assert records.read_text().splitlines() == [
         'sample\tattempt\toutcome', 's1\t1\tcompleted', 's2\t1\tfiltered',
+    ]
+
+
+def test_cell_coordinates_do_not_overwrite_coordinates_metadata(tmp_path):
+    def copy_samples(
+        data: Annotated[str, ForEach['sample']], coordinates: Metadata,
+    ) -> Annotated[str, ForEach['sample']]:
+        return data
+
+    source = tmp_path / 'metadata.tsv'
+    source.write_text('sample-id\tlocation\ns1\tnorth\n')
+    metadata = Metadata.load(source)
+    data = Artifact.import_data(Mapping, {'s1': '4'})
+    plugin = get_dummy_plugin()
+    with patch.dict(plugin.methods):
+        plugin.methods.register_function(
+            copy_samples, inputs={'data': Mapping},
+            parameters={'coordinates': MetadataType},
+            outputs={'output': Mapping}, name='Copy samples', description='',
+        )
+        output = plugin.methods['copy_samples'](data, metadata).output
+
+    action_dir = output._archiver.provenance_dir / 'action'
+    assert Metadata.load(action_dir / 'coordinates.tsv') == metadata
+    action = load_action_yaml(output._archiver.path)
+    records = action['execution']['coordinates']['records']
+    assert records == 'cell-coordinates.tsv'
+    assert (action_dir / records).read_text().splitlines() == [
+        'sample\tattempt\toutcome', 's1\t1\tcompleted',
     ]
 
 

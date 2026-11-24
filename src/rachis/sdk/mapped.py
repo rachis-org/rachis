@@ -344,6 +344,7 @@ def mapped_workspace_wrapper(frame):
 
 def _archive_outputs(frame, written):
     provenance = frame.ready_provenance.result()
+    records = 'cell-coordinates.tsv'
     artifacts = []
     for (name, spec), (directory, selected) in zip(
         frame.output_types.items(), written, strict=True
@@ -353,8 +354,8 @@ def _archive_outputs(frame, written):
             capture, 'return', frame.transforms.get(('return', name)))
         pattern = frame.action.signature.output_patterns[name]
         capture.coordinates = {
-            'axes': list(pattern.axes), 'records': 'coordinates.tsv'}
-        with (capture.action_dir / 'coordinates.tsv').open('w') as stream:
+            'axes': list(pattern.axes), 'records': records}
+        with (capture.action_dir / records).open('w') as stream:
             writer = csv.writer(stream, delimiter='\t', lineterminator='\n')
             writer.writerow((*pattern.axes, 'attempt', 'outcome'))
             for coord, value in selected:
