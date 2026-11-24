@@ -8,6 +8,7 @@
 
 from contextlib import contextmanager
 from concurrent.futures import Future
+from datetime import datetime, timedelta, timezone
 from threading import Event, current_thread
 from typing import Annotated
 from unittest.mock import patch
@@ -70,14 +71,30 @@ def test_per_output_filtering():
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '-5'})
     method = plugin.methods['filter_samples']
     assert isinstance(method, MappedMethod)
-    retained, all_samples = method(data)
+    offset = timedelta(hours=5, minutes=30)
+    with patch('rachis.core.archive.provenance.tzlocal.get_localzone',
+               return_value=timezone(offset)):
+        before = datetime.now(timezone.utc)
+        retained, all_samples = method(data)
+        after = datetime.now(timezone.utc)
     assert retained.view(dict) == {'s1': '4'}
     assert all_samples.view(dict) == {'s1': '4', 's2': '-5'}
     action_dir = retained._archiver.provenance_dir / 'action'
     records = action_dir / 'cell-coordinates.tsv'
-    assert records.read_text().splitlines() == [
-        'sample\tattempt\toutcome', 's1\t1\tcompleted', 's2\t1\tfiltered',
+    header, *rows = records.read_text().splitlines()
+    assert header == 'sample\tattempt\toutcome\tstart\tend'
+    assert [row.split('\t')[:3] for row in rows] == [
+        ['s1', '1', 'completed'], ['s2', '1', 'filtered'],
     ]
+    all_records = (all_samples._archiver.provenance_dir / 'action'
+                   / 'cell-coordinates.tsv')
+    assert [row.split('\t')[3:] for row in rows] == [
+        row.split('\t')[3:] for row in all_records.read_text().splitlines()[1:]
+    ]
+    for row in rows:
+        start, end = map(datetime.fromisoformat, row.split('\t')[3:])
+        assert start.utcoffset() == end.utcoffset() == offset
+        assert before <= start <= end <= after
 
 
 def test_cell_coordinates_do_not_overwrite_coordinates_metadata(tmp_path):
@@ -104,9 +121,9 @@ def test_cell_coordinates_do_not_overwrite_coordinates_metadata(tmp_path):
     action = load_action_yaml(output._archiver.path)
     records = action['execution']['coordinates']['records']
     assert records == 'cell-coordinates.tsv'
-    assert (action_dir / records).read_text().splitlines() == [
-        'sample\tattempt\toutcome', 's1\t1\tcompleted',
-    ]
+    header, row = (action_dir / records).read_text().splitlines()
+    assert header == 'sample\tattempt\toutcome\tstart\tend'
+    assert row.split('\t')[:3] == ['s1', '1', 'completed']
 
 
 def test_mapped_provenance_appends_axis_and_cell_transformations():

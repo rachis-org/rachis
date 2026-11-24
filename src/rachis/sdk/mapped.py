@@ -15,13 +15,14 @@ from functools import partial
 from pathlib import Path
 import shutil
 import tempfile
+import time
 from types import SimpleNamespace
 from typing import Callable, get_args
 
 import dill
 
 from rachis.core import transform
-from rachis.core.archive.provenance import ActionProvenanceCapture
+from rachis.core.archive.provenance import ActionProvenanceCapture, _ts_to_date
 from rachis.core.axis import Coord
 from rachis.plugin.model.base import FormatBase
 from rachis.sdk.action import (
@@ -202,6 +203,7 @@ def cell_workspace_wrapper(frame):
 
 @contextmanager
 def cell_provenance_wrapper(frame):
+    start = _ts_to_date(time.time()).isoformat()
     transforms = []
 
     def recorder(name):
@@ -210,7 +212,11 @@ def cell_provenance_wrapper(frame):
 
     frame.provenance = SimpleNamespace(transformation_recorder=recorder)
     yield
-    _write_record(frame.workspace / 'transformers', tuple(transforms))
+    _write_record(frame.workspace / 'transformers', {
+        'start': start,
+        'end': _ts_to_date(time.time()).isoformat(),
+        'transformers': tuple(transforms),
+    })
 
 
 def _transform_recorder(append):
@@ -305,9 +311,11 @@ def mapped_transforms_wrapper(frame):
         for name, index in frame.coordinate_indexes.items()
         if index.transforms
     }
-    for attempt, _ in frame.attempts.values():
-        records = _read_record(attempt / 'transformers')
-        for name, source, target, key in records:
+    frame.cell_times = {}
+    for coord, (attempt, _) in frame.attempts.items():
+        trace = _read_record(attempt / 'transformers')
+        frame.cell_times[coord] = (trace['start'], trace['end'])
+        for name, source, target, key in trace['transformers']:
             frame.transforms.setdefault(name, {})[source, target, key] = None
     for name in frame.action.signature.inputs:
         _record_transforms(provenance, name, frame.transforms.get(name))
@@ -318,12 +326,13 @@ def _write_outputs(frame):
     outputs = []
     for name in frame.output_types:
         selected = [
-            (frame.cells[coord].output_coordinates[name], views[name])
+            (frame.cells[coord].output_coordinates[name], views[name],
+             frame.cell_times[coord])
             for coord, (_, views) in frame.attempts.items()
         ]
         with ExitStack() as resources:
             chunks = ((coord, resources.enter_context(view.open()))
-                      for coord, view in selected if view is not None)
+                      for coord, view, _ in selected if view is not None)
             outputs.append((frame.axes[name].axis.write(chunks), selected))
     return outputs
 
@@ -357,10 +366,11 @@ def _archive_outputs(frame, written):
             'axes': list(pattern.axes), 'records': records}
         with (capture.action_dir / records).open('w') as stream:
             writer = csv.writer(stream, delimiter='\t', lineterminator='\n')
-            writer.writerow((*pattern.axes, 'attempt', 'outcome'))
-            for coord, value in selected:
-                writer.writerow((*coord.values(), 1,
-                                 'filtered' if value is None else 'completed'))
+            writer.writerow((*pattern.axes, 'attempt', 'outcome', 'start',
+                             'end'))
+            for coord, value, (start, end) in selected:
+                outcome = 'filtered' if value is None else 'completed'
+                writer.writerow((*coord.values(), 1, outcome, start, end))
         # The writer has already assembled the registered directory format.
         artifact = Artifact._from_view(
             spec.qiime_type, directory, type(directory), capture)
