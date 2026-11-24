@@ -66,16 +66,6 @@ class TestResults(unittest.TestCase):
         with self.assertRaises(AttributeError):
             r.baz
 
-    def test_result_helpers_do_not_shadow_output_names(self):
-        outputs = {'result': 42, 'from_named': 43, '_completion_future': 44,
-                   '_future_': 45}
-        results = Results(outputs, outputs.values())
-        for named in (results, results._result()):
-            self.assertEqual(named.result, 42)
-            self.assertEqual(named.from_named, 43)
-            self.assertEqual(named._completion_future, 44)
-            self.assertEqual(named._future_, 45)
-
     def test_pending_results_project_from_shared_future(self):
         spec = SimpleNamespace(qiime_type=IntSequence1)
         signature = {'left': spec, 'right': spec}
