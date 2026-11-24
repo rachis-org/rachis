@@ -126,9 +126,9 @@ class Context(IContext):
         if owner is not None:
             owner.callback(cleanup.pop_all().close)
 
-    def _dispatch_cells_(self, cells):
-        """Take ownership of cell frames and return a future per coordinate."""
-        return {coord: as_future(cell) for coord, cell in cells.items()}
+    def _dispatch_cells_(self, cells, *, cleanup):
+        """Take ownership of cell frames and return cell and batch futures."""
+        return {coord: as_future(cell) for coord, cell in cells.items()}, ()
 
     def _check_cache(self, bound_arguments):
         plugin = self.action_obj.plugin_id.replace('_', '-')

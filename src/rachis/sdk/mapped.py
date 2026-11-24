@@ -6,9 +6,12 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+"""Bind coordinate calls and assemble their committed cells locally."""
+
 import copy
 import csv
-from concurrent.futures import wait
+from concurrent.futures import Future, wait
+import os
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -32,7 +35,8 @@ from rachis.sdk.action import (
     provenance_wrapper,
 )
 from rachis.sdk.plugin_manager import PluginManager
-from rachis.sdk.futures import after_all, join, result_as_future
+from rachis.sdk.futures import after_all, after_settled, join, result_as_future
+from rachis.sdk.proxy import ProxyArtifact
 from rachis.sdk.result import Artifact
 from rachis.sdk.results import Results
 
@@ -58,6 +62,16 @@ class PreparedIndex:
     def close(self):
         """Release the driver's ownership of the directory."""
         self.directory = None
+
+
+@dataclass(frozen=True)
+class ProxyCell:
+    """A future for one output cell or its absence."""
+
+    future: Future
+
+    def result(self):
+        return self.future.result()
 
 
 @contextmanager
@@ -105,6 +119,77 @@ def _read_record(path):
 def _write_record(path, value):
     with path.open('wb') as stream:
         dill.dump(value, stream)
+
+
+def read_commit(path):
+    """Read the winning attempt's directory or its recorded failure."""
+    return _read_record(path)
+
+
+def commit_attempt(path, attempt):
+    """Publish the completed attempt atomically on the shared filesystem."""
+    with tempfile.TemporaryDirectory(dir=path.parent) as directory:
+        manifest = Path(directory) / 'attempt'
+        _write_record(manifest, attempt)
+        try:
+            os.link(manifest, path)
+        except FileExistsError:
+            if isinstance(attempt, Path):
+                shutil.rmtree(attempt)
+            attempt = read_commit(path)
+    return attempt
+
+
+def _realized_index(cells, *, into):
+    def retain_present(settled):
+        # A failed value still occupies its coordinate. Alignment can exclude
+        # it, or leave its failed future as a dependency of a downstream call.
+        pairs = zip(cells.items(), settled, strict=True)
+        present = {key: cell for (key, cell), future in pairs
+                   if (future.cancelled() or future.exception() is not None
+                       or future.result() is not None)}
+        return PreparedIndex(present)
+
+    after_settled((cell.future for cell in cells.values()), retain_present,
+                  into=into)
+
+
+def _index_for_path(semantic_type, source, target, cells):
+    if source.axes == target.axes:
+        return cells
+    return None
+
+
+def coordinate_index(value, pattern, *, ctx, need_presence=True):
+    """Resolve the keys needed for coverage, with values possibly pending."""
+    if not isinstance(value, ProxyArtifact):
+        return _index_argument(value, pattern, ctx=ctx)
+    index = value._coordinate_index
+    artifact = value._future_
+    if (index is None or (artifact.done() and not artifact.cancelled()
+                          and artifact.exception() is None)):
+        return _index_argument(value, pattern, ctx=ctx)
+
+    ready = Future()
+
+    def reveal(done):
+        try:
+            info = done.result()
+            if info is not None:
+                source, cells, filterable = info
+                cells = _index_for_path(value.type, source, pattern, cells)
+                if cells is not None:
+                    if filterable and need_presence:
+                        _realized_index(cells, into=ready)
+                    else:
+                        ready.set_result(PreparedIndex(cells))
+                    return
+            _index_argument(value, pattern, ctx=ctx, into=ready)
+        except BaseException as error:
+            ready.set_exception(error)
+
+    index.add_done_callback(reveal)
+    return ready
 
 
 class MappedProvenance(ActionProvenanceCapture):
@@ -391,7 +476,7 @@ def mapped_cells_wrapper(frame):
     # Assembly owns its state while dispatch retains the exterior result.
     completed = copy.copy(frame)
 
-    def assemble(inputs, attempts):
+    def assemble(inputs, attempts, _):
         completed.bound_arguments = inputs
         completed.attempts = dict(zip(completed.cells, attempts, strict=True))
         with (
@@ -403,12 +488,34 @@ def mapped_cells_wrapper(frame):
         return _archive_outputs(completed, written)
 
     inputs_ready = result_as_future(frame.bound_arguments)
-    attempts = [after_all((futures[coord],), _read_attempt)
-                for coord in frame.cells]
-    cells_ready = after_all(attempts, tuple)
-    future = join((inputs_ready, cells_ready), assemble, ctx=frame.ctx)
+    attempts = {
+        coord: after_all((futures[coord],), _read_attempt)
+        for coord in frame.cells
+    }
+    cells_ready = after_all(attempts.values(), tuple)
+    # Readers can use committed cells while a batch is still running.
+    batches_ready = after_all(frame.batch_futures, lambda _: None)
+    future = join(
+        (inputs_ready, cells_ready, batches_ready), assemble, ctx=frame.ctx,
+    )
     frame.workspace_cleanup.callback(wait, (future,))
-    frame.results = Results._from_future(future, frame.output_types)
+    outputs = []
+    signature = frame.action.signature
+    for name, spec in frame.output_types.items():
+        cells = {
+            cell.output_coordinates[name]: ProxyCell(
+                after_all((attempts[coord],), lambda values, name=name:
+                          values[0][1][name]))
+            for coord, cell in frame.cells.items()
+        }
+        filterable = type(None) in get_args(signature.outputs[name].view_type)
+        # Archive conversion must preserve the advertised coordinate keys.
+        index = (signature.output_patterns[name], cells, filterable)
+        outputs.append(ProxyArtifact(
+            future, name, spec.qiime_type,
+            coordinate_index=after_all((), lambda _: index),
+        ))
+    frame.results = Results(frame.output_types, outputs)
 
 
 def _read_attempt(values):
@@ -434,10 +541,13 @@ class MappedMethod(Method):
 
     def _prepare_coordinate_indexes(self, frame):
         """Resolve the mapped arguments' indexes in their declared axes."""
+        signature = self.signature
+        coverage_inputs = signature.coordinate_coverage_inputs
         indexes = {
-            name: _index_argument(frame.bound_arguments[name], pattern,
-                                  ctx=frame.ctx)
-            for name, pattern in self.signature.input_patterns.items()
+            name: coordinate_index(
+                frame.bound_arguments[name], pattern, ctx=frame.ctx,
+                need_presence=name in coverage_inputs)
+            for name, pattern in signature.input_patterns.items()
         }
         ready = after_all(indexes.values(), lambda values:
                           dict(zip(indexes, values, strict=True)))
@@ -459,7 +569,27 @@ class MappedMethod(Method):
         with ExitStack() as stack:
             for wrapper in wrappers:
                 stack.enter_context(wrapper(frame))
-            frame.cell_futures = frame.ctx._dispatch_cells_(frame.cells)
+            frame.cell_futures, frame.batch_futures = (
+                frame.ctx._dispatch_cells_(
+                    frame.cells, cleanup=frame.workspace_cleanup)
+            )
+        return frame.results
+
+    def _inner_apply(self, frame):
+        if frame.path.is_file():
+            frame.results = read_commit(frame.path)
+        else:
+            try:
+                frame.bound_arguments = {
+                    name: value.result() if isinstance(value, ProxyCell)
+                    else value for name, value in frame.bound_arguments.items()
+                }
+                attempt = super()._inner_apply(frame)
+            except Exception as error:
+                attempt = error
+            frame.results = commit_attempt(frame.path, attempt)
+        if isinstance(frame.results, Exception):
+            raise frame.results
         return frame.results
 
 

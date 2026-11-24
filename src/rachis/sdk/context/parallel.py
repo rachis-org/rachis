@@ -6,23 +6,62 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
-from concurrent.futures import Future
+from concurrent.futures import Future, wait
 from contextlib import ExitStack
 from copy import copy
+from dataclasses import dataclass
+from threading import Thread
+from time import sleep
 from types import MappingProxyType
 
 from parsl.app.app import join_app, python_app
 from parsl.dataflow.errors import JoinError
 
 from rachis.sdk.action import Pipeline
-from rachis.sdk.futures import after_all, result_as_future
-from rachis.sdk.mapped import MappedMethod
-from rachis.sdk.proxy import Proxy, output_proxy
+from rachis.sdk.futures import after_all, as_future, result_as_future
+from rachis.sdk.mapped import MappedMethod, ProxyCell, read_commit
+from rachis.sdk.proxy import Proxy, ProxyArtifact, output_proxy
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
 from rachis.sdk.results import Results
 from rachis.sdk.util import Sievable
 
 from .base import Context
+
+
+@dataclass(frozen=True)
+class _ResultDependency:
+    index: int
+
+
+def _watch_cell_commits(pending):
+    """Settle each cell future as soon as its worker publishes an outcome."""
+    try:
+        while pending:
+            for path, (cell, batch) in list(pending.items()):
+                # Check completion before the file so a last-minute commit
+                # can still satisfy its cell future.
+                done = batch.done()
+                try:
+                    if path.is_file():
+                        outcome = read_commit(path)
+                        if isinstance(outcome, Exception):
+                            raise outcome
+                    elif done:
+                        batch.result()
+                        raise RuntimeError(f'Batch did not commit {path.name}')
+                    else:
+                        continue
+                except Exception as error:
+                    cell.set_exception(error)
+                else:
+                    cell.set_result(outcome)
+                del pending[path]
+            if pending:
+                sleep(0.01)
+    finally:
+        for cell, _ in pending.values():
+            if not cell.done():
+                cell.set_exception(RuntimeError('Cell watcher closed'))
 
 
 def _sieve_inputs(frame, types):
@@ -36,24 +75,23 @@ def _sieve_inputs(frame, types):
 
 
 def _map_arguments(frame, futures):
-    """Encode proxies as indexes into the app's dependency list."""
-    proxies, rebuild = _sieve_inputs(frame, Proxy)
+    """Encode references as indexes into the app's dependency list."""
+    references, rebuild = _sieve_inputs(frame, (Proxy, ProxyCell))
 
-    def encode(proxy):
+    def encode(reference):
         index = len(futures)
-        futures.append(proxy._future_)
-        return proxy.__class__(index, proxy._selector_,
-                               getattr(proxy, '_qiime_type_', None))
+        future = (reference.future if isinstance(reference, ProxyCell)
+                  else result_as_future(reference))
+        futures.append(future)
+        return _ResultDependency(index)
 
-    return rebuild(map(encode, proxies))
+    return rebuild(map(encode, references))
 
 
 def _unmap_arguments(frame, inputs):
     """Select the worker's inputs from Parsl's resolved dependencies."""
-    proxies, rebuild = _sieve_inputs(frame, Proxy)
-    return rebuild(
-        proxy._get_element_(inputs[proxy._future_]) for proxy in proxies
-    )
+    dependencies, rebuild = _sieve_inputs(frame, _ResultDependency)
+    return rebuild(inputs[dependency.index] for dependency in dependencies)
 
 
 def _submit_app(frame, executor):
@@ -76,15 +114,12 @@ def _submit_batch(cells, executor):
         frame.bound_arguments = _map_arguments(frame, futures)
 
     def worker(frames, inputs=()):
-        outcomes = []
         with frames[0].ctx.cache:
             for frame in frames:
                 frame.bound_arguments = _unmap_arguments(frame, inputs)
-                try:
-                    outcomes.append(frame())
-                except Exception as error:
-                    outcomes.append(error)
-        return outcomes
+                # Each frame publishes its outcome, including errors. A failed
+                # cell must not prevent the remaining cells from running.
+                as_future(frame)
 
     frames[0].action._set_wrapper_name(worker, frames[0].action.id)
     return python_app(executors=[executor])(worker)(frames, inputs=futures)
@@ -100,7 +135,8 @@ def _join_exception(job):
 
 def _submit_coordinator(body, coordinate_indexes=None):
     results = Results(body.output_types, (
-        output_proxy(Future(), None, spec.qiime_type)
+        output_proxy(Future(), None, spec.qiime_type,
+                     coordinate_index=Future())
         for spec in body.output_types.values()
     ))
     outputs = Results._futures(results)
@@ -110,9 +146,12 @@ def _submit_coordinator(body, coordinate_indexes=None):
     body.ctx._parent = caller_ctx
 
     def fail_outputs(error):
-        for future in outputs:
-            if not future.done():
-                future.set_exception(error)
+        for output in results:
+            if not output._future_.done():
+                output._future_.set_exception(error)
+            if (isinstance(output, ProxyArtifact)
+                    and not output._coordinate_index.done()):
+                output._coordinate_index.set_exception(error)
 
     def run(indexes):
         # Child work belongs to the body, which can submit more actions after
@@ -127,8 +166,16 @@ def _submit_coordinator(body, coordinate_indexes=None):
             except BaseException as error:
                 fail_outputs(error)
             else:
-                for value, output in zip(returned, outputs):
-                    result_as_future(value, into=output)
+                for value, output in zip(returned, results):
+                    if isinstance(output, ProxyArtifact):
+                        index = (value._coordinate_index
+                                 if isinstance(value, ProxyArtifact) else None)
+                        if index is None:
+                            output._coordinate_index.set_result(None)
+                        else:
+                            after_all((index,), lambda values: values[0],
+                                      into=output._coordinate_index)
+                    result_as_future(value, into=output._future_)
             finally:
                 body.ctx._scopes.pop()
                 body.ctx._defer_cleanup(cleanup)
@@ -195,20 +242,31 @@ class ParallelContext(Context):
         return self.action_executor_mapping.get(
             action.plugin_id, {}).get(action.id, 'default')
 
-    def _dispatch_cells_(self, cells):
+    def _dispatch_cells_(self, cells, *, cleanup):
         if not cells:
-            return {}
-        action = next(iter(cells.values())).action
-        job = _submit_batch(cells.values(), self._get_executor(action))
+            return {}, ()
+        futures = {coord: Future() for coord in cells}
+        executor = self._get_executor(next(iter(cells.values())).action)
+        pending = {}
+        jobs = []
+        try:
+            for batch in self._batches(cells):
+                job = _submit_batch(
+                    (cells[coord] for coord in batch),
+                    executor)
+                jobs.append(job)
+                pending.update((cells[coord].path, (futures[coord], job))
+                               for coord in batch)
+        finally:
+            if jobs:
+                # A batch can still use the workspace after publishing a cell.
+                cleanup.callback(wait, jobs)
+                watcher = Thread(target=_watch_cell_commits, args=(pending,),
+                                 daemon=True)
+                watcher.start()
+                cleanup.callback(watcher.join)
+        return futures, jobs
 
-        def read_cell(values, index):
-            outcome = values[0][index]
-            if isinstance(outcome, Exception):
-                raise outcome
-            return outcome
-
-        return {
-            coord: after_all((job,), lambda values, index=index:
-                             read_cell(values, index))
-            for index, coord in enumerate(cells)
-        }
+    def _batches(self, cells):
+        for coord in cells:
+            yield (coord,)

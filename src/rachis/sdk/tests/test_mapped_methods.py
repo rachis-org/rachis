@@ -7,8 +7,11 @@
 # ----------------------------------------------------------------------------
 
 from contextlib import contextmanager
-from concurrent.futures import Future
+from concurrent.futures import Future, wait
+from copy import copy
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Event, current_thread
 from typing import Annotated
 from unittest.mock import patch
@@ -19,7 +22,7 @@ from parsl.serialize import pack_apply_message, unpack_apply_message
 import pytest
 import dill
 
-from rachis import Artifact, ForEach, Metadata
+from rachis import Artifact, Coord, ForEach, Metadata
 from rachis.core.archive import Archiver, ImportProvenanceCapture
 from rachis.core.testing.format import OldMappingDirFmt
 from rachis.core.testing.type import AssignmentScores, Mapping
@@ -31,7 +34,9 @@ from rachis.plugin.plugin import TransformerRecord
 from rachis.sdk import MappedMethod, PluginManager, Results
 from rachis.sdk.action import FramePhase
 from rachis.sdk.context import Context, ParallelContext
-from rachis.sdk.futures import as_future
+from rachis.sdk.context.parallel import _submit_batch
+from rachis.sdk.futures import after_all, as_future
+from rachis.sdk.mapped import commit_attempt, read_commit
 from rachis.sdk.parallel_config import ParallelConfig
 from rachis.sdk.proxy import ProxyArtifact
 
@@ -374,12 +379,12 @@ def test_deferred_cells_gather_locally_and_keep_their_workspace():
         def _dispatch_action_(self, frame):
             return frame()
 
-        def _dispatch_cells_(self, cells):
+        def _dispatch_cells_(self, cells, *, cleanup):
             futures = {}
             for coord, cell in cells.items():
                 future = futures[coord] = Future()
                 pending.append((cell, future))
-            return futures
+            return futures, ()
 
     with DeferredContext() as ctx:
         with DeferredContext(method, parent=ctx) as child:
@@ -404,11 +409,11 @@ def test_deferred_cells_gather_locally_and_keep_their_workspace():
 
 def test_serialized_cells_resume_at_evaluation():
     class SerializingContext(Context):
-        def _dispatch_cells_(self, cells):
+        def _dispatch_cells_(self, cells, *, cleanup):
             return {
                 coord: as_future(dill.loads(dill.dumps(cell)))
                 for coord, cell in cells.items()
-            }
+            }, ()
 
     method = get_dummy_plugin().methods['increment_samples']
     old = OldMappingDirFmt()
@@ -493,3 +498,565 @@ def test_cell_workspace_is_removed_when_evaluation_fails():
             method._outer_bind(lambda: ObservedContext(method))(data, 1)
     assert workspaces
     assert all(not path.exists() for path in workspaces)
+
+
+@pytest.mark.parametrize('through_pipeline', [False, True])
+def test_parsl_resolves_a_coordinate_through_the_dag_before_batch_exit(
+    through_pipeline,
+):
+    plugin = get_dummy_plugin()
+    pipeline = plugin.pipelines['mapped_sample_pipeline']
+    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '-5'})
+    downstream_committed = Event()
+    order = []
+    invocations = []
+    inner_apply = MappedMethod._inner_apply
+
+    def retain_samples(ctx, data):
+        filter_samples = ctx.get_action('dummy_plugin', 'filter_samples')
+        return filter_samples(data).all_samples
+
+    def increment_retained(ctx, data):
+        if through_pipeline:
+            retained, = ctx.get_action('dummy_plugin', 'retain_samples')(data)
+        else:
+            retained = retain_samples(ctx, data)
+        increment = ctx.get_action('dummy_plugin', 'increment_samples')
+        intermediate, = increment(retained, 1)
+        return increment(intermediate, 2).output
+
+    @contextmanager
+    def observe_invocation(frame):
+        yield
+        results = frame.results
+        assert isinstance(results, Results)
+        for output in results:
+            assert isinstance(output, ProxyArtifact)
+        invocations.append(frame.action.id)
+        if (frame.action.id == 'increment_samples'
+                and frame.bound_arguments['amount'] == 2):
+            index = results.output._coordinate_index.result()[1]
+            ready = index[Coord(sample='s1')].future
+            ready.add_done_callback(mark_committed)
+
+    def mark_committed(future):
+        future.result()
+        order.append('third-stage s1')
+        downstream_committed.set()
+
+    def batches(ctx, cells):
+        if ctx.action_obj.id == 'filter_samples':
+            yield tuple(cells)
+        else:
+            for cell in cells:
+                yield (cell,)
+
+    def observe_cell(self, frame):
+        coord = frame.coordinate
+        if frame.action.id == 'filter_samples' and coord.sample == 's2':
+            # Block the producer app itself until the third stage commits s1.
+            assert downstream_committed.wait(timeout=10), (
+                'downstream s1 waited for the producer batch')
+            order.append('producer s2')
+        return inner_apply(self, frame)
+
+    with patch.dict(plugin.pipelines), TemporaryDirectory() as run_dir:
+        plugin.pipelines.register_function(
+            retain_samples, inputs={'data': Mapping}, parameters={},
+            outputs={'retained': Mapping}, name='Retain samples',
+            description='',
+        )
+        config = Config(
+            executors=[SerializingExecutor(label='default', max_threads=3)],
+            run_dir=run_dir,
+        )
+        with (patch.object(pipeline, '_callable', increment_retained),
+              patch.object(ParallelContext, '_batches', batches),
+              patch.object(MappedMethod, 'inner_bind_wrappers',
+                           (observe_invocation,
+                            *MappedMethod.inner_bind_wrappers)),
+              patch.object(MappedMethod, '_inner_apply', observe_cell),
+              ParallelConfig(config)):
+            result = pipeline.parallel(data).output
+
+    assert order == ['third-stage s1', 'producer s2']
+    assert invocations == [
+        'filter_samples', 'increment_samples', 'increment_samples']
+    assert result.view(dict) == {'s1': '7', 's2': '-2'}
+
+
+def test_pending_optional_broadcast_streams_before_producer_batch_finishes():
+    plugin = get_dummy_plugin()
+    downstream_committed = Event()
+    order = []
+    inner_apply = MappedMethod._inner_apply
+
+    def broadcast_offset(
+        offset: Annotated[str | None, ForEach['sample':'student':'optional']],
+        data: Annotated[str, ForEach['student', 'assignment']],
+    ) -> Annotated[str, ForEach['student', 'assignment']]:
+        return str(int(data) + (0 if offset is None else int(offset)))
+
+    def broadcast_pipeline(ctx, offsets, scores):
+        retained, _ = ctx.get_action('dummy_plugin', 'filter_samples')(offsets)
+        return ctx.get_action('dummy_plugin', 'broadcast_offset')(
+            retained, scores).output
+
+    def mark_committed(future):
+        future.result()
+        order.append('consumer s1')
+        if len(order) == 2:
+            downstream_committed.set()
+
+    @contextmanager
+    def observe_invocation(frame):
+        yield
+        if frame.action.id == 'broadcast_offset':
+            cells = frame.results.output._coordinate_index.result()[1]
+            for assignment in ('a1', 'a2'):
+                cell = cells[Coord(student='s1', assignment=assignment)]
+                cell.future.add_done_callback(mark_committed)
+
+    def batches(ctx, cells):
+        if ctx.action_obj.id == 'filter_samples':
+            yield tuple(cells)
+        else:
+            for cell in cells:
+                yield (cell,)
+
+    def observe_cell(self, frame):
+        if (frame.action.id == 'filter_samples'
+                and frame.coordinate.sample == 's2'):
+            assert downstream_committed.wait(timeout=10), (
+                'broadcast consumers waited for the producer batch')
+            order.append('producer s2')
+        return inner_apply(self, frame)
+
+    with (patch.dict(plugin.methods), patch.dict(plugin.pipelines),
+          TemporaryDirectory() as run_dir):
+        plugin.methods.register_function(
+            broadcast_offset,
+            inputs={'offset': Mapping, 'data': AssignmentScores},
+            parameters={}, outputs={'output': AssignmentScores},
+            name='Broadcast a pending offset', description='',
+        )
+        plugin.pipelines.register_function(
+            broadcast_pipeline,
+            inputs={'offsets': Mapping, 'scores': AssignmentScores},
+            parameters={}, outputs={'output': AssignmentScores},
+            name='Broadcast through a pipeline', description='',
+        )
+        offsets = Artifact.import_data('Mapping', {'s1': '10', 's2': '-5'})
+        scores = Artifact.import_data(
+            'AssignmentScores', {'s1/a1': '4', 's1/a2': '5', 's2/a1': '6'})
+        config = Config(
+            executors=[SerializingExecutor(label='default', max_threads=3)],
+            run_dir=run_dir,
+        )
+        with (patch.object(ParallelContext, '_batches', batches),
+              patch.object(MappedMethod, 'inner_bind_wrappers',
+                           (observe_invocation,
+                            *MappedMethod.inner_bind_wrappers)),
+              patch.object(MappedMethod, '_inner_apply', observe_cell),
+              ParallelConfig(config)):
+            result = plugin.pipelines['broadcast_pipeline'].parallel(
+                offsets, scores).output
+
+    assert order == ['consumer s1', 'consumer s1', 'producer s2']
+    assert result.view(dict) == {'s1/a1': '14', 's1/a2': '15', 's2/a1': '6'}
+
+
+@pytest.mark.parametrize('coverage', ['optional', 'required'])
+def test_optional_broadcast_does_not_restore_filtered_composite_cells(
+    coverage, tmp_path,
+):
+    filtering = Event()
+    release_filter = Event()
+    producer_exit = Future()
+    dispatched = []
+    dispatch_cells = ParallelContext._dispatch_cells_
+
+    def observe_dispatch(ctx, cells, *, cleanup):
+        if ctx.action_obj.id == 'add_offset':
+            dispatched.extend(cells)
+        return dispatch_cells(ctx, cells, cleanup=cleanup)
+
+    def hold_score_batches(cells, executor):
+        cells = tuple(cells)
+        job = _submit_batch(cells, executor)
+        if cells[0].action.id == 'filter_scores':
+            return after_all((job, producer_exit), lambda _: None)
+        return job
+    observed = []
+
+    def filter_scores(
+        data: Annotated[str, ForEach['student', 'assignment']],
+    ) -> Annotated[str | None, ForEach['student', 'assignment']]:
+        if int(data) < 0:
+            filtering.set()
+            assert release_filter.wait(timeout=5)
+            return None
+        return data
+
+    def add_offset(
+        data: Annotated[str | None, ForEach[
+            'student'::coverage, 'assignment'::coverage]],
+        offset: Annotated[str | None, ForEach['sample':'student':'optional']],
+    ) -> Annotated[str, ForEach['student', 'assignment']]:
+        observed.append((data, offset))
+        return str(int(data or 0) + int(offset or 0))
+
+    plugin = get_dummy_plugin()
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=3)],
+        run_dir=str(tmp_path),
+    )
+    with patch.dict(plugin.methods):
+        plugin.methods.register_function(
+            filter_scores, inputs={'data': AssignmentScores}, parameters={},
+            outputs={'retained': AssignmentScores},
+            name='Filter scores', description='',
+        )
+        plugin.methods.register_function(
+            add_offset, inputs={'data': AssignmentScores, 'offset': Mapping},
+            parameters={}, outputs={'output': AssignmentScores},
+            name='Add an optional offset', description='',
+        )
+        scores = Artifact.import_data(
+            'AssignmentScores', {'s1/a1': '4', 's1/a2': '-5', 's2/a1': '6'})
+        offsets = Artifact.import_data('Mapping', {'s1': '10'})
+        with (patch.object(ParallelContext, '_dispatch_cells_',
+                           observe_dispatch),
+              patch('rachis.sdk.context.parallel._submit_batch',
+                    hold_score_batches),
+              ParallelConfig(config), ParallelContext(None) as ctx):
+            retained = ctx.get_action('dummy_plugin', 'filter_scores')(
+                scores).retained
+            output = ctx.get_action('dummy_plugin', 'add_offset')(
+                retained, offsets).output
+            try:
+                assert filtering.wait(timeout=5)
+                assert not dispatched
+                release_filter.set()
+                _, index, _ = output._coordinate_index.result(timeout=5)
+                assert set(index) == {
+                    Coord(student='s1', assignment='a1'),
+                    Coord(student='s2', assignment='a1'),
+                }
+                cell = index[Coord(student='s1', assignment='a1')]
+                cell = cell.future.result(timeout=5)
+                with cell.open() as value:
+                    assert value == '14'
+                assert not retained._future_.done()
+            finally:
+                release_filter.set()
+                producer_exit.set_result(None)
+
+    assert [(key.student, key.assignment) for key in dispatched] == [
+        ('s1', 'a1'), ('s2', 'a1'),
+    ]
+
+    assert sorted(observed, key=repr) == [('4', '10'), ('6', None)]
+    assert output.view(dict) == {'s1/a1': '14', 's2/a1': '6'}
+    action_dir = output._archiver.provenance_dir / 'action'
+    records = action_dir / 'cell-coordinates.tsv'
+    header, *rows = records.read_text().splitlines()
+    assert header == 'student\tassignment\tattempt\toutcome\tstart\tend'
+    assert [row.split('\t')[:4] for row in rows] == [
+        ['s1', 'a1', '1', 'completed'],
+        ['s2', 'a1', '1', 'completed'],
+    ]
+
+
+def test_parallel_root_cleans_up_mapped_work_after_pipeline_error(tmp_path):
+    pipeline = get_dummy_plugin().pipelines['mapped_sample_pipeline']
+    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
+    commits = []
+
+    def fail_after_dispatch(ctx, data):
+        ctx.get_action('dummy_plugin', 'filter_samples')(data)
+        raise ValueError('pipeline failed after dispatch')
+
+    def observe_commit(path, outcome):
+        result = commit_attempt(path, outcome)
+        assert path.is_file()
+        commits.append(path)
+        return result
+
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    with (patch.object(pipeline, '_callable', fail_after_dispatch),
+          patch('rachis.sdk.mapped.commit_attempt', observe_commit),
+          ParallelConfig(config)):
+        with pytest.raises(ValueError, match='pipeline failed after dispatch'):
+            pipeline.parallel(data)
+
+        assert len(commits) == 2
+        assert all(not path.parent.exists() for path in commits)
+
+
+def test_range_alignment_excludes_failed_cells_before_dispatch(tmp_path):
+    observed = []
+
+    def align_samples(
+        data: Annotated[str, ForEach['sample']],
+        roster: Annotated[str, ForEach['sample']],
+    ) -> Annotated[str, ForEach['sample']]:
+        observed.append((data, roster))
+        return data
+
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    plugin = get_dummy_plugin()
+    with patch.dict(plugin.methods), ParallelConfig(config):
+        plugin.methods.register_function(
+            align_samples, inputs={'data': Mapping, 'roster': Mapping},
+            parameters={}, outputs={'output': Mapping}, name='Align samples',
+            description='',
+        )
+        data = Artifact.import_data(
+            'Mapping', {'s1': '4', 's2': '-5', 's3': 'invalid'})
+        roster = Artifact.import_data('Mapping', {'s1': 'yes', 's2': 'yes'})
+        with (pytest.raises(RuntimeError, match='Mapped cell.*s3.*failed'),
+              ParallelContext(None) as ctx):
+            filter_samples = ctx.get_action('dummy_plugin', 'filter_samples')
+            producer = filter_samples(data).retained
+            align = ctx.get_action('dummy_plugin', 'align_samples')
+            consumer = align(producer, roster).output
+            _, index, _ = consumer._coordinate_index.result(timeout=5)
+            assert tuple(index) == (Coord(sample='s1'),)
+            cell = index[Coord(sample='s1')].future.result(timeout=5)
+            with cell.open() as value:
+                assert value == '4'
+
+        for output in (producer, consumer):
+            with pytest.raises(RuntimeError, match='Mapped cell.*s3.*failed'):
+                output.result()
+    assert observed == [('4', 'yes')]
+
+
+def test_partial_batch_submission_drains_worker_before_workspace_cleanup(
+    tmp_path,
+):
+    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
+    cleanup_started = Event()
+    submitted = []
+    completed = []
+    inner_apply = MappedMethod._inner_apply
+
+    def fail_second_submission(cells, executor):
+        if submitted:
+            raise ValueError('second batch failed to submit')
+        cells = tuple(cells)
+        submitted.append(cells[0].path)
+        return _submit_batch(cells, executor)
+
+    def finish_after_cleanup_starts(self, frame):
+        outcome = inner_apply(self, frame)
+        assert cleanup_started.wait(timeout=5)
+        assert frame.path.is_file()
+        completed.append(frame.path)
+        return outcome
+
+    def drain_batches(jobs):
+        cleanup_started.set()
+        wait(jobs)
+
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    with (patch('rachis.sdk.context.parallel._submit_batch',
+                fail_second_submission),
+          patch('rachis.sdk.context.parallel.wait', drain_batches),
+          patch.object(MappedMethod, '_inner_apply',
+                       finish_after_cleanup_starts),
+          ParallelConfig(config)):
+        with (pytest.raises(ValueError, match='second batch failed to submit'),
+              ParallelContext(None) as ctx):
+            ctx.get_action('dummy_plugin', 'increment_samples')(data, 1)
+
+    assert completed == submitted
+    path, = submitted
+    assert not path.parent.exists()
+
+
+def test_parallel_proxy_surfaces_mapped_finalization_error(tmp_path):
+    data = Artifact.import_data('Mapping', {'s1': 'invalid'})
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    with ParallelConfig(config):
+        with (pytest.raises(RuntimeError, match='Mapped cell .* failed'),
+              ParallelContext(None) as ctx):
+            action = ctx.get_action('dummy_plugin', 'filter_samples')
+            result = action(data)
+        with pytest.raises(RuntimeError, match='Mapped cell .* failed'):
+            result.retained.result()
+
+
+def test_late_batch_failure_invalidates_artifacts_after_cell_commit(tmp_path):
+    data = Artifact.import_data('Mapping', {'s1': '4'})
+    consumer_committed = Event()
+    batch_exit = Future()
+    inner_apply = MappedMethod._inner_apply
+
+    def hold_producer_batch_open(cells, executor):
+        cells = tuple(cells)
+        job = _submit_batch(cells, executor)
+        if cells[0].action.id == 'filter_samples':
+            return after_all((job, batch_exit), lambda _: None)
+        return job
+
+    def observe_consumer(self, frame):
+        outcome = inner_apply(self, frame)
+        if self.id == 'increment_samples':
+            consumer_committed.set()
+        return outcome
+
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    with (patch('rachis.sdk.context.parallel._submit_batch',
+                hold_producer_batch_open),
+          patch.object(MappedMethod, '_inner_apply', observe_consumer),
+          ParallelConfig(config)):
+        with (pytest.raises(RuntimeError, match='producer batch failed'),
+              ParallelContext(None) as ctx):
+            producer = ctx.get_action('dummy_plugin', 'filter_samples')(
+                data).all_samples
+            consumer = ctx.get_action('dummy_plugin', 'increment_samples')(
+                producer, 1).output
+            try:
+                assert consumer_committed.wait(timeout=5)
+            finally:
+                batch_exit.set_exception(RuntimeError('producer batch failed'))
+
+        for output in (producer, consumer):
+            with pytest.raises(RuntimeError, match='producer batch failed'):
+                output.result()
+
+
+def test_batch_continues_after_a_cell_fails(tmp_path):
+    data = Artifact.import_data('Mapping', {'s1': 'invalid', 's2': '4'})
+    outcomes = {}
+
+    def observe_commit(path, outcome):
+        result = commit_attempt(path, outcome)
+        outcomes[path.name] = read_commit(path)
+        return result
+
+    def one_batch(ctx, cells):
+        yield tuple(cells)
+
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    with (patch.object(ParallelContext, '_batches', one_batch),
+          patch('rachis.sdk.mapped.commit_attempt', observe_commit),
+          ParallelConfig(config)):
+        with (pytest.raises(RuntimeError, match='Mapped cell.*s1.*failed'),
+              ParallelContext(None) as ctx):
+            ctx.get_action('dummy_plugin', 'filter_samples')(data)
+    assert isinstance(outcomes['0.cell'], Exception)
+    assert isinstance(outcomes['1.cell'], Path)
+
+
+@pytest.mark.parametrize('value', ['4', '-5', 'invalid'])
+def test_cell_attempts_are_reused_without_evaluation_or_publication(value):
+    method = get_dummy_plugin().methods['filter_samples']
+    data = Artifact.import_data('Mapping', {'s1': value})
+
+    class RepeatingContext(Context):
+        def _dispatch_cells_(self, cells, *, cleanup):
+            futures = {}
+            for coord, cell in cells.items():
+                retry = copy(cell)
+                first = futures[coord] = as_future(cell)
+                committed = cell.path.read_bytes()
+                if first.exception() is None:
+                    trace = (first.result() / 'transformers').read_bytes()
+                # A transported retry can recover its attempt without inputs.
+                retry.bound_arguments = {}
+                retry = dill.loads(dill.dumps(retry))
+                repeated = as_future(retry)
+                assert cell.path.read_bytes() == committed
+                if first.exception() is not None:
+                    assert str(repeated.exception()) == str(first.exception())
+                else:
+                    assert repeated.result() == first.result()
+                    trace_path = repeated.result() / 'transformers'
+                    assert trace_path.read_bytes() == trace
+            return futures, ()
+
+    with patch('rachis.sdk.mapped.commit_attempt',
+               wraps=commit_attempt) as publish:
+        call = method._outer_bind(lambda: RepeatingContext(method))
+        if value == 'invalid':
+            with pytest.raises(RuntimeError, match='Mapped cell.*s1.*failed'):
+                call(data)
+        else:
+            result = call(data)
+            assert result.retained.view(dict) == (
+                {'s1': value} if value == '4' else {})
+            assert result.all_samples.view(dict) == {'s1': value}
+        assert publish.call_count == 1
+
+
+def test_cell_records_failure_after_evaluation_wrappers_unwind():
+    method = get_dummy_plugin().methods['increment_samples']
+    data = Artifact.import_data('Mapping', {'s1': '4'})
+    events = []
+    workspaces = []
+
+    @contextmanager
+    def fail_on_exit(frame):
+        yield
+        events.append('callable returned')
+        workspaces.append(frame.workspace)
+        raise ValueError('failed during unwind')
+
+    class ObservedContext(Context):
+        inner_apply_wrappers = (fail_on_exit,)
+
+    def observe_commit(path, outcome):
+        assert isinstance(outcome, RuntimeError)
+        assert isinstance(outcome.__cause__, ValueError)
+        workspace, = workspaces
+        assert not workspace.exists()
+        events.append('published failure')
+        return commit_attempt(path, outcome)
+
+    with patch('rachis.sdk.mapped.commit_attempt', observe_commit):
+        with pytest.raises(RuntimeError, match='failed during unwind'):
+            method._outer_bind(lambda: ObservedContext(method))(data, 1)
+    assert events == ['callable returned', 'published failure']
+
+
+def test_filtered_output_records_a_completed_call():
+    def filter_every_sample(
+        data: Annotated[str, ForEach['sample']],
+    ) -> Annotated[str | None, ForEach['sample']]:
+        return None
+
+    plugin = get_dummy_plugin()
+    data = Artifact.import_data('Mapping', {'s1': '4'})
+    with patch.dict(plugin.methods):
+        plugin.methods.register_function(
+            filter_every_sample, inputs={'data': Mapping}, parameters={},
+            outputs={'output': Mapping}, name='Filter samples', description='',
+        )
+        result = plugin.methods['filter_every_sample'](data).output
+    assert result.view(dict) == {}
+    action_dir = result._archiver.provenance_dir / 'action'
+    records = action_dir / 'cell-coordinates.tsv'
+    header, row = records.read_text().splitlines()
+    assert header == 'sample\tattempt\toutcome\tstart\tend'
+    assert row.split('\t')[:3] == ['s1', '1', 'filtered']

@@ -186,6 +186,9 @@ class PipelineSignature:
                     f'Mapped methods do not support CaptureHolder '
                     f'parameters: {name!r}')
         self.input_groups = coordinate_joins(self.input_patterns)
+        self.coordinate_coverage_inputs = frozenset().union(
+            *(group.coverage_inputs for group in self.input_groups)
+        )
         bindings = {binding for group in self.input_groups
                     for binding in group.bindings}
         if not bindings or self.output_patterns.keys() != self.outputs.keys():
