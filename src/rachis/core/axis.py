@@ -37,6 +37,17 @@ class Coord(Mapping):
     def __len__(self):
         return len(self._items)
 
+    def __and__(self, other):
+        """Combine compatible coordinates, keeping left bindings first."""
+        if not isinstance(other, Coord):
+            return NotImplemented
+        axes = dict(self._items)
+        for name, value in other._items:
+            existing = axes.setdefault(name, value)
+            if existing is not value and existing != value:
+                raise ValueError(f'Conflicting values for axis {name!r}')
+        return Coord(**axes)
+
     def project(self, names):
         """Keep the requested names in the specified order."""
         return Coord(**{name: self[name] for name in names})

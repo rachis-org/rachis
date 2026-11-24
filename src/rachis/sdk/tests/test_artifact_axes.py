@@ -21,6 +21,19 @@ from rachis.plugin import Plugin
 from rachis.sdk import PluginManager
 
 
+def test_coord_intersection():
+    sample = Coord(sample='s1')
+    feature = Coord(feature='f1')
+    combined = Coord(sample='s1', feature='f1')
+    assert (sample & feature) == combined
+    assert (feature & sample) == Coord(feature='f1', sample='s1')
+    assert (Coord() & sample) == sample
+    assert (sample & combined) == combined
+    assert (combined & sample) == combined
+    with pytest.raises(ValueError, match="axis 'sample'"):
+        sample & Coord(sample='s2')
+
+
 def test_registered_axis_and_coordinate_views():
     plugin = get_dummy_plugin()
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '-5'})
