@@ -16,6 +16,9 @@ import rachis.plugin
 from rachis.sdk.util import view_collection
 from rachis.core.type import MethodSignature, Int
 from rachis.sdk import Artifact, Method, Results, ResultCollection
+from rachis.sdk.context import ParallelContext
+from rachis.sdk.parallel_config import ParallelConfig
+from rachis.sdk.proxy import ProxyResultCollection
 
 from rachis.core.testing.method import (concatenate_ints, merge_mappings,
                                         params_only_method, no_input_method)
@@ -640,6 +643,30 @@ class TestMethod(unittest.TestCase):
 
         self.assertEqual(view_list_out, expected_list)
         self.assertEqual(view_dict_out, expected_dict)
+
+    def test_pending_collection_can_feed_list_and_keyed_inputs(self):
+        class PendingCollection(ProxyResultCollection):
+            def result(self):
+                raise AssertionError('Binding tried to resolve the collection')
+
+        future = concurrent.futures.Future()
+        collection = ResultCollection({
+            'named': Artifact.import_data(SingleInt, 1),
+        })
+        proxy = PendingCollection(
+            future, None, rachis.plugin.Collection[SingleInt])
+
+        with ParallelConfig(), ParallelContext(None) as ctx:
+            as_list = ctx.get_action('dummy_plugin', 'list_of_ints')
+            as_collection = ctx.get_action('dummy_plugin', 'dict_of_ints')
+            try:
+                list_output = as_list(proxy).output
+                collection_output = as_collection(proxy).output
+            finally:
+                future.set_result(collection)
+
+        self.assertEqual(view_collection(list_output, int), {'0': 1})
+        self.assertEqual(view_collection(collection_output, int), {'named': 1})
 
     def test_collection_inner_union(self):
         inner_union = self.plugin.methods['collection_inner_union']

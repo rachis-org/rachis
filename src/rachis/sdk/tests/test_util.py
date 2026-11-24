@@ -39,6 +39,7 @@ class TestUtil(unittest.TestCase):
         first = rebuild([1])
         second = rebuild([2])
 
+        self.assertIsInstance(first['inputs'][0], rachis.sdk.ResultCollection)
         self.assertEqual(first['inputs'][0], {'key': 1})
         self.assertEqual(second['inputs'][0], {'key': 2})
         self.assertEqual(collection, {'key': 'pending',

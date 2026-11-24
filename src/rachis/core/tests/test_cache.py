@@ -390,12 +390,9 @@ class TestCache(unittest.TestCase):
 
     def test_pool_no_cache_set(self):
         pool = self.cache.create_pool('pool')
-        restored = dill.loads(dill.dumps(self.cache))
         default = get_cache()
 
         with pool:
-            with restored:
-                self.assertIs(get_cache(), self.cache)
             self.assertIs(get_cache(), self.cache)
             ref = Artifact.import_data(IntSequence1, [0, 1, 2])
         self.assertIs(get_cache(), default)
@@ -403,6 +400,17 @@ class TestCache(unittest.TestCase):
         uuid = str(ref.uuid)
         self.assertIn(uuid, os.listdir(self.cache.data))
         self.assertIn(uuid, os.listdir(self.cache.pools / 'pool'))
+
+    def test_restored_cache_borrows_active_named_pool(self):
+        pool = self.cache.create_pool('pool')
+        restored = dill.loads(dill.dumps(self.cache))
+        self.assertIsNot(restored, self.cache)
+
+        with pool:
+            with restored:
+                self.assertIs(get_cache(), self.cache)
+                self.assertIs(get_cache().named_pool, pool)
+            self.assertIs(get_cache(), self.cache)
 
     def test_pool_wrong_cache_set(self):
         cache = Cache(os.path.join(self.test_dir.name, 'cache'))

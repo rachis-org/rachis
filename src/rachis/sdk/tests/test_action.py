@@ -18,6 +18,8 @@ from rachis.core.testing.util import get_dummy_plugin
 from rachis.plugin.testing import TestPluginBase
 
 from rachis.sdk import Artifact, Visualization
+from rachis.sdk.context import Context, ParallelContext
+from rachis.sdk.parallel_config import ParallelConfig
 from rachis.core.testing.type import (IntSequence1, IntSequence2, SingleInt,
                                       Mapping)
 from rachis.core.testing.method import (migrated_method_true_no_dict,
@@ -167,6 +169,48 @@ class TestBadInputs(TestPluginBase):
         with self.assertRaisesRegex(
                 TypeError, 'break_from.*\'invalid choice\''):
             pipeline(int_sequence, break_from)
+
+
+class TestActionContext(unittest.TestCase):
+    def test_get_action_creates_a_context_for_each_application(self):
+        contexts = []
+
+        class ObservedContext(Context):
+            def _dispatch_action_(self, frame):
+                contexts.append(self)
+                return super()._dispatch_action_(frame)
+
+        call = ObservedContext().get_action('dummy_plugin', 'no_input_method')
+        call()
+        call()
+
+        self.assertEqual(len(contexts), 2)
+        self.assertIsNot(contexts[0], contexts[1])
+        self.assertIsNot(contexts[0].execution_metadata,
+                         contexts[1].execution_metadata)
+
+    def test_nested_context_entries_report_their_own_results(self):
+        first = Artifact.import_data(Mapping, {'outer': 'a', 'inner': 'a'})
+        outer = Artifact.import_data(Mapping, {'outer': 'b'})
+        inner = Artifact.import_data(Mapping, {'inner': 'b'})
+        events = []
+
+        with ParallelConfig(), ParallelContext(None) as ctx:
+            merge = ctx.get_action('dummy_plugin', 'merge_mappings')
+            with self.assertRaisesRegex(ValueError, "Key 'outer' exists"), ctx:
+                merge(first, outer)
+                with (
+                    self.assertRaisesRegex(ValueError, "Key 'inner' exists"),
+                    ctx,
+                ):
+                    merge(first, inner)
+                    events.append('inner body completed')
+                events.append('outer body completed')
+            merged = merge(outer, inner).merged_mapping
+
+        self.assertEqual(events, [
+            'inner body completed', 'outer body completed'])
+        self.assertEqual(merged.view(dict), {'outer': 'b', 'inner': 'b'})
 
 
 class TestDeprecation(unittest.TestCase):
