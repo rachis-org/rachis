@@ -47,7 +47,7 @@ def test_mapped_method_rejects_capture_holder_parameters(capture_type):
 def test_mapped_output_coverage_defaults_to_matched():
     def copy_samples(
         data: Annotated[str, ForEach['sample':]],
-    ) -> Annotated[str, ForEach['sample'::'matched']]:
+    ) -> Annotated[str, ForEach['sample']]:
         return data
 
     plugin = get_dummy_plugin()
@@ -57,9 +57,8 @@ def test_mapped_output_coverage_defaults_to_matched():
             outputs={'output': Mapping}, name='Copy samples', description='',
         )
         method = plugin.methods['copy_samples']
-        assert method.signature.input_patterns['data'] == (
-            method.signature.output_patterns['output']
-        )
+        assert method.signature.input_patterns['data'] == ForEach['sample':]
+        assert method.signature.output_patterns['output'] == ForEach['sample']
         data = Artifact.import_data('Mapping', {'s1': '4'})
         assert method(data).output.view(dict) == {'s1': '4'}
 

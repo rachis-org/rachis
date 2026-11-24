@@ -168,10 +168,9 @@ class PipelineSignature:
                     continue
                 if not self.supports_mapping or len(found) != 1:
                     raise TypeError('Use one ForEach per mapped method view')
-                pattern = patterns[name] = found[0].normalize()
+                pattern = patterns[name] = found[0]
                 if output:
-                    if any(entry.coverage != 'matched'
-                           for entry in pattern.entries):
+                    if any(rule != 'matched' for rule in pattern.coverage):
                         raise TypeError(
                             'Output axis coverage must be matched')
                 else:
