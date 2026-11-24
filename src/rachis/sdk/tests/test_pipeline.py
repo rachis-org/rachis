@@ -689,7 +689,14 @@ class TestParallelPipeline(unittest.TestCase):
         with (rachis.sdk.parallel_config.ParallelConfig(),
               ParallelContext(None) as ctx):
             try:
-                outputs = ctx.get_action('dummy_plugin', 'produce')()
+                # Catch an accidental _result() call before it can wait on
+                # the sibling this test releases after the consumer finishes.
+                with patch.object(
+                    rachis.sdk.Results, '_result',
+                    side_effect=AssertionError(
+                        'Submission tried to realize all outputs'),
+                ):
+                    outputs = ctx.get_action('dummy_plugin', 'produce')()
                 split = ctx.get_action('dummy_plugin', 'split_ints')
                 first = result_as_future(split(outputs.ready).left)
                 self.assertEqual(first.result(timeout=5).view(list), [1])

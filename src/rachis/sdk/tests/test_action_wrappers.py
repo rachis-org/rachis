@@ -141,22 +141,28 @@ class TestActionWrappers(unittest.TestCase):
         call = action._outer_bind(lambda: DeferredContext(action))
         proxy = PendingArtifact(Future(), None, IntSequence1)
 
-        results = call(proxy)
-        (frame, future), = dispatched
-        self.assertIs(frame.bound_arguments['ints'], proxy)
-        self.assertIsNone(frame.transformed_arguments)
-        self.assertEqual(results.left.type, IntSequence1)
-        self.assertFalse(future.done())
+        for argument in (artifact, proxy):
+            with self.subTest(argument=type(argument).__name__):
+                dispatched.clear()
+                results = call(argument)
+                (frame, future), = dispatched
+                self.assertIs(frame.bound_arguments['ints'], argument)
+                self.assertIsNone(frame.transformed_arguments)
+                self.assertEqual(results.left.type, IntSequence1)
+                self.assertFalse(future.done())
 
-        frame.bound_arguments['ints'] = artifact
-        with patch.object(action.signature, 'solve_output',
-                          side_effect=AssertionError(
-                              'Evaluation tried to solve output types')):
-            future.set_result(frame())
-        self.assertEqual(results.left.view(list), [1])
-        self.assertEqual(frame.provenance.inputs['ints'], str(artifact.uuid))
-        with self.assertRaisesRegex(RuntimeError, 'finished frame'):
-            frame()
+                frame.bound_arguments['ints'] = artifact
+                with patch.object(
+                    action.signature, 'solve_output',
+                    side_effect=AssertionError(
+                        'Evaluation tried to solve output types'),
+                ):
+                    future.set_result(frame())
+                self.assertEqual(results.left.view(list), [1])
+                self.assertEqual(frame.provenance.inputs['ints'],
+                                 str(artifact.uuid))
+                with self.assertRaisesRegex(RuntimeError, 'finished frame'):
+                    frame()
 
     def test_visualizer_directory_is_cleaned_when_callable_fails(self):
         directories = []
