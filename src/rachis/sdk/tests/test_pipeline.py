@@ -815,14 +815,14 @@ class TestParallelPipeline(unittest.TestCase):
         def run_scope(ctx):
             with ctx:
                 run = ctx.get_action('dummy_plugin', pipeline.id)
-                output.set_result(result_as_future(run().output))
+                result_as_future(run().output, into=output)
 
         with (rachis.sdk.parallel_config.ParallelConfig(),
               ThreadPoolExecutor(max_workers=1) as executor):
             scope = executor.submit(run_scope, ParallelContext(None))
             try:
                 with self.assertRaisesRegex(ValueError, message):
-                    output.result(timeout=5).result(timeout=5)
+                    output.result(timeout=5)
                 with self.assertRaises(FutureTimeoutError):
                     scope.result(timeout=0.25)
             finally:
