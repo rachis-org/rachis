@@ -580,15 +580,11 @@ class Plugin:
           which will demonstrate importing this data when executed.
         axes : dict[ForEach, type]
           Ordered coordinate patterns and their axis implementations.
-          An implementation accepts the artifact's data directory and
+          An implementation accepts a ``DirectoryFormat``'s path and
           ``mode='r'``, iterates over coordinates, and returns a native view
           when indexed by a coordinate. Its ``write(chunks)`` class method
           accepts ``(Coord, view)`` pairs and returns the directory format the
           implementation reads.
-          Writing cells preserves their coordinate keys through archive
-          conversion. A registered leading prefix must give the same view
-          and presence after writing just its surviving descendants as
-          after writing the complete artifact.
 
         Returns
         -------

@@ -7,14 +7,14 @@
 # ----------------------------------------------------------------------------
 
 from collections.abc import Generator, Iterable, Iterator, Mapping
-from dataclasses import dataclass, replace
+import dataclasses
 from inspect import getattr_static, signature
 from typing import Any, get_args, get_origin, get_type_hints
 
 from rachis.core.util import tuplize
 
 
-@dataclass(frozen=True, init=False)
+@dataclasses.dataclass(frozen=True, init=False)
 class Coord(Mapping):
     """An ordered, hashable coordinate with named axes."""
 
@@ -64,7 +64,7 @@ class Coord(Mapping):
         return 'Coord(' + ', '.join(f'{k}={v!r}' for k, v in self._items) + ')'
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class AxisBinding:
     axis: str
     binding: str
@@ -103,7 +103,7 @@ class _ForEachMeta(type):
         return cls(tuple(pattern), bound)
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class ForEach(metaclass=_ForEachMeta):
     """An ordered axis pattern for an artifact or method annotation."""
 
@@ -131,13 +131,13 @@ class ForEach(metaclass=_ForEachMeta):
         return tuple(entry.coverage for entry in self.entries)
 
     @property
-    def coverage_rule(self):
+    def _coverage_rule(self):
         """The shared coverage rule for the complete axis path."""
         return self.entries[0].coverage
 
     def normalize(self):
         """Return the explicitly bound form of the pattern."""
-        return replace(self, _bound=True)
+        return dataclasses.replace(self, _bound=True)
 
     def as_unbound(self):
         """Return the pattern of bare axis names used for axis registration."""
@@ -189,10 +189,11 @@ class CoordinateJoin:
 
     def __init__(self, patterns):
         self.inputs = tuple(patterns)
+        self._patterns = dict(patterns)
         self._input_bindings = {name: pattern.bindings
                                 for name, pattern in patterns.items()}
         self.bindings = max(self._input_bindings.values(), key=len)
-        rules = {name: pattern.coverage_rule
+        rules = {name: pattern._coverage_rule
                  for name, pattern in patterns.items()}
         self._complete = tuple(
             name for name, bindings in self._input_bindings.items()
@@ -224,18 +225,28 @@ class CoordinateJoin:
     def align(self, indexes):
         """Yield an invocation coordinate and its aligned input values.
 
-        Input indexes are keyed by coordinates in each input's binding order.
+        Input indexes are keyed by coordinates in each input's artifact axes.
         Excluded coordinates are skipped. A missing required input raises.
         """
+        bound_indexes = {}
+        for name, pattern in self._patterns.items():
+            bound = bound_indexes[name] = {}
+            for coord, cell in indexes[name].items():
+                key = pattern.to_bound_coord(coord)
+                if key in bound:
+                    raise ValueError(f'Input {name!r} has duplicate bound '
+                                     f'coordinate {key!r}')
+                bound[key] = cell
+
         coordinates = dict.fromkeys(
             coord.project(self.bindings)
             for name in self._complete
-            for coord in indexes[name]
+            for coord in bound_indexes[name]
         )
 
         for coord in coordinates:
             selected = {
-                name: indexes[name].get(coord.project(bindings))
+                name: bound_indexes[name].get(coord.project(bindings))
                 for name, bindings in self._input_bindings.items()
             }
             present = {name for name, value in selected.items()

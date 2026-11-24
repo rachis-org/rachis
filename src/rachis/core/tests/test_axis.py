@@ -45,7 +45,6 @@ def test_for_each_bindings():
     assert repr(matched) == "ForEach['student':'student':'matched']"
     assert bare.bindings == matched.bindings == ('student',)
     assert bare.coverage == matched.coverage == ('matched',)
-    assert bare.coverage_rule == matched.coverage_rule == 'matched'
     assert bare.normalize() == ForEach['student':] == matched == expanded
     assert matched.as_unbound() == bare
     lookup = {bare: 'axis', expanded: 'pattern'}
@@ -81,8 +80,8 @@ def test_for_each_bindings():
 
 def test_for_each_requires_uniform_coverage():
     pattern = ForEach['student'::'optional', 'assignment'::'optional']
-    assert pattern.coverage_rule == 'optional'
-    assert pattern.normalize().coverage_rule == 'optional'
+    assert pattern.coverage == ('optional', 'optional')
+    assert pattern.normalize().coverage == pattern.coverage
     with pytest.raises(TypeError, match='uniform coverage'):
         ForEach['student', 'assignment'::'optional']
 
@@ -140,7 +139,7 @@ def test_projected_coverage(rule):
         'scores': ForEach['student'::'required', 'assignment'::'required'],
     })
     indexes = {
-        'offset': {Coord(student='s1'): 0, Coord(student='s3'): 10},
+        'offset': {Coord(sample='s1'): 0, Coord(sample='s3'): 10},
         'scores': {Coord(student='s1', assignment='a1'): 4,
                    Coord(student='s2', assignment='a1'): 5},
     }
@@ -206,8 +205,8 @@ def test_required_keys_align_by_binding_order():
     indexes = {
         'left': {Coord(student='s1', assignment='a1'): 1,
                  Coord(student='s1', assignment='a2'): 2},
-        'right': {Coord(assignment='a2', student='s1'): 3,
-                  Coord(assignment='a1', student='s1'): 4},
+        'right': {Coord(assignment='a2', sample='s1'): 3,
+                  Coord(assignment='a1', sample='s1'): 4},
     }
     assert list(join.align(indexes)) == [
         (Coord(student='s1', assignment='a1'), {'left': 1, 'right': 4}),
