@@ -90,7 +90,7 @@ def test_mapped_provenance_appends_axis_and_cell_transformations():
         return data + 1
 
     old = OldMappingDirFmt()
-    old.mapping.write_data({'s1': '4'}, dict)
+    old.mapping.write_data({'s1': '4', 's2': '5'}, dict)
     data = Artifact._from_archiver(Archiver.from_data(
         Mapping, OldMappingDirFmt, data_initializer=old.path._move_or_copy,
         provenance_capture=ImportProvenanceCapture()))
@@ -99,13 +99,18 @@ def test_mapped_provenance_appends_axis_and_cell_transformations():
         str: {int: TransformerRecord(read_score, plugin, ())},
         int: {str: TransformerRecord(write_score, plugin, ())},
     }
-    with (patch.dict(plugin.methods),
-          patch.dict(PluginManager().transformers, transformers)):
+    with (
+        patch.dict(plugin.methods),
+        patch.dict(PluginManager().transformers, transformers),
+        patch.object(Artifact, '_axis', autospec=True,
+                     side_effect=Artifact._axis) as open_axis,
+    ):
         plugin.methods.register_function(
             increment, inputs={'data': Mapping}, parameters={},
             outputs={'output': Mapping}, name='Increment', description='')
         output = plugin.methods['increment'](data).output
-    assert output.view(dict) == {'s1': '5'}
+    assert open_axis.call_count == 1
+    assert output.view(dict) == {'s1': '5', 's2': '6'}
     action = output._archiver.provenance_dir / 'action' / 'action.yaml'
     provenance = action.read_text().split('transformers:', 1)[1]
     assert provenance.index('from: OldMappingDirFmt') < provenance.index(
@@ -242,8 +247,8 @@ def test_cell_context_exits_before_staging_outputs():
         yield
         assert all(coord is cell.coordinate
                    for coord, cell in frame.cells.items())
-        assert len(frame.results) == 2
-        assert all(future.done() for future in frame.results.values())
+        assert len(frame.cell_futures) == 2
+        assert all(future.done() for future in frame.cell_futures.values())
         events.append('mapped-exit')
 
     class ObservedContext(Context):
@@ -325,7 +330,11 @@ def test_serialized_cells_resume_at_evaluation():
             }
 
     method = get_dummy_plugin().methods['increment_samples']
-    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
+    old = OldMappingDirFmt()
+    old.mapping.write_data({'s1': '4', 's2': '5'}, dict)
+    data = Artifact._from_archiver(Archiver.from_data(
+        Mapping, OldMappingDirFmt, data_initializer=old.path._move_or_copy,
+        provenance_capture=ImportProvenanceCapture()))
     call = method._outer_bind(lambda: SerializingContext(method))
     assert call(data, 1).output.view(dict) == {'s1': '5', 's2': '6'}
 

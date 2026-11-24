@@ -45,10 +45,23 @@ class CellView:
         return self.opener(recorder=recorder)
 
 
+@dataclass
+class PreparedIndex:
+    """Input cells, their directory owner, and the preparation trace."""
+
+    cells: dict
+    transforms: tuple = ()
+    directory: Path | None = None
+
+    def close(self):
+        """Release the driver's ownership of the directory."""
+        self.directory = None
+
+
 @contextmanager
-def _open_artifact_cell(artifact, pattern, coord, recorder=None):
-    with artifact._axis(pattern, recorder) as (axis, _):
-        yield axis[coord]
+def _open_axis_cell(reader, directory, coord, recorder=None):
+    axis = reader(directory, mode='r')
+    yield axis[coord]
 
 
 @contextmanager
@@ -101,23 +114,27 @@ class MappedProvenance(ActionProvenanceCapture):
 
 def _input_index(value, pattern):
     if value is None:
-        return {}
+        return PreparedIndex({})
     if isinstance(value, int):
         if value < 0:
             raise ValueError('A mapped integer must be nonnegative')
         axis, = pattern.axes
-        return {Coord(**{axis: i}): i for i in range(value)}
+        return PreparedIndex({Coord(**{axis: i}): i for i in range(value)})
     if not isinstance(value, Artifact):
         raise TypeError('ForEach requires an artifact with registered axes')
     index = {}
-    path = pattern.as_unbound()
-    with value._axis(path) as (axis, _):
+    transforms = []
+    with value._axis(pattern, _transform_recorder(transforms.append)) as (
+        axis, directory,
+    ):
+        # The driver keeps the owned path. Workers receive just its address.
+        path = Path(str(directory))
         for coord in axis:
             if coord in index:
                 raise ValueError(f'Duplicate axis coordinate {coord!r}')
             index[coord] = CellView(partial(
-                _open_artifact_cell, value, path, coord))
-    return index
+                _open_axis_cell, type(axis), path, coord))
+    return PreparedIndex(index, tuple(transforms), directory)
 
 
 def _index_argument(value, pattern, *, ctx, into=None):
@@ -137,7 +154,9 @@ def plan_cells(frame, indexes, directory):
     axes = output_axes(frame)
     output_view_types = {name: axis.view_type for name, axis in axes.items()}
     cells = {}
-    rows = signature.solve_coordinates(indexes)
+    rows = signature.solve_coordinates(
+        {name: index.cells for name, index in indexes.items()}
+    )
     for number, (coordinate, selected) in enumerate(rows):
         outputs = {
             name: pattern.to_axis_coord(coordinate)
@@ -184,13 +203,17 @@ def cell_workspace_wrapper(frame):
 @contextmanager
 def cell_provenance_wrapper(frame):
     transforms = []
-    frame.provenance = SimpleNamespace(
-        transformation_recorder=partial(_cell_recorder, transforms))
+
+    def recorder(name):
+        return _transform_recorder(
+            lambda record: transforms.append((name, *record)))
+
+    frame.provenance = SimpleNamespace(transformation_recorder=recorder)
     yield
     _write_record(frame.workspace / 'transformers', tuple(transforms))
 
 
-def _cell_recorder(transforms, name):
+def _transform_recorder(append):
     def record(transformer_record, input_name, input_record, output_name,
                output_record):
         # Identify the transformer's registered types, even when the model
@@ -201,7 +224,7 @@ def _cell_recorder(transforms, name):
             target = annotations.pop('return')
             source, = annotations.values()
             key = (source, target)
-        transforms.append((name, input_name, output_name, key))
+        append((input_name, output_name, key))
 
     return record
 
@@ -277,7 +300,11 @@ def _record_transforms(provenance, name, records):
 @contextmanager
 def mapped_transforms_wrapper(frame):
     provenance = frame.provenance
-    frame.transforms = {}
+    frame.transforms = {
+        name: dict.fromkeys(index.transforms)
+        for name, index in frame.coordinate_indexes.items()
+        if index.transforms
+    }
     for attempt, _ in frame.attempts.values():
         records = _read_record(attempt / 'transformers')
         for name, source, target, key in records:
@@ -305,6 +332,8 @@ def _write_outputs(frame):
 def mapped_workspace_wrapper(frame):
     with ExitStack() as cleanup:
         frame.workspace_cleanup = cleanup
+        for index in frame.coordinate_indexes.values():
+            cleanup.callback(index.close)
         frame.directory = Path(cleanup.enter_context(
             tempfile.TemporaryDirectory(dir=frame.ctx.cache.path)))
         try:
@@ -313,14 +342,11 @@ def mapped_workspace_wrapper(frame):
             frame.ctx._defer_cleanup(cleanup)
 
 
-@contextmanager
-def archive_mapped_outputs_wrapper(frame):
-    yield
-
+def _archive_outputs(frame, written):
     provenance = frame.ready_provenance.result()
     artifacts = []
     for (name, spec), (directory, selected) in zip(
-        frame.output_types.items(), frame.results, strict=True
+        frame.output_types.items(), written, strict=True
     ):
         capture = provenance.fork(name)
         _record_transforms(
@@ -338,7 +364,7 @@ def archive_mapped_outputs_wrapper(frame):
         artifact = Artifact._from_view(
             spec.qiime_type, directory, type(directory), capture)
         artifacts.append(frame.ctx.add_reference(artifact))
-    frame.results = Results(frame.output_types, artifacts)
+    return Results(frame.output_types, artifacts)
 
 
 @contextmanager
@@ -346,7 +372,7 @@ def mapped_cells_wrapper(frame):
     frame.cells, frame.axes = plan_cells(
         frame, frame.coordinate_indexes, frame.directory)
     yield
-    futures = frame.results
+    futures = frame.cell_futures
     if futures.keys() != frame.cells.keys():
         raise ValueError('Cell dispatch must return each coordinate once')
 
@@ -358,12 +384,11 @@ def mapped_cells_wrapper(frame):
         completed.attempts = dict(zip(completed.cells, attempts, strict=True))
         with (
             prepare_callable_arguments_wrapper(completed),
-            archive_mapped_outputs_wrapper(completed),
             provenance_wrapper(completed),
             mapped_transforms_wrapper(completed),
         ):
-            completed.results = _write_outputs(completed)
-        return completed.results
+            written = _write_outputs(completed)
+        return _archive_outputs(completed, written)
 
     inputs_ready = result_as_future(frame.bound_arguments)
     attempts = [after_all((futures[coord],), _read_attempt)
@@ -401,8 +426,16 @@ class MappedMethod(Method):
                                   ctx=frame.ctx)
             for name, pattern in self.signature.input_patterns.items()
         }
-        return after_all(indexes.values(), lambda ready:
-                         dict(zip(indexes, ready, strict=True)))
+        ready = after_all(indexes.values(), lambda values:
+                          dict(zip(indexes, values, strict=True)))
+
+        def close_on_failure(completed):
+            if completed.cancelled() or completed.exception() is not None:
+                for future in indexes.values():
+                    future.add_done_callback(_close_ready_index)
+
+        ready.add_done_callback(close_on_failure)
+        return ready
 
     def _inner_bind(self, frame):
         if frame.coordinate_indexes is None:
@@ -411,5 +444,10 @@ class MappedMethod(Method):
         with ExitStack() as stack:
             for wrapper in self.inner_bind_wrappers:
                 stack.enter_context(wrapper(frame))
-            frame.results = frame.ctx._dispatch_cells_(frame.cells)
+            frame.cell_futures = frame.ctx._dispatch_cells_(frame.cells)
         return frame.results
+
+
+def _close_ready_index(future):
+    if not future.cancelled() and future.exception() is None:
+        future.result().close()
