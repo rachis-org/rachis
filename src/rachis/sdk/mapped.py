@@ -12,7 +12,6 @@ from concurrent.futures import wait
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import partial
-from itertools import product
 from pathlib import Path
 import shutil
 import tempfile
@@ -131,8 +130,6 @@ def _index_argument(value, pattern, *, ctx, into=None):
 
 def plan_cells(frame, indexes, directory):
     signature = frame.action.signature
-    groups = [group.align(indexes) for group in signature.input_groups]
-    combinations = product(*groups)
     broadcast = {
         name: value for name, value in frame.bound_arguments.items()
         if name not in signature.input_patterns
@@ -140,19 +137,16 @@ def plan_cells(frame, indexes, directory):
     axes = output_axes(frame)
     output_view_types = {name: axis.view_type for name, axis in axes.items()}
     cells = {}
-    for number, combination in enumerate(combinations):
-        coordinate = Coord()
-        selections = dict(broadcast)
-        for group_coord, group_inputs in combination:
-            coordinate &= group_coord
-            selections.update(group_inputs)
+    rows = signature.solve_coordinates(indexes)
+    for number, (coordinate, selected) in enumerate(rows):
         outputs = {
             name: pattern.to_axis_coord(coordinate)
             for name, pattern in signature.output_patterns.items()
         }
         path = directory / f'{number}.cell'
         cells[coordinate] = CellFrame(
-            frame, coordinate, selections, outputs, path, output_view_types,
+            frame, coordinate, {**broadcast, **selected}, outputs, path,
+            output_view_types,
         )
     return cells, axes
 
@@ -401,14 +395,14 @@ class MappedMethod(Method):
     )
 
     def _prepare_coordinate_indexes(self, frame):
-        """Resolve mapped indexes independently of broadcast arguments."""
+        """Resolve the mapped arguments' indexes in their declared axes."""
         indexes = {
             name: _index_argument(frame.bound_arguments[name], pattern,
                                   ctx=frame.ctx)
             for name, pattern in self.signature.input_patterns.items()
         }
-        return after_all(indexes.values(), lambda values:
-                         dict(zip(indexes, values, strict=True)))
+        return after_all(indexes.values(), lambda ready:
+                         dict(zip(indexes, ready, strict=True)))
 
     def _inner_bind(self, frame):
         if frame.coordinate_indexes is None:

@@ -17,7 +17,7 @@ import types
 import rachis.sdk
 import rachis.core.type as qtype
 from rachis.core.archive.provenance import MetadataInfo
-from rachis.core.axis import ForEach, coordinate_joins
+from rachis.core.axis import Coord, ForEach, coordinate_joins
 from .grammar import TypeExp, UnionExp
 from .meta import TypeVarExp
 from .collection import List, Set, Collection
@@ -823,6 +823,17 @@ class PipelineSignature:
 class MethodSignature(PipelineSignature):
     builtin_args = ()
     supports_mapping = True
+
+    def solve_coordinates(self, indexes):
+        """Solve input axis indexes into bound coordinates and arguments."""
+        groups = [group.align(indexes) for group in self.input_groups]
+        for combination in itertools.product(*groups):
+            coord = Coord()
+            selected = {}
+            for group_coord, group_inputs in combination:
+                coord &= group_coord
+                selected.update(group_inputs)
+            yield coord, selected
 
     def _assert_valid_outputs(self, outputs):
         super()._assert_valid_outputs(outputs)
