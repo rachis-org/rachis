@@ -141,12 +141,11 @@ def plan_cells(frame, indexes, directory):
     output_view_types = {name: axis.view_type for name, axis in axes.items()}
     cells = {}
     for number, combination in enumerate(combinations):
-        bound = {}
+        coordinate = Coord()
         selections = dict(broadcast)
-        for binding, selected in combination:
-            bound.update(binding)
-            selections.update(selected)
-        coordinate = Coord(**bound)
+        for group_coord, group_inputs in combination:
+            coordinate &= group_coord
+            selections.update(group_inputs)
         outputs = {
             name: pattern.to_axis_coord(coordinate)
             for name, pattern in signature.output_patterns.items()
