@@ -45,6 +45,7 @@ def test_for_each_bindings():
     assert repr(matched) == "ForEach['student':'student':'matched']"
     assert bare.bindings == matched.bindings == ('student',)
     assert bare.coverage == matched.coverage == ('matched',)
+    assert bare.coverage_rule == matched.coverage_rule == 'matched'
     assert bare.normalize() == ForEach['student':] == matched == expanded
     assert matched.as_unbound() == bare
     lookup = {bare: 'axis', expanded: 'pattern'}
@@ -76,6 +77,14 @@ def test_for_each_bindings():
         ForEach['student':1]
     with pytest.raises(TypeError, match='Invalid axis name'):
         ForEach['_items']
+
+
+def test_for_each_requires_uniform_coverage():
+    pattern = ForEach['student'::'optional', 'assignment'::'optional']
+    assert pattern.coverage_rule == 'optional'
+    assert pattern.normalize().coverage_rule == 'optional'
+    with pytest.raises(TypeError, match='uniform coverage'):
+        ForEach['student', 'assignment'::'optional']
 
 
 @pytest.mark.parametrize(('rules', 'keys', 'gaps'), [

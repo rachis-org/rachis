@@ -95,6 +95,8 @@ class _ForEachMeta(type):
         axes = {entry.axis for entry in pattern}
         if not axes or len(axes) != len(pattern):
             raise ValueError('ForEach requires distinct axis names')
+        if len({entry.coverage for entry in pattern}) != 1:
+            raise TypeError('A composite axis needs uniform coverage')
         return cls(tuple(pattern), bound)
 
 
@@ -127,11 +129,8 @@ class ForEach(metaclass=_ForEachMeta):
 
     @property
     def coverage_rule(self):
-        """The shared rule for an input's complete axis path."""
-        rules = {entry.coverage for entry in self.entries}
-        if len(rules) != 1:
-            raise TypeError('A composite input axis needs uniform coverage')
-        return rules.pop()
+        """The shared coverage rule for the complete axis path."""
+        return self.entries[0].coverage
 
     def normalize(self):
         """Use the bound form of the pattern and validate binding names."""
