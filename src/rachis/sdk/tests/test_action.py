@@ -211,6 +211,10 @@ class TestActionContext(unittest.TestCase):
         self.assertEqual(events, [
             'inner body completed', 'outer body completed'])
         self.assertEqual(merged.view(dict), {'outer': 'b', 'inner': 'b'})
+        # parsl has some incorrect cleanup which will raise a ResourceWarning
+        # which hurts the next few tests if we are unlucky, so run GC after now
+        import gc
+        self.addCleanup(gc.collect)
 
 
 class TestDeprecation(unittest.TestCase):
