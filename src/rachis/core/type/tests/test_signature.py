@@ -16,6 +16,27 @@ from rachis.core.type import Int
 from rachis.core.type.signature import MethodSignature
 
 
+def test_solve_coordinates_rejects_duplicate_bound_coordinates():
+    def score(
+        data: Annotated[str, ForEach['student', 'assignment']],
+    ) -> Annotated[str, ForEach['student', 'assignment']]:
+        raise AssertionError('Coordinate solving cannot call the method')
+
+    signature = MethodSignature(
+        score, inputs={'data': AssignmentScores}, parameters={},
+        outputs={'result': AssignmentScores},
+    )
+    indexes = {
+        'data': {
+            Coord(student='s1', assignment='a1'): 'first',
+            Coord(assignment='a1', student='s1'): 'second',
+        },
+    }
+
+    with pytest.raises(ValueError, match="data.*duplicate bound.*s1"):
+        next(signature.solve_coordinates(indexes))
+
+
 def test_solve_coordinates_inner_join():
     def join(
         left: Annotated[str, ForEach['left_id':'key']],

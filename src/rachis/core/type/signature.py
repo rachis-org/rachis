@@ -135,6 +135,8 @@ class PipelineSignature:
         # annotated. This will be set in parse_signature based on whether the
         # ctx is annotated or not.
         self.annotated = False
+        self.input_patterns = {}
+        self.output_patterns = {}
 
         inputs, parameters, outputs, signature_order = \
             self._parse_signature(callable, inputs, parameters, outputs,
@@ -151,46 +153,33 @@ class PipelineSignature:
         self.signature_order = signature_order
         self._configure_mapping()
 
-    def _configure_mapping(self):
-        self.input_patterns = {}
-        self.output_patterns = {}
-        for specs, patterns, output in (
-            (self.signature_order, self.input_patterns, False),
-            (self.outputs, self.output_patterns, True),
-        ):
-            for name, spec in specs.items():
-                view = spec.view_type
-                if typing.get_origin(view) is not typing.Annotated:
-                    continue
-                view, *metadata = typing.get_args(view)
-                found = [m for m in metadata if isinstance(m, ForEach)]
-                if not found:
-                    continue
+    def _parse_view(self, name, annotation, patterns):
+        if typing.get_origin(annotation) is typing.Annotated:
+            view, *metadata = typing.get_args(annotation)
+            found = [item for item in metadata if isinstance(item, ForEach)]
+            if found:
                 if not self.supports_mapping or len(found) != 1:
                     raise TypeError('Use one ForEach per mapped method view')
-                pattern = patterns[name] = found[0]
-                if output:
-                    if any(rule != 'matched' for rule in pattern.coverage):
-                        raise TypeError(
-                            'Output axis coverage must be matched')
-                else:
-                    if ('optional' in pattern.coverage and
-                            type(None) not in typing.get_args(view)):
-                        raise TypeError(f'Optional input {name!r} needs None')
-                    if name in self.parameters and (
-                        view is not int or len(pattern.axes) != 1
-                    ):
-                        raise TypeError(
-                            'A mapped parameter requires one integer axis')
-                specs[name] = spec = spec.duplicate(view_type=view)
-                if name in self.inputs and not output:
-                    self.inputs[name] = spec
-                if name in self.parameters and not output:
-                    self.parameters[name] = spec
+                patterns[name], = found
+                return view
+        return annotation
 
+    def _configure_mapping(self):
         self.is_mapped = bool(self.input_patterns or self.output_patterns)
         if not self.is_mapped:
             return
+        for name, pattern in self.input_patterns.items():
+            view = self.signature_order[name].view_type
+            if ('optional' in pattern.coverage and
+                    type(None) not in typing.get_args(view)):
+                raise TypeError(f'Optional input {name!r} needs None')
+            if name in self.parameters and (
+                view is not int or len(pattern.axes) != 1
+            ):
+                raise TypeError('A mapped parameter requires one integer axis')
+        for pattern in self.output_patterns.values():
+            if any(rule != 'matched' for rule in pattern.coverage):
+                raise TypeError('Output axis coverage must be matched')
         for name, spec in self.parameters.items():
             if contains_generic_base(CaptureHolder, spec.view_type):
                 raise TypeError(
@@ -278,7 +267,10 @@ class PipelineSignature:
 
             view_type = ParameterSpec.NOVALUE
             if parameter.annotation is not parameter.empty:
-                view_type = annotations.get(name, parameter.annotation)
+                view_type = self._parse_view(
+                    name, annotations.get(name, parameter.annotation),
+                    self.input_patterns,
+                )
             default = ParameterSpec.NOVALUE
             if parameter.default is not parameter.empty:
                 default = parameter.default
@@ -317,6 +309,9 @@ class PipelineSignature:
 
             for (name, qiime_type), view_type in zip(outputs.items(),
                                                      output_views):
+                view_type = self._parse_view(
+                    name, view_type, self.output_patterns,
+                )
                 description = output_descriptions.pop(name,
                                                       ParameterSpec.NOVALUE)
                 annotated_outputs[name] = ParameterSpec(
