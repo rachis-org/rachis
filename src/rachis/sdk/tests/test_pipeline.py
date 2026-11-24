@@ -6,7 +6,9 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import (
+    Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError,
+)
 from contextlib import contextmanager
 import inspect
 from tempfile import TemporaryDirectory
@@ -821,7 +823,7 @@ class TestParallelPipeline(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(ValueError, message):
                     output.result(timeout=5).result(timeout=5)
-                with self.assertRaises(TimeoutError):
+                with self.assertRaises(FutureTimeoutError):
                     scope.result(timeout=0.25)
             finally:
                 child_input.set_result(self.ints)
