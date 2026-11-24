@@ -14,6 +14,7 @@ import zipfile
 
 from rachis.core import transform
 from .base import FormatBase, ValidationError, _check_validation_level
+from .file_format import _FileFormat
 from rachis.plugin.util import get_nonhidden_files
 
 
@@ -167,6 +168,15 @@ class _DirectoryMeta(type):
 
 
 class DirectoryFormat(FormatBase, metaclass=_DirectoryMeta):
+    @classmethod
+    def _validate_compression(cls):
+        """Validate compression settings on member file formats."""
+        for field_name in cls._fields:
+            file_format = getattr(cls, field_name).format
+            if (isinstance(file_format, type)
+                    and issubclass(file_format, _FileFormat)):
+                file_format._validate_compression()
+
     @classmethod
     def _get_compression_options(cls, relative_path):
         """Return ZIP compression options for a path relative to the data dir.

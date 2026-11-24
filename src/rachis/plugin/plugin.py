@@ -268,7 +268,7 @@ class Plugin:
             is_format = False
             if issubclass(view, FormatBase):
                 is_format = True
-                if issubclass(view, _FileFormat):
+                if issubclass(view, (_FileFormat, DirectoryFormat)):
                     view._validate_compression()
 
             name = get_view_name(view)
