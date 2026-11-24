@@ -195,7 +195,7 @@ class TestActionContext(unittest.TestCase):
         inner = Artifact.import_data(Mapping, {'inner': 'b'})
         events = []
 
-        with ParallelConfig(), ParallelContext(None) as ctx:
+        with ParallelConfig(), ParallelContext() as ctx:
             merge = ctx.get_action('dummy_plugin', 'merge_mappings')
             with self.assertRaisesRegex(ValueError, "Key 'outer' exists"), ctx:
                 merge(first, outer)

@@ -122,7 +122,7 @@ def _submit_pipeline(body):
 class ParallelContext(Context):
     execution_metadata = MappingProxyType({'type': 'parsl'})
 
-    def __init__(self, action_obj, parent=None):
+    def __init__(self, action_obj=None, parent=None):
         super(ParallelContext, self).__init__(action_obj, parent=parent)
 
         if parent is not None:
