@@ -5,6 +5,9 @@
 #
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
+from concurrent.futures import CancelledError, Future
+from contextlib import contextmanager
+from types import MappingProxyType
 import warnings
 
 from rachis.plugin import IContext
@@ -12,6 +15,7 @@ from rachis.core.type.util import is_collection_type
 from rachis.core.type import HashableInvocation
 from rachis.core.cache import get_cache
 import rachis.sdk
+from rachis.sdk.proxy import contains_proxy
 
 
 def _validate_collection(collection_order):
@@ -29,7 +33,21 @@ def _validate_collection(collection_order):
     return True
 
 
+@contextmanager
+def cache_lookup_wrapper(frame):
+    ctx = frame.ctx
+    if (frame.results is None and ctx._parent is not None
+            and ctx.cache.named_pool is not None
+            and not contains_proxy(frame.bound_arguments)):
+        frame.results = ctx._check_cache(frame.bound_arguments)
+    yield
+
+
 class Context(IContext):
+    outer_bind_wrappers = (cache_lookup_wrapper,)
+    inner_apply_wrappers = ()
+    execution_metadata = MappingProxyType({'type': 'synchronous'})
+
     def __init__(self, action_obj=None, parent=None):
         if parent is not None:
             self.cache = parent.cache
@@ -47,40 +65,63 @@ class Context(IContext):
 
         self.action_obj = action_obj
         self._parent = parent
+        self._scopes = []
+        self.execution_metadata = dict(type(self).execution_metadata)
 
-    def _dispatch_(self, args, kwargs):
-        exe = self.action_obj._bind(lambda: self)
-        results = exe(*args, **kwargs)
+    def _dispatch_action_(self, frame):
+        """Resume an owned continuation and return its exterior result."""
+        return frame()._result()
 
-        return results
+    def _track_results(self, results):
+        ctx = self
+        while ctx is not None and not ctx._scopes:
+            ctx = ctx._parent
+        if ctx is None:
+            return
 
-    def _callable_action_(self, *args, **kwargs):
-        # If we have a named_pool, we need to check for cached results that
-        # we can reuse.
-        if self.cache.named_pool is not None and \
-                (cached_results := self._check_cache(args, kwargs)):
-            return cached_results
+        futures = ctx._scopes[-1]
+        if isinstance(results, rachis.sdk.Results):
+            futures.extend(rachis.sdk.Results._futures(results))
+        elif isinstance(results, Future):
+            futures.append(results)
 
-        # If we didn't have cached results to reuse, we need to execute
-        # the action.
-        return self._dispatch_(args, kwargs)
+    def __enter__(self):
+        """Start a scope for action results tracked through this context."""
+        self._scopes.append([])
+        return self
 
-    def _check_cache(self, args, kwargs):
+    def __exit__(self, exc_type, exc, traceback):
+        futures = self._scopes.pop()
+        failure = None
+        for future in futures:
+            try:
+                error = future.exception()
+            except CancelledError as cancelled:
+                error = cancelled
+            if failure is None and error is not None:
+                failure = error
+
+        if exc is None and failure is not None:
+            raise failure
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_scopes'] = []
+        return state
+
+    def _check_cache(self, bound_arguments):
         plugin = self.action_obj.plugin_id.replace('_', '-')
         plugin_action = f'{plugin}:{self.action_obj.id}'
 
-        # Type management for inputs
-        collated_inputs = self.action_obj.signature.collate_inputs(
-            *args, **kwargs)
-        callable_args = self.action_obj.signature.coerce_user_input(
-            **collated_inputs)
-
-        # Make args and kwargs look how they do when we read them
-        # out of a .yaml file (list of single value dicts of
-        # input_name: value)
+        # Match the provenance representation, including unkeyed List inputs.
+        signature = self.action_obj.signature
         arguments = []
-        for k, v in callable_args.items():
-            arguments.append({k: v})
+        for name, value in bound_arguments.items():
+            if (name in signature.inputs
+                    and isinstance(value, rachis.sdk.ResultCollection)):
+                value = signature._shape_collection_input(
+                    value, signature.inputs[name])
+            arguments.append({name: value})
 
         invocation = HashableInvocation(plugin_action, arguments)
         if invocation in self.cache.named_pool.index:
@@ -144,14 +185,12 @@ class Context(IContext):
                 "An action named %r was not found for plugin %r"
                 % (action, plugin))
 
-        # Create a context for the new action
-        child_context = self.__class__(new_action_obj, parent=self)
+        def context_factory():
+            # Independent applications of the same callable need independent
+            # Contexts and execution metadata, including parallel workers.
+            return self.__class__(new_action_obj, parent=self)
 
-        # Return a callable for the new action
-        callable_action = child_context.action_obj._rewrite_wrapper_signature(
-            child_context._callable_action_)
-        child_context.action_obj._set_wrapper_properties(callable_action)
-        return callable_action
+        return new_action_obj._outer_bind(context_factory)
 
 
     def make_artifact(self, type, view, view_type=None):

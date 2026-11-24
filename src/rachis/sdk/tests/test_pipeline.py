@@ -6,18 +6,30 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
-import unittest
+from concurrent.futures import (
+    Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError,
+)
+from contextlib import contextmanager
 import inspect
+from tempfile import TemporaryDirectory
+from threading import Event
+import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
 import rachis
 import rachis.sdk
+from rachis.core.cache import Cache, get_cache
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.core.testing.type import IntSequence1, SingleInt, Mapping, Foo
+from rachis.core.util import load_action_yaml
 from rachis.plugin import Visualization, Int, Bool, Properties
 import rachis.sdk.parallel_config
 from rachis.plugin import List, Collection, IContext
+from rachis.sdk.context import ParallelContext
+from rachis.sdk.futures import result_as_future
+from rachis.sdk.proxy import ProxyArtifact
 
 
 class TestPipeline(unittest.TestCase):
@@ -297,8 +309,9 @@ class TestPipeline(unittest.TestCase):
         exp = {'0': 0, '1': 1, '2': 2}
 
         with rachis.sdk.parallel_config.ParallelConfig():
-            ret = pipeline.parallel()._result()
+            ret = pipeline.parallel()
 
+        self.assertIsInstance(ret, rachis.sdk.Results)
         obs = rachis.sdk.util.view_collection(ret.output, int)
 
         self.assertEqual(obs, exp)
@@ -370,19 +383,21 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(obs, exp)
 
     def test_nested_pipeline_parallel(self):
-        ''' This test basically just validates that nested pipelines in
-            parallel don't blow anything up. It was added concurrently with
-            nested parallel pipelines being flattened.
-        '''
         pipeline = self.plugin.pipelines['pipelines_in_pipeline']
-
-        ints = rachis.Artifact.import_data(IntSequence1, [1, 2, 3])
-        mapping = rachis.Artifact.import_data(Mapping, {'foo': '42'})
-
         with rachis.sdk.parallel_config.ParallelConfig():
-            pipeline.parallel(ints, mapping)._result()
+            results = pipeline.parallel(self.int_sequence, self.mapping)
 
-        self.assertTrue(True)
+        self.assertIsInstance(results.int1, rachis.Artifact)
+        self.assertEqual(results.int1.view(int), 4)
+
+    def test_synchronous_pipeline_preserves_active_cache(self):
+        pipeline = self.plugin.pipelines['parameter_only_pipeline']
+        with TemporaryDirectory() as directory:
+            cache = Cache(f'{directory}/cache')
+            with cache:
+                first, _ = pipeline(1)
+                self.assertIs(get_cache(), cache)
+                self.assertEqual(first.view(list), [1, 2, 3])
 
     def test_annotations_correct(self):
         def annotations(
@@ -581,10 +596,25 @@ class TestPipeline(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, 'Result.*objects.*None'):
                 call(self.int_sequence, break_from='return-view')
 
+    def test_failing_from_invalid_result(self):
+        for call in self.iter_callables('failing_pipeline'):
+            for mode in ('return-scalar', 'return-collection-member'):
+                with self.subTest(mode=mode), self.assertRaisesRegex(
+                    TypeError, 'Result.*objects.*int'
+                ):
+                    call(self.int_sequence, break_from=mode)
+
     def test_failing_from_method(self):
         for call in self.iter_callables('failing_pipeline'):
             with self.assertRaisesRegex(ValueError, "Key 'foo' exists"):
                 call(self.int_sequence, break_from='method')
+
+    def test_parallel_pipeline_catches_failure_at_inner_scope_exit(self):
+        pipeline = self.plugin.pipelines['failing_pipeline']
+        with rachis.sdk.parallel_config.ParallelConfig():
+            mapping, = pipeline.parallel(self.int_sequence,
+                                         break_from='method-in-scope')
+        self.assertEqual(mapping.view(dict), {'caught': 'at scope exit'})
 
     def test_failing_from_type(self):
         for call in self.iter_callables('failing_pipeline'):
@@ -605,6 +635,217 @@ class TestPipeline(unittest.TestCase):
         for call in self.iter_callables('failing_pipeline'):
             with self.assertRaisesRegex(ValueError, r'action.*not\%a\$method'):
                 call(self.int_sequence, break_from='no-action')
+
+
+class TestParallelPipeline(unittest.TestCase):
+    def setUp(self):
+        self.plugin = get_dummy_plugin()
+        registered = patch.dict(self.plugin.pipelines)
+        registered.start()
+        self.addCleanup(registered.stop)
+        self.ints = rachis.Artifact.import_data(IntSequence1, [1, 2, 3])
+
+    def register_pipeline(self, function, *, outputs, inputs=None):
+        self.plugin.pipelines.register_function(
+            function, inputs=inputs or {}, parameters={}, outputs=outputs,
+            name=function.__name__, description='',
+        )
+        return self.plugin.pipelines[function.__name__]
+
+    def test_downstream_pipeline_submits_before_producer_returns(self):
+        submitted = Event()
+        ints = self.ints
+
+        def produce(ctx):
+            if not submitted.wait(timeout=5):
+                raise TimeoutError('The consumer did not submit its child')
+            return ints
+
+        def consume(ctx, ints):
+            split = ctx.get_action('dummy_plugin', 'split_ints')
+            left = split(ints).left
+            submitted.set()
+            return left
+
+        self.register_pipeline(produce, outputs={'output': IntSequence1})
+        self.register_pipeline(consume, inputs={'ints': IntSequence1},
+                               outputs={'output': IntSequence1})
+        with (rachis.sdk.parallel_config.ParallelConfig(),
+              ParallelContext(None) as ctx):
+            upstream = ctx.get_action('dummy_plugin', 'produce')()
+            downstream = ctx.get_action('dummy_plugin', 'consume')(
+                upstream.output)
+
+        self.assertEqual(downstream.output.view(list), [1])
+
+    def test_consumer_uses_ready_output_while_sibling_is_pending(self):
+        delayed = Future()
+        ready = self.ints
+        sibling = rachis.Artifact.import_data(IntSequence1, [4])
+
+        def produce(ctx):
+            return ready, ProxyArtifact(delayed, None, IntSequence1)
+
+        self.register_pipeline(
+            produce, outputs={'ready': IntSequence1, 'delayed': IntSequence1})
+        with (rachis.sdk.parallel_config.ParallelConfig(),
+              ParallelContext(None) as ctx):
+            try:
+                # Catch an accidental _result() call before it can wait on
+                # the sibling this test releases after the consumer finishes.
+                with patch.object(
+                    rachis.sdk.Results, '_result',
+                    side_effect=AssertionError(
+                        'Submission tried to realize all outputs'),
+                ):
+                    outputs = ctx.get_action('dummy_plugin', 'produce')()
+                split = ctx.get_action('dummy_plugin', 'split_ints')
+                first = result_as_future(split(outputs.ready).left)
+                self.assertEqual(first.result(timeout=5).view(list), [1])
+                self.assertFalse(result_as_future(outputs.delayed).done())
+            finally:
+                delayed.set_result(sibling)
+
+        self.assertEqual(outputs.delayed.view(list), [4])
+
+    def test_alias_waits_for_original_input_provenance(self):
+        original = Future()
+        alias_prepared = Future()
+        ready = self.ints
+
+        def return_ready(ctx, original):
+            return ready
+
+        @contextmanager
+        def observe_alias(frame):
+            yield
+            alias_prepared.set_result(result_as_future(frame.results.output))
+
+        pipeline = self.register_pipeline(
+            return_ready, inputs={'original': IntSequence1},
+            outputs={'output': IntSequence1})
+        with (
+            patch.object(pipeline, 'inner_apply_wrappers',
+                         (observe_alias, *pipeline.inner_apply_wrappers)),
+            rachis.sdk.parallel_config.ParallelConfig(),
+            ParallelContext(None) as ctx,
+        ):
+            try:
+                run = ctx.get_action('dummy_plugin', pipeline.id)
+                result = run(ProxyArtifact(original, None, IntSequence1))
+                self.assertFalse(alias_prepared.result(timeout=5).done())
+            finally:
+                original.set_result(ready)
+
+        action = load_action_yaml(result.output._archiver.path)['action']
+        self.assertEqual(action['inputs'], [{'original': str(ready.uuid)}])
+
+    def test_provenance_snapshots_pending_collection_inputs(self):
+        original = Future()
+        cleared = Event()
+        source = rachis.Artifact.import_data(SingleInt, 2)
+
+        def clear_inputs(ctx, ints):
+            ints.clear()
+            cleared.set()
+            return [source]
+
+        pipeline = self.register_pipeline(
+            clear_inputs, inputs={'ints': List[IntSequence1]},
+            outputs={'output': Collection[SingleInt]})
+        with (rachis.sdk.parallel_config.ParallelConfig(),
+              ParallelContext(None) as ctx):
+            try:
+                run = ctx.get_action('dummy_plugin', pipeline.id)
+                result = run([ProxyArtifact(original, None, IntSequence1)])
+                self.assertTrue(cleared.wait(timeout=5))
+            finally:
+                original.set_result(self.ints)
+
+        action = load_action_yaml(result.output['0']._archiver.path)['action']
+        self.assertEqual(action['inputs'], [{'ints': [str(self.ints.uuid)]}])
+        self.assertEqual(action['alias-of'], str(source.uuid))
+
+    def test_pipeline_output_failure_surfaces_at_scope_exit(self):
+        returned_to_caller = False
+
+        with (rachis.sdk.parallel_config.ParallelConfig(),
+              self.assertRaisesRegex(ValueError, "Key 'foo' exists"),
+              ParallelContext(None) as ctx):
+            fail = ctx.get_action('dummy_plugin', 'failing_pipeline')
+            fail(self.ints, break_from='method')
+            returned_to_caller = True
+
+        self.assertTrue(returned_to_caller)
+
+    def test_failure_from_discarded_nested_call_surfaces_at_scope_exit(self):
+        mapping = rachis.Artifact.import_data(Mapping, {'foo': 'a'})
+        conflicting = rachis.Artifact.import_data(Mapping, {'foo': 'b'})
+
+        def discard_failed_method(ctx):
+            merge = ctx.get_action('dummy_plugin', 'merge_mappings')
+            merge(mapping, conflicting)
+            return mapping
+
+        def discard_nested_pipeline(ctx):
+            ctx.get_action('dummy_plugin', 'discard_failed_method')()
+            return mapping
+
+        self.register_pipeline(discard_failed_method,
+                               outputs={'output': Mapping})
+        pipeline = self.register_pipeline(discard_nested_pipeline,
+                                          outputs={'output': Mapping})
+        with (rachis.sdk.parallel_config.ParallelConfig(),
+              self.assertRaisesRegex(ValueError, "Key 'foo' exists")):
+            pipeline.parallel()
+
+    def test_body_failure_settles_output_and_drains_submitted_child(self):
+        message = 'Pipeline body failed'
+        child_input = Future()
+        output = Future()
+
+        def submit_then_raise(ctx):
+            split = ctx.get_action('dummy_plugin', 'split_ints')
+            split(ProxyArtifact(child_input, None, IntSequence1))
+            raise ValueError(message)
+
+        pipeline = self.register_pipeline(
+            submit_then_raise, outputs={'output': IntSequence1})
+
+        def run_scope(ctx):
+            with ctx:
+                run = ctx.get_action('dummy_plugin', pipeline.id)
+                result_as_future(run().output, into=output)
+
+        with (rachis.sdk.parallel_config.ParallelConfig(),
+              ThreadPoolExecutor(max_workers=1) as executor):
+            scope = executor.submit(run_scope, ParallelContext(None))
+            try:
+                with self.assertRaisesRegex(ValueError, message):
+                    output.result(timeout=5)
+                with self.assertRaises(FutureTimeoutError):
+                    scope.result(timeout=0.25)
+            finally:
+                child_input.set_result(self.ints)
+
+            with self.assertRaisesRegex(ValueError, message):
+                scope.result(timeout=5)
+
+    def test_output_alias_failure_surfaces_before_parallel_returns(self):
+        ints = self.ints
+
+        def return_artifact(ctx):
+            return ints
+
+        pipeline = self.register_pipeline(return_artifact,
+                                          outputs={'output': IntSequence1})
+        with (
+            patch.object(rachis.Artifact, '_alias',
+                         side_effect=ValueError('Alias failed')),
+            rachis.sdk.parallel_config.ParallelConfig(),
+            self.assertRaisesRegex(ValueError, '^Alias failed$'),
+        ):
+            pipeline.parallel()
 
 
 if __name__ == '__main__':

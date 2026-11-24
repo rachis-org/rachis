@@ -28,6 +28,7 @@ import rachis.core.util as util
 import rachis.core.exceptions as exceptions
 
 from rachis.sdk.iresult import IResult
+from rachis.sdk.util import Sievable
 
 # Note: Result, Artifact, and Visualization classes are in this file to avoid
 # circular dependencies between Result and its subclasses. Result is tightly
@@ -699,7 +700,7 @@ class Visualization(Result):
             }
 
 
-class ResultCollection:
+class ResultCollection(Sievable):
     @classmethod
     def load(cls, directory):
         """ Determines how to load a Collection of QIIME 2 Artifacts in a
@@ -799,8 +800,18 @@ class ResultCollection:
         rachis.sdk.util.validate_result_collection_keys(key)
         self.collection[key] = item
 
+    def update(self, items):
+        for key, item in items:
+            self[key] = item
+
     def __getitem__(self, key):
         return self.collection[key]
+
+    def __copy__(self):
+        copied = self.__class__.__new__(self.__class__)
+        copied.__dict__.update(self.__dict__)
+        copied.collection = self.collection.copy()
+        return copied
 
     def __repr__(self):
         return f"<{self.__class__.__name__.lower()}: {self.type}>"

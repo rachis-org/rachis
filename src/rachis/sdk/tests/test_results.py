@@ -8,8 +8,13 @@
 
 import pickle
 import unittest
+from concurrent.futures import Future
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from rachis.core.testing.type import IntSequence1
 from rachis.sdk import Results
+from rachis.sdk.proxy import ProxyArtifact
 
 
 class TestResults(unittest.TestCase):
@@ -60,6 +65,45 @@ class TestResults(unittest.TestCase):
 
         with self.assertRaises(AttributeError):
             r.baz
+
+    def test_pending_results_project_from_shared_future(self):
+        spec = SimpleNamespace(qiime_type=IntSequence1)
+        signature = {'left': spec, 'right': spec}
+        future = Future()
+        pending = Results._from_future(future, signature)
+
+        self.assertIsInstance(pending.left, ProxyArtifact)
+        self.assertIs(pending.left.type, IntSequence1)
+        self.assertEqual(Results._futures(pending), (future,))
+
+        realized = Results(signature, [42, 43])
+        future.set_result(realized)
+        self.assertEqual(pending._result(), realized)
+        self.assertNotEqual(pending, realized)
+        self.assertEqual(pending.left.result(), 42)
+        self.assertEqual(pending.right.result(), 43)
+
+    def test_pending_results_can_be_inspected_without_resolving(self):
+        spec = SimpleNamespace(qiime_type=IntSequence1)
+        signature = {'left': spec, 'right': spec}
+        future = Future()
+        pending = Results._from_future(future, signature)
+        realized = Results(signature, [42, 43])
+        left, right = pending
+
+        with (
+            patch.object(Results, '_result', side_effect=AssertionError),
+            patch.object(ProxyArtifact, 'result', side_effect=AssertionError),
+        ):
+            outputs = pending._asdict()
+            self.assertIs(outputs['left'], left)
+            self.assertIs(outputs['right'], right)
+            self.assertEqual(pending, Results(signature, [left, right]))
+            self.assertNotEqual(pending,
+                                Results._from_future(future, signature))
+            self.assertNotEqual(pending, Results(['other'], [left]))
+            self.assertNotEqual(pending, realized)
+            self.assertNotEqual(realized, pending)
 
     def test_per_instance_field_attributes(self):
         # Field attributes are added to a `Results` instance, not the type.

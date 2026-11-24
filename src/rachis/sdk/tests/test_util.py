@@ -7,14 +7,45 @@
 # ----------------------------------------------------------------------------
 
 import unittest
+from concurrent.futures import Future
 
 import rachis
 import rachis.sdk
 
-from rachis.sdk.util import validate_result_collection_keys
+from rachis.sdk.futures import result_as_future
+from rachis.sdk.proxy import ProxyArtifact
+from rachis.sdk.util import Sievable, validate_result_collection_keys
 
 
 class TestUtil(unittest.TestCase):
+    def test_result_as_future_resolves_dictionary(self):
+        upstream = Future()
+        proxy = ProxyArtifact(upstream, None)
+        result = result_as_future({'input': proxy, 'parameter': 2})
+
+        self.assertFalse(result.done())
+        value = object()
+        upstream.set_result(value)
+        self.assertEqual(result.result(timeout=1),
+                         {'input': value, 'parameter': 2})
+
+    def test_sieve_rebuilds_independently(self):
+        collection = rachis.sdk.ResultCollection({'key': 'pending'})
+        arguments = {'inputs': [collection], 'parameter': 7}
+        selected, rebuild = Sievable.sieve(arguments, isinstance=str)
+
+        self.assertEqual(selected, ('pending',))
+        collection['added'] = 'after selection'
+        first = rebuild([1])
+        second = rebuild([2])
+
+        self.assertIsInstance(first['inputs'][0], rachis.sdk.ResultCollection)
+        self.assertEqual(first['inputs'][0], {'key': 1})
+        self.assertEqual(second['inputs'][0], {'key': 2})
+        self.assertEqual(collection, {'key': 'pending',
+                                      'added': 'after selection'})
+        self.assertEqual(first['parameter'], 7)
+
     def test_artifact_actions(self):
         obs = rachis.sdk.util.actions_by_input_type(None)
         self.assertEqual(obs, [])

@@ -16,6 +16,7 @@ import rachis
 from rachis.core.cache import Cache
 from rachis.core.testing.type import IntSequence1, SingleInt
 from rachis.core.testing.util import get_dummy_plugin, PipelineError
+from rachis.sdk.context import Context
 from rachis.sdk.result import Artifact
 from rachis.sdk.parallel_config import ParallelConfig
 from rachis.core.util import load_action_yaml
@@ -712,6 +713,15 @@ class TestPipelineResumption(unittest.TestCase):
                     self.pipeline.parallel(fail=True)._result()
 
                 self.pipeline.parallel()._result()
+
+    def test_list_input_recycles_regardless_of_supplied_keys(self):
+        with self.pool:
+            call = Context().get_action('dummy_plugin', 'list_of_ints')
+            list_result = call([self.int1]).output
+            call = Context().get_action('dummy_plugin', 'list_of_ints')
+            keyed_result = call({'named': self.int1}).output
+
+        self.assertEqual(list_result['0'].uuid, keyed_result['0'].uuid)
 
     def test_incomplete_collection(self):
         pipeline = self.plugin.pipelines['resumable_pipeline']
