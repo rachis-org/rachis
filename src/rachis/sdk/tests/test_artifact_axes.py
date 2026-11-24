@@ -109,8 +109,12 @@ def test_for_each_bindings():
         "'assignment':'assignment':'matched']"
     )
     normalized = mixed.normalize()
-    assert normalized.entries == (slice('student', 'learner', 'matched'),
-                                  slice('assignment', 'assignment', 'matched'))
+    assert normalized.to_bound_coord(Coord(student='s1', assignment='a1')) == (
+        Coord(learner='s1', assignment='a1')
+    )
+    assert normalized.to_axis_coord(
+        Coord(assignment='a1', learner='s1', extra='ignored'),
+    ) == Coord(student='s1', assignment='a1')
     assert mixed == normalized
     assert normalized.normalize() == normalized
     assert normalized.as_unbound() == pattern

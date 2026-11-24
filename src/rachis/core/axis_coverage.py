@@ -7,9 +7,11 @@
 # ----------------------------------------------------------------------------
 
 
-def coordinate_joins(bindings, rules):
+def coordinate_joins(patterns):
     """Group input bindings into independent joins for a Cartesian product."""
-    binding_sets = tuple(dict.fromkeys(map(frozenset, bindings.values())))
+    binding_sets = tuple(dict.fromkeys(
+        frozenset(pattern.bindings) for pattern in patterns.values()
+    ))
     joins = []
     seen = set()
     for group in binding_sets:
@@ -22,9 +24,9 @@ def coordinate_joins(bindings, rules):
             )
         seen.update(group)
         joins.append(CoordinateJoin({
-            name: path for name, path in bindings.items()
-            if group.issuperset(path)
-        }, rules))
+            name: pattern for name, pattern in patterns.items()
+            if group.issuperset(pattern.bindings)
+        }))
     return tuple(joins)
 
 
@@ -38,18 +40,22 @@ class CoordinateJoin:
     value or None. Every required input must cover the resulting domain.
     """
 
-    def __init__(self, bindings, rules):
-        self.inputs = tuple(bindings)
-        self.bindings = max(bindings.values(), key=len)
-        self._input_bindings = bindings
+    def __init__(self, patterns):
+        self.inputs = tuple(patterns)
+        self.bindings = max(
+            (pattern.bindings for pattern in patterns.values()), key=len,
+        )
+        self._patterns = patterns
+        rules = {name: pattern.coverage_rule
+                 for name, pattern in patterns.items()}
         self._complete = tuple(
-            name for name, path in bindings.items()
-            if len(path) == len(self.bindings)
+            name for name, pattern in patterns.items()
+            if len(pattern.entries) == len(self.bindings)
         )
         self._matched = frozenset(
-            name for name in bindings if rules[name] == 'matched')
+            name for name, rule in rules.items() if rule == 'matched')
         self._required = tuple(
-            name for name in bindings if rules[name] == 'required')
+            name for name, rule in rules.items() if rule == 'required')
         complete = frozenset(self._complete)
         optional = frozenset(
             name for name in self._complete if rules[name] == 'optional')
@@ -66,28 +72,29 @@ class CoordinateJoin:
             return None
         return tuple(name for name in self._required if name not in present)
 
-    def select(self, indexes):
-        """Yield bindings, aligned inputs and coverage gaps for each key.
+    def align(self, indexes):
+        """Yield an invocation coordinate and its aligned input values.
 
-        Index keys follow each input's binding order. Index values are opaque
-        to the join. None denotes a missing input.
+        Input indexes are keyed by coordinates in artifact axis names.
+        Excluded coordinates are skipped. A missing required input raises.
         """
-        keys = {}
-        for name in self._complete:
-            path = self._input_bindings[name]
-            for key in indexes[name]:
-                bound = dict(zip(path, key))
-                keys[tuple(bound[binding] for binding in self.bindings)] = None
+        coordinates = dict.fromkeys(
+            self._patterns[name].to_bound_coord(coord).project(self.bindings)
+            for name in self._complete
+            for coord in indexes[name]
+        )
 
-        for key in keys:
-            bound = dict(zip(self.bindings, key))
+        for coord in coordinates:
             selected = {
-                name: indexes[name].get(tuple(bound[binding]
-                                              for binding in path))
-                for name, path in self._input_bindings.items()
+                name: indexes[name].get(pattern.to_axis_coord(coord))
+                for name, pattern in self._patterns.items()
             }
             present = {name for name, value in selected.items()
                        if value is not None}
             missing = self.coverage(present)
-            if missing is not None:
-                yield bound, selected, missing
+            if missing is None:
+                continue
+            if missing:
+                raise ValueError(f'Required inputs {list(missing)!r} lack '
+                                 f'{coord!r}')
+            yield coord, selected

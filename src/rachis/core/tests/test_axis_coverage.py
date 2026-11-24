@@ -6,8 +6,11 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
+from itertools import islice
+
 import pytest
 
+from rachis.core.axis import Coord, ForEach
 from rachis.core.axis_coverage import CoordinateJoin, coordinate_joins
 
 
@@ -29,104 +32,121 @@ from rachis.core.axis_coverage import CoordinateJoin, coordinate_joins
 ])
 def test_three_way_coverage(rules, keys, gaps):
     domains = {'A': 'abc', 'B': 'bcd', 'C': 'cde'}
-    join = CoordinateJoin(dict.fromkeys(domains, ('sample',)),
-                          dict(zip(domains, rules)))
+    join = CoordinateJoin({
+        name: ForEach['sample'::rule]
+        for name, rule in zip(domains, rules, strict=True)
+    })
     indexes = {
-        name: {(key,): f'{name}/{key}' for key in domain}
+        name: {Coord(sample=key): f'{name}/{key}' for key in domain}
         for name, domain in domains.items()
     }
-    assert list(join.select(indexes)) == [
-        ({'sample': key},
+    assert {
+        key: missing for key in 'abcde'
+        if (missing := join.coverage({name for name, domain in domains.items()
+                                      if key in domain}))
+    } == gaps
+    stop = keys.index(next(iter(gaps))) if gaps else len(keys)
+    aligned = join.align(indexes)
+    assert list(islice(aligned, stop)) == [
+        (Coord(sample=key),
          {name: f'{name}/{key}' if key in domain else None
-          for name, domain in domains.items()},
-         gaps.get(key, ()))
-        for key in keys
+          for name, domain in domains.items()})
+        for key in keys[:stop]
     ]
+    if gaps:
+        with pytest.raises(ValueError, match='Required inputs.*Coord'):
+            next(aligned)
+    else:
+        assert list(aligned) == []
 
 
-@pytest.mark.parametrize(('rule', 'keys', 'missing'), [
-    ('matched', ('s1',), ()),
-    ('optional', ('s1', 's2'), ()),
-    ('required', ('s1', 's2'), ('offset',)),
-])
-def test_projected_coverage(rule, keys, missing):
-    join = CoordinateJoin(
-        {'offset': ('student',), 'scores': ('student', 'assignment')},
-        {'offset': rule, 'scores': 'required'},
-    )
+@pytest.mark.parametrize('rule', ['matched', 'optional', 'required'])
+def test_projected_coverage(rule):
+    join = CoordinateJoin({
+        'offset': ForEach['sample':'student':rule],
+        'scores': ForEach['student'::'required', 'assignment'::'required'],
+    })
     indexes = {
-        'offset': {('s1',): 0, ('s3',): 10},
-        'scores': {('s1', 'a1'): 4, ('s2', 'a1'): 5},
+        'offset': {Coord(sample='s1'): 0, Coord(sample='s3'): 10},
+        'scores': {Coord(student='s1', assignment='a1'): 4,
+                   Coord(student='s2', assignment='a1'): 5},
     }
-    assert list(join.select(indexes)) == [
-        ({'student': key, 'assignment': 'a1'},
-         {'offset': 0 if key == 's1' else None,
-          'scores': 4 if key == 's1' else 5},
-         missing if key == 's2' else ())
-        for key in keys
-    ]
+    aligned = join.align(indexes)
+    assert next(aligned) == (Coord(student='s1', assignment='a1'),
+                             {'offset': 0, 'scores': 4})
+    if rule == 'required':
+        with pytest.raises(ValueError, match="Required inputs.*offset.*s2"):
+            next(aligned)
+    elif rule == 'optional':
+        assert list(aligned) == [(Coord(student='s2', assignment='a1'),
+                                  {'offset': None, 'scores': 5})]
+    else:
+        assert list(aligned) == []
 
 
 def test_projected_match_filters_the_complete_optional_domain():
-    join = CoordinateJoin(
-        {'offset': ('student',), 'scores': ('student', 'assignment'),
-         'weights': ('student', 'assignment')},
-        {'offset': 'matched', 'scores': 'optional', 'weights': 'required'},
-    )
+    join = CoordinateJoin({
+        'offset': ForEach['student'],
+        'scores': ForEach['student'::'optional', 'assignment'::'optional'],
+        'weights': ForEach['student'::'required', 'assignment'::'required'],
+    })
     indexes = {
-        'offset': {('s1',): 10},
-        'scores': {('s1', 'a1'): 4, ('s2', 'a1'): 5},
-        'weights': {('s1', 'a1'): 1, ('s1', 'a2'): 1},
+        'offset': {Coord(student='s1'): 10},
+        'scores': {Coord(student='s1', assignment='a1'): 4,
+                   Coord(student='s2', assignment='a1'): 5},
+        'weights': {Coord(student='s1', assignment='a1'): 1,
+                    Coord(student='s1', assignment='a2'): 1},
     }
-    assert list(join.select(indexes)) == [
-        ({'student': 's1', 'assignment': 'a1'},
-         {'offset': 10, 'scores': 4, 'weights': 1}, ()),
+    assert list(join.align(indexes)) == [
+        (Coord(student='s1', assignment='a1'),
+         {'offset': 10, 'scores': 4, 'weights': 1}),
     ]
 
 
 def test_presence_inputs_include_domain_drivers_and_coverage_checks():
-    join = CoordinateJoin(
-        {'scores': ('student', 'assignment'), 'offset': ('student',),
-         'weight': ('assignment',), 'roster': ('student',)},
-        {'scores': 'optional', 'offset': 'optional',
-         'weight': 'required', 'roster': 'matched'},
-    )
+    join = CoordinateJoin({
+        'scores': ForEach['student'::'optional', 'assignment'::'optional'],
+        'offset': ForEach['student'::'optional'],
+        'weight': ForEach['assignment'::'required'],
+        'roster': ForEach['student'],
+    })
     assert join.presence_inputs == {'scores', 'weight', 'roster'}
 
 
 @pytest.mark.parametrize(('rule', 'left', 'right'), [
-    ('matched', {('s1',): 1}, {('s2',): 2}),
+    ('matched', {Coord(sample='s1'): 1}, {Coord(sample='s2'): 2}),
     ('optional', {}, {}),
 ])
 def test_empty_coverage_domain(rule, left, right):
-    join = CoordinateJoin(
-        {'left': ('sample',), 'right': ('sample',)},
-        {'left': rule, 'right': rule},
-    )
-    assert list(join.select({'left': left, 'right': right})) == []
+    join = CoordinateJoin(dict.fromkeys(('left', 'right'),
+                                       ForEach['sample'::rule]))
+    assert list(join.align({'left': left, 'right': right})) == []
 
 
 def test_required_keys_align_by_binding_order():
-    join = CoordinateJoin(
-        {'left': ('student', 'assignment'),
-         'right': ('assignment', 'student')},
-        {'left': 'required', 'right': 'required'},
-    )
+    join = CoordinateJoin({
+        'left': ForEach['student'::'required', 'assignment'::'required'],
+        'right': ForEach[
+            'assignment'::'required', 'sample':'student':'required',
+        ],
+    })
     indexes = {
-        'left': {('s1', 'a1'): 1, ('s1', 'a2'): 2},
-        'right': {('a2', 's1'): 3, ('a1', 's1'): 4},
+        'left': {Coord(student='s1', assignment='a1'): 1,
+                 Coord(student='s1', assignment='a2'): 2},
+        'right': {Coord(assignment='a2', sample='s1'): 3,
+                  Coord(assignment='a1', sample='s1'): 4},
     }
-    assert list(join.select(indexes)) == [
-        ({'student': 's1', 'assignment': 'a1'}, {'left': 1, 'right': 4}, ()),
-        ({'student': 's1', 'assignment': 'a2'}, {'left': 2, 'right': 3}, ()),
+    assert list(join.align(indexes)) == [
+        (Coord(student='s1', assignment='a1'), {'left': 1, 'right': 4}),
+        (Coord(student='s1', assignment='a2'), {'left': 2, 'right': 3}),
     ]
 
 
 def test_coordinate_joins_group_projections_and_independent_inputs():
-    bindings = {'offset': ('assignment',),
-                'scores': ('student', 'assignment'), 'term': ('term',)}
-    rules = dict.fromkeys(bindings, 'matched')
-    scores, term = coordinate_joins(bindings, rules)
+    patterns = {'offset': ForEach['assignment'],
+                'scores': ForEach['student', 'assignment'],
+                'term': ForEach['term']}
+    scores, term = coordinate_joins(patterns)
     assert scores.inputs == ('offset', 'scores')
     assert scores.bindings == ('student', 'assignment')
     assert term.inputs == ('term',)
@@ -134,7 +154,7 @@ def test_coordinate_joins_group_projections_and_independent_inputs():
 
 
 def test_coordinate_joins_reject_overlap_without_a_complete_input():
-    bindings = {'scores': ('student', 'assignment'),
-                'enrollment': ('student', 'term')}
+    patterns = {'scores': ForEach['student', 'assignment'],
+                'enrollment': ForEach['student', 'term']}
     with pytest.raises(TypeError, match='common composite axis pattern'):
-        coordinate_joins(bindings, dict.fromkeys(bindings, 'matched'))
+        coordinate_joins(patterns)
