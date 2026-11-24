@@ -67,7 +67,7 @@ def test_projected_coverage(rule):
         'scores': ForEach['student'::'required', 'assignment'::'required'],
     })
     indexes = {
-        'offset': {Coord(sample='s1'): 0, Coord(sample='s3'): 10},
+        'offset': {Coord(student='s1'): 0, Coord(student='s3'): 10},
         'scores': {Coord(student='s1', assignment='a1'): 4,
                    Coord(student='s2', assignment='a1'): 5},
     }
@@ -133,8 +133,8 @@ def test_required_keys_align_by_binding_order():
     indexes = {
         'left': {Coord(student='s1', assignment='a1'): 1,
                  Coord(student='s1', assignment='a2'): 2},
-        'right': {Coord(assignment='a2', sample='s1'): 3,
-                  Coord(assignment='a1', sample='s1'): 4},
+        'right': {Coord(assignment='a2', student='s1'): 3,
+                  Coord(assignment='a1', student='s1'): 4},
     }
     assert list(join.align(indexes)) == [
         (Coord(student='s1', assignment='a1'), {'left': 1, 'right': 4}),

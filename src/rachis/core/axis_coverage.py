@@ -42,15 +42,14 @@ class CoordinateJoin:
 
     def __init__(self, patterns):
         self.inputs = tuple(patterns)
-        self.bindings = max(
-            (pattern.bindings for pattern in patterns.values()), key=len,
-        )
-        self._patterns = patterns
+        self._input_bindings = {name: pattern.bindings
+                                for name, pattern in patterns.items()}
+        self.bindings = max(self._input_bindings.values(), key=len)
         rules = {name: pattern.coverage_rule
                  for name, pattern in patterns.items()}
         self._complete = tuple(
-            name for name, pattern in patterns.items()
-            if len(pattern.entries) == len(self.bindings)
+            name for name, bindings in self._input_bindings.items()
+            if len(bindings) == len(self.bindings)
         )
         self._matched = frozenset(
             name for name, rule in rules.items() if rule == 'matched')
@@ -75,19 +74,19 @@ class CoordinateJoin:
     def align(self, indexes):
         """Yield an invocation coordinate and its aligned input values.
 
-        Input indexes are keyed by coordinates in artifact axis names.
+        Input indexes are keyed by coordinates in each input's binding order.
         Excluded coordinates are skipped. A missing required input raises.
         """
         coordinates = dict.fromkeys(
-            self._patterns[name].to_bound_coord(coord).project(self.bindings)
+            coord.project(self.bindings)
             for name in self._complete
             for coord in indexes[name]
         )
 
         for coord in coordinates:
             selected = {
-                name: indexes[name].get(pattern.to_axis_coord(coord))
-                for name, pattern in self._patterns.items()
+                name: indexes[name].get(coord.project(bindings))
+                for name, bindings in self._input_bindings.items()
             }
             present = {name for name, value in selected.items()
                        if value is not None}
