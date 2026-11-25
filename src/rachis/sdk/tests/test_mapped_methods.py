@@ -26,6 +26,7 @@ from rachis.plugin import CaptureHolder, Int
 from rachis.plugin import Metadata as MetadataType
 from rachis.plugin.plugin import TransformerRecord
 from rachis.sdk import MappedMethod, PluginManager, Results
+from rachis.sdk.action import FramePhase
 from rachis.sdk.context import Context, ParallelContext
 from rachis.sdk.futures import as_future
 from rachis.sdk.parallel_config import ParallelConfig
@@ -285,29 +286,36 @@ def test_cell_context_exits_before_staging_outputs():
 
     @contextmanager
     def observe(frame):
+        assert frame.current_phase is FramePhase.INNER_APPLY
+        assert frame.next_phase is FramePhase.FINISHED
         yield
+        assert frame.current_phase is FramePhase.INNER_APPLY
         assert not (frame.workspace / 'outputs').exists()
         observed.append(frame.results)
         events.append(frame.coordinate.sample)
 
     @contextmanager
     def observe_invocation(frame):
-        events.append('mapped-enter')
-        yield
+        assert frame.current_phase is FramePhase.INNER_BIND
         assert all(coord is cell.coordinate
                    for coord, cell in frame.cells.items())
+        assert all(cell.current_phase is None
+                   and cell.next_phase is FramePhase.INNER_APPLY
+                   for cell in frame.cells.values())
+        events.append('mapped-enter')
+        yield
+        assert frame.current_phase is FramePhase.INNER_BIND
         assert len(frame.cell_futures) == 2
         assert all(future.done() for future in frame.cell_futures.values())
         events.append('mapped-exit')
 
     class ObservedContext(Context):
+        inner_bind_wrappers = (observe_invocation,)
         inner_apply_wrappers = (observe,)
 
     data = Artifact.import_data('Mapping', {'s1': '4', 's2': '5'})
     call = method._outer_bind(lambda: ObservedContext(method))
-    with patch.object(method, 'inner_bind_wrappers',
-                      (*method.inner_bind_wrappers, observe_invocation)):
-        result = call(data, 1)
+    result = call(data, 1)
     assert result.output.view(dict) == {'s1': '5', 's2': '6'}
     assert observed == ['5', '6']
     assert events == ['mapped-enter', 's1', 's2', 'mapped-exit']

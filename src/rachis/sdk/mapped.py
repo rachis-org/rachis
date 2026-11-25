@@ -12,6 +12,7 @@ from concurrent.futures import wait
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import partial
+from itertools import chain
 from pathlib import Path
 import shutil
 import tempfile
@@ -88,7 +89,7 @@ class CellFrame(Frame):
     def __init__(self, parent, coordinate, inputs, outputs, path,
                  output_view_types):
         super().__init__(parent.action, parent.ctx, inputs,
-                         phase=FramePhase.INNER_APPLY)
+                         next_phase=FramePhase.INNER_APPLY)
         self.path = path
         self.output_coordinates = outputs
         self.coordinate = coordinate
@@ -419,7 +420,7 @@ class MappedMethod(Method):
     """Bind a map, dispatch its cells, and gather their exterior outputs."""
 
     _ProvCaptureCls = MappedProvenance
-    _initial_frame_phase = FramePhase.INNER_BIND
+    _first_inner_phase = FramePhase.INNER_BIND
     inner_bind_wrappers = (
         mapped_workspace_wrapper,
         mapped_cells_wrapper,
@@ -452,8 +453,10 @@ class MappedMethod(Method):
         if frame.coordinate_indexes is None:
             frame.coordinate_indexes = self._prepare_coordinate_indexes(
                 frame).result()
+        wrappers = chain(self.inner_bind_wrappers,
+                         frame.ctx.inner_bind_wrappers)
         with ExitStack() as stack:
-            for wrapper in self.inner_bind_wrappers:
+            for wrapper in wrappers:
                 stack.enter_context(wrapper(frame))
             frame.cell_futures = frame.ctx._dispatch_cells_(frame.cells)
         return frame.results

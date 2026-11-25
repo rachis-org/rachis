@@ -46,6 +46,7 @@ def cache_lookup_wrapper(frame):
 
 class Context(IContext):
     outer_bind_wrappers = (cache_lookup_wrapper,)
+    inner_bind_wrappers = ()
     inner_apply_wrappers = ()
     execution_metadata = MappingProxyType({'type': 'synchronous'})
 

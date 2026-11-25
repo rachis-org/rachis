@@ -19,6 +19,7 @@ from rachis.core.cache import Cache
 from rachis.core.testing.type import IntSequence1, Mapping
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.sdk import Artifact, Results
+from rachis.sdk.action import FramePhase
 from rachis.sdk.context import Context
 from rachis.sdk.proxy import ProxyArtifact
 
@@ -37,11 +38,14 @@ class TestActionWrappers(unittest.TestCase):
 
         @contextmanager
         def outer(frame):
+            self.assertIs(frame.current_phase, FramePhase.OUTER_BIND)
+            self.assertIs(frame.next_phase, FramePhase.INNER_APPLY)
             self.assertEqual(frame.output_types,
                              frame.action.signature.outputs)
             self.assertIsNone(frame.transformed_arguments)
             events.append('outer-enter')
             yield
+            self.assertIs(frame.current_phase, FramePhase.OUTER_BIND)
             self.assertEqual(frame.output_types,
                              frame.action.signature.outputs)
             self.assertIsInstance(frame.results, Results)
@@ -50,9 +54,12 @@ class TestActionWrappers(unittest.TestCase):
 
         @contextmanager
         def inner(frame):
+            self.assertIs(frame.current_phase, FramePhase.INNER_APPLY)
+            self.assertIs(frame.next_phase, FramePhase.FINISHED)
             self.assertIsNotNone(frame.provenance)
             events.append('inner-enter')
             yield
+            self.assertIs(frame.current_phase, FramePhase.INNER_APPLY)
             self.assertEqual(frame.results, {'foo': 42})
             events.append('inner-exit')
 
@@ -200,6 +207,8 @@ class TestActionWrappers(unittest.TestCase):
 
             def _dispatch_action_(self, frame):
                 worker = dill.loads(dill.dumps(frame))
+                assert worker.current_phase is FramePhase.OUTER_BIND
+                assert worker.next_phase is FramePhase.INNER_APPLY
                 with patch.object(worker.action, 'outer_bind_wrappers',
                                   (reject_rebind,)):
                     return Context._dispatch_action_(worker.ctx, worker)
