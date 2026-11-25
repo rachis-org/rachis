@@ -56,6 +56,14 @@ def after_all(dependencies, combine, *, into=None):
 
     If supplied, into is the pending future to complete and return.
     """
+    def resolve(settled):
+        return combine(tuple(dep.result() for dep in settled))
+
+    return after_settled(dependencies, resolve, into=into)
+
+
+def after_settled(dependencies, combine, *, into=None):
+    """Call combine with the futures once every dependency has settled."""
     dependencies = tuple(dependencies)
     future = Future() if into is None else into
     lock = Lock()
@@ -63,8 +71,7 @@ def after_all(dependencies, combine, *, into=None):
 
     def finish():
         try:
-            values = tuple(dep.result() for dep in dependencies)
-            result = combine(values)
+            result = combine(dependencies)
         except BaseException as error:
             future.set_exception(error)
         else:

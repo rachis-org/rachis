@@ -125,6 +125,21 @@ class ProxyResult(Proxy, IResult):
 class ProxyArtifact(ProxyResult):
     """This represents a future Artifact that is being returned by a Parsl app
     """
+    def __init__(self, future, selector, qiime_type=None, *,
+                 coordinate_index=None):
+        super().__init__(future, selector, qiime_type)
+        self._coordinate_index = coordinate_index
+
+    def _with_future(self, future, qiime_type):
+        index = self._coordinate_index
+        if index is not None and qiime_type != self.type:
+            from rachis.sdk import PluginManager
+
+            manager = PluginManager()
+            if manager.get_axes(qiime_type) != manager.get_axes(self.type):
+                index = None
+        return type(self)(future, None, qiime_type, coordinate_index=index)
+
     def _view(self, view_type, recorder):
         return self.result()._view(view_type, recorder)
 
@@ -222,9 +237,10 @@ class ProxyResultCollection(Proxy):
         return self._get_element_(self._future_.result())
 
 
-def output_proxy(future, selector, qiime_type):
+def output_proxy(future, selector, qiime_type, *, coordinate_index=None):
     if is_collection_type(qiime_type):
         return ProxyResultCollection(future, selector, qiime_type)
     if is_visualization_type(qiime_type):
         return ProxyVisualization(future, selector, qiime_type)
-    return ProxyArtifact(future, selector, qiime_type)
+    return ProxyArtifact(future, selector, qiime_type,
+                         coordinate_index=coordinate_index)
