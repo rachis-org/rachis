@@ -420,6 +420,7 @@ class MappedMethod(Method):
     """Bind a map, dispatch its cells, and gather their exterior outputs."""
 
     _ProvCaptureCls = MappedProvenance
+    _supports_parallel = True
     _first_inner_phase = FramePhase.INNER_BIND
     inner_bind_wrappers = (
         mapped_workspace_wrapper,

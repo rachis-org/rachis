@@ -13,6 +13,9 @@ from threading import Event, current_thread
 from typing import Annotated
 from unittest.mock import patch
 
+from parsl import Config
+from parsl.executors import ThreadPoolExecutor
+from parsl.serialize import pack_apply_message, unpack_apply_message
 import pytest
 import dill
 
@@ -31,6 +34,13 @@ from rachis.sdk.context import Context, ParallelContext
 from rachis.sdk.futures import as_future
 from rachis.sdk.parallel_config import ParallelConfig
 from rachis.sdk.proxy import ProxyArtifact
+
+
+class SerializingExecutor(ThreadPoolExecutor):
+    def submit(self, func, resource_specification, *args, **kwargs):
+        message = pack_apply_message(func, args, kwargs)
+        func, args, kwargs = unpack_apply_message(message)
+        return super().submit(func, resource_specification, *args, **kwargs)
 
 
 @pytest.mark.parametrize('capture_type', [CaptureHolder, CaptureHolder[int]])
@@ -276,6 +286,20 @@ def test_empty_product_still_checks_required_coverage():
         with pytest.raises(ValueError, match=r"Required inputs .*right.*s1"):
             method(0, left, right)
         assert method(0, left, left).output.view(dict) == {}
+
+
+def test_mapped_method_runs_in_parallel_without_a_pipeline(tmp_path):
+    data = Artifact.import_data('Mapping', {'s1': '4', 's2': '-5'})
+    method = get_dummy_plugin().methods['increment_samples']
+    config = Config(
+        executors=[SerializingExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+
+    with ParallelConfig(config):
+        result = method.parallel(data, 2)._result()
+
+    assert result.output.view(dict) == {'s1': '6', 's2': '-3'}
 
 
 def test_cell_context_exits_before_staging_outputs():

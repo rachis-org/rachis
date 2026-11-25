@@ -362,6 +362,7 @@ def _validate_and_freeze_migrated(migrated: Union[bool, Mapping[str, str]]):
 class Action:
     """QIIME 2 Action"""
     type = 'action'
+    _supports_parallel = False
     _ProvCaptureCls = archive.ActionProvenanceCapture
     _first_inner_phase = FramePhase.INNER_APPLY
 
@@ -548,8 +549,9 @@ class Action:
 
     def _get_parsl_wrapper(self):
         def parsl_wrapper(*args, **kwargs):
-            if not isinstance(self, Pipeline):
-                raise ValueError('Only pipelines may be run in parallel')
+            if not self._supports_parallel:
+                raise ValueError('Only pipelines and mapped methods may be '
+                                 'run in parallel')
             with rachis.sdk.ParallelContext(self) as ctx:
                 call = self._outer_bind(lambda: ctx)
                 results = call(*args, **kwargs)
@@ -718,6 +720,7 @@ class Visualizer(Action):
 class Pipeline(Action):
     """Rachis Pipeline"""
     type = 'pipeline'
+    _supports_parallel = True
     _ProvCaptureCls = archive.PipelineProvenanceCapture
 
     # Pipeline inputs are artifacts. Their annotations describe the interface.
