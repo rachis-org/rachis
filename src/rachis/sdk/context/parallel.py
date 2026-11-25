@@ -7,6 +7,7 @@
 # ----------------------------------------------------------------------------
 
 from concurrent.futures import Future
+from contextlib import ExitStack
 from copy import copy
 from types import MappingProxyType
 
@@ -14,7 +15,8 @@ from parsl.app.app import join_app, python_app
 from parsl.dataflow.errors import JoinError
 
 from rachis.sdk.action import Pipeline
-from rachis.sdk.futures import result_as_future
+from rachis.sdk.futures import after_all, result_as_future
+from rachis.sdk.mapped import MappedMethod
 from rachis.sdk.proxy import Proxy, output_proxy
 from rachis.sdk.parallel_config import PARALLEL_CONFIG
 from rachis.sdk.results import Results
@@ -67,54 +69,83 @@ def _submit_app(frame, executor):
     return python_app(executors=[executor])(worker)(frame, inputs=futures)
 
 
-def _submit_pipeline(body):
-    outputs = [Future() for _ in body.output_types]
+def _submit_batch(cells, executor):
+    futures = []
+    frames = tuple(cells)
+    for frame in frames:
+        frame.bound_arguments = _map_arguments(frame, futures)
+
+    def worker(frames, inputs=()):
+        outcomes = []
+        with frames[0].ctx.cache:
+            for frame in frames:
+                frame.bound_arguments = _unmap_arguments(frame, inputs)
+                try:
+                    outcomes.append(frame())
+                except Exception as error:
+                    outcomes.append(error)
+        return outcomes
+
+    frames[0].action._set_wrapper_name(worker, frames[0].action.id)
+    return python_app(executors=[executor])(worker)(frames, inputs=futures)
+
+
+def _join_exception(job):
+    error = job.exception()
+    if isinstance(error, JoinError):
+        # Surface the invocation's original error at scope exit.
+        error, _ = error.dependent_exceptions_tids[0]
+    return error
+
+
+def _submit_coordinator(body, coordinate_indexes=None):
     results = Results(body.output_types, (
-        output_proxy(future, None, spec.qiime_type)
-        for future, spec in zip(outputs, body.output_types.values())
+        output_proxy(Future(), None, spec.qiime_type)
+        for spec in body.output_types.values()
     ))
+    outputs = Results._futures(results)
     completion = Future()
     caller_ctx = body.ctx
     body.ctx = copy(caller_ctx)
+    body.ctx._parent = caller_ctx
 
     def fail_outputs(error):
         for future in outputs:
             if not future.done():
                 future.set_exception(error)
 
-    def run():
+    def run(indexes):
         # Child work belongs to the body, which can submit more actions after
         # the caller has started waiting on its own scope.
         children = []
-        body.ctx._scopes.append(children)
-        try:
-            with body.ctx.cache:
-                aliases = body()
-        except BaseException as error:
-            fail_outputs(error)
-        else:
-            for alias, output in zip(aliases, outputs):
-                result_as_future(alias, into=output)
-        finally:
-            body.ctx._scopes.pop()
+        body.coordinate_indexes = indexes
+        with ExitStack() as cleanup:
+            body.ctx._scopes.append((children, cleanup))
+            try:
+                with body.ctx.cache:
+                    returned = body()
+            except BaseException as error:
+                fail_outputs(error)
+            else:
+                for value, output in zip(returned, outputs):
+                    result_as_future(value, into=output)
+            finally:
+                body.ctx._scopes.pop()
+                body.ctx._defer_cleanup(cleanup)
 
         return [*outputs, *children]
 
     def finish(job):
-        error = job.exception()
+        error = _join_exception(job)
         if error is None:
             completion.set_result(None)
-            return
-        if isinstance(error, JoinError):
-            # Surface the invocation's original error at nursery exit.
-            error, _ = error.dependent_exceptions_tids[0]
         else:
             # A launch failure leaves nobody to settle the outputs.
             fail_outputs(error)
-        completion.set_exception(error)
+            completion.set_exception(error)
 
     body.action._set_wrapper_name(run, body.action.id)
-    join_app(run)().add_done_callback(finish)
+    join_app(run)(coordinate_indexes).add_done_callback(finish)
     caller_ctx._track_results(completion)
     return results
 
@@ -143,15 +174,41 @@ class ParallelContext(Context):
 
         if isinstance(frame.action, Pipeline):
             self.execution_metadata = {'type': 'parsl', 'parsl_type': 'DFK'}
-            return _submit_pipeline(frame)
+            return _submit_coordinator(frame)
 
-        executor = self.action_executor_mapping.get(
-            frame.action.plugin_id, {}).get(frame.action.id, 'default')
+        executor = self._get_executor(frame.action)
         self.execution_metadata = {
             'type': 'parsl',
             'parsl_type': self.executor_name_type_mapping[executor],
         }
 
+        if isinstance(frame.action, MappedMethod):
+            indexes = frame.action._prepare_coordinate_indexes(frame)
+            return _submit_coordinator(frame, indexes)
+
+        # Parsl resolves upstream dependencies before the worker applies them.
         return Results._from_future(
             _submit_app(frame, executor), frame.output_types,
         )
+
+    def _get_executor(self, action):
+        return self.action_executor_mapping.get(
+            action.plugin_id, {}).get(action.id, 'default')
+
+    def _dispatch_cells_(self, cells):
+        if not cells:
+            return {}
+        action = next(iter(cells.values())).action
+        job = _submit_batch(cells.values(), self._get_executor(action))
+
+        def read_cell(values, index):
+            outcome = values[0][index]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        return {
+            coord: after_all((job,), lambda values, index=index:
+                             read_cell(values, index))
+            for index, coord in enumerate(cells)
+        }

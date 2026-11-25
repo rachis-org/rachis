@@ -398,7 +398,7 @@ class ProvenanceCapture:
         return IMPORTLIB_DISTRIBUTIONS_CACHE
 
     def transformation_recorder(self, name):
-        section = self.transformers[name] = []
+        section = self.transformers.setdefault(name, [])
 
         def recorder(transformer_record, input_name, input_record, output_name,
                      output_record):
@@ -538,7 +538,10 @@ class ProvenanceCapture:
         forked = copy.copy(self)
         # Unique state for each output of an action
         forked.plugins = forked.plugins.copy()
-        forked.transformers = forked.transformers.copy()
+        forked.transformers = collections.OrderedDict(
+            (name, entries.copy())
+            for name, entries in self.transformers.items()
+        )
         forked.citations = forked.citations.copy()
         # create a copy of the backing dir so factory (the hard stuff is
         # mostly done by this point)

@@ -37,6 +37,8 @@ from rachis.core.cite import CitationRecord
 
 
 class FramePhase(Enum):
+    OUTER_BIND = 'outer_bind'
+    INNER_BIND = 'inner_bind'
     INNER_APPLY = 'inner_apply'
     FINISHED = 'finished'
 
@@ -46,30 +48,40 @@ class Frame:
 
     Binding establishes the inputs and next phase before dispatch. The
     receiving Context calls the frame to enter that phase's wrapper stack.
+    The current phase stays available through wrapper exit and records the
+    last phase entered. A new cell frame has yet to enter a phase.
     Live stacks and resources belong to the process applying the frame.
     """
 
-    def __init__(self, action, ctx, bound_arguments, *, phase):
+    def __init__(self, action, ctx, bound_arguments, *, next_phase,
+                 current_phase=None):
         self.action = action
         self.ctx = ctx
         self.bound_arguments = bound_arguments
-        self.phase = phase
+        self.current_phase = current_phase
+        self.next_phase = next_phase
         self.transformed_arguments = None
         self.output_types = None
         self.results = None
         self.provenance = None
         self.ready_provenance = None
+        self.coordinate_indexes = None
 
     def __call__(self):
-        phase = self.phase
-        self.phase = FramePhase.FINISHED
+        phase = self.next_phase
         match phase:
+            case FramePhase.INNER_BIND:
+                resume = self.action._inner_bind
             case FramePhase.INNER_APPLY:
-                return self.action._inner_apply(self)
+                resume = self.action._inner_apply
             case FramePhase.FINISHED:
                 raise RuntimeError('Cannot call a finished frame')
             case _:
                 raise ValueError(f'Unknown frame phase: {phase!r}')
+
+        self.current_phase = phase
+        self.next_phase = FramePhase.FINISHED
+        return resume(self)
 
 
 @contextmanager
@@ -101,19 +113,25 @@ def bind_signature_wrapper(frame):
     yield
 
 
+def prepare_artifact_argument(signature, name, argument):
+    if isinstance(argument, ProxyResultCollection):
+        argument = argument.result()
+    if isinstance(argument, ResultCollection):
+        if not argument:
+            raise TypeError(
+                f'Parameter {name!r} received an empty collection.')
+        argument = signature._shape_collection_input(
+            argument, signature.inputs[name])
+    return argument
+
+
 @contextmanager
 def prepare_callable_arguments_wrapper(frame):
     signature = frame.action.signature
     arguments = frame.transformed_arguments = frame.bound_arguments.copy()
-    for name, spec in signature.inputs.items():
-        argument = arguments[name]
-        if isinstance(argument, ProxyResultCollection):
-            argument = argument.result()
-        if isinstance(argument, ResultCollection):
-            if not argument:
-                raise TypeError(
-                    f'Parameter {name!r} received an empty collection.')
-            arguments[name] = signature._shape_collection_input(argument, spec)
+    for name in signature.inputs:
+        arguments[name] = prepare_artifact_argument(
+            signature, name, arguments[name])
     yield
 
 
@@ -344,8 +362,9 @@ def _validate_and_freeze_migrated(migrated: Union[bool, Mapping[str, str]]):
 class Action:
     """QIIME 2 Action"""
     type = 'action'
+    _supports_parallel = False
     _ProvCaptureCls = archive.ActionProvenanceCapture
-    _initial_frame_phase = FramePhase.INNER_APPLY
+    _first_inner_phase = FramePhase.INNER_APPLY
 
     # Outer wrappers run where an application is requested. Inner wrappers run
     # where its callable is evaluated. Context wrappers enter after the
@@ -500,7 +519,8 @@ class Action:
             bound.apply_defaults()
             ctx = context_factory()
             frame = Frame(self, ctx, bound.arguments,
-                          phase=self._initial_frame_phase)
+                          current_phase=FramePhase.OUTER_BIND,
+                          next_phase=self._first_inner_phase)
 
             with ExitStack() as wrappers:
                 for wrapper in chain(self.outer_bind_wrappers,
@@ -529,8 +549,9 @@ class Action:
 
     def _get_parsl_wrapper(self):
         def parsl_wrapper(*args, **kwargs):
-            if not isinstance(self, Pipeline):
-                raise ValueError('Only pipelines may be run in parallel')
+            if not self._supports_parallel:
+                raise ValueError('Only pipelines and mapped methods may be '
+                                 'run in parallel')
             with rachis.sdk.ParallelContext(self) as ctx:
                 call = self._outer_bind(lambda: ctx)
                 results = call(*args, **kwargs)
@@ -664,8 +685,12 @@ class Method(Action):
                                           outputs, input_descriptions,
                                           parameter_descriptions,
                                           output_descriptions)
-        return super()._init(callable, signature, plugin_id, name, description,
-                             citations, deprecated, migrated, examples)
+        if cls is Method and signature.is_mapped:
+            from rachis.sdk.mapped import MappedMethod
+            cls = MappedMethod
+        return super(Method, cls)._init(
+            callable, signature, plugin_id, name, description, citations,
+            deprecated, migrated, examples)
 
 
 class Visualizer(Action):
@@ -695,6 +720,7 @@ class Visualizer(Action):
 class Pipeline(Action):
     """Rachis Pipeline"""
     type = 'pipeline'
+    _supports_parallel = True
     _ProvCaptureCls = archive.PipelineProvenanceCapture
 
     # Pipeline inputs are artifacts. Their annotations describe the interface.

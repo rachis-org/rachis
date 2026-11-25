@@ -194,9 +194,9 @@ class TestConfig(unittest.TestCase):
                     with ParallelConfig(self.test_default):
                         pass
 
-    def test_parallel_non_pipeline(self):
+    def test_parallel_unmapped_method(self):
         with self.assertRaisesRegex(
-                ValueError, 'Only pipelines may be run in parallel'):
+                ValueError, 'Only pipelines and mapped methods'):
             self.method.parallel(self.art)
 
     def test_no_vendored_fp(self):
