@@ -255,8 +255,12 @@ class CoordinateJoin:
             if missing is None:
                 continue
             if missing:
-                raise ValueError(f'Required inputs {list(missing)!r} lack '
-                                 f'{coord!r}')
+                missing_coordinates = {
+                    name: self._patterns[name].to_axis_coord(coord)
+                    for name in missing
+                }
+                raise ValueError(f'Required inputs lack coordinates: '
+                                 f'{missing_coordinates!r}')
             yield coord, selected
 
 

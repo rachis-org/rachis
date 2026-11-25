@@ -465,17 +465,27 @@ class Artifact(Result):
                 rachis.sdk.PluginManager().get_axes(self.type)]
 
     def coords(self, *axes):
-        with self._axis(ForEach[axes]) as (axis, _):
-            yield from axis
+        """Validate an axis path and return an iterator over its coordinates."""
+        axis_scope = self._axis(ForEach[axes])
 
-    @contextmanager
+        def coordinates():
+            with axis_scope as (axis, _):
+                yield from axis
+
+        return coordinates()
+
     def _axis(self, pattern):
         """Open an axis while retaining its backing directory path."""
         record = rachis.sdk.PluginManager().get_axis(self.type, pattern)
-        directory = self._archiver.data_dir
-        if self.format is not record.directory_format:
-            directory = self._view(record.directory_format).path
-        yield record.axis(directory, mode='r'), directory
+
+        @contextmanager
+        def open_axis():
+            directory = self._archiver.data_dir
+            if self.format is not record.directory_format:
+                directory = self._view(record.directory_format).path
+            yield record.axis(directory, mode='r'), directory
+
+        return open_axis()
 
     def view(self, view_type, **coordinate):
         """View the artifact or a cell at a registered coordinate.

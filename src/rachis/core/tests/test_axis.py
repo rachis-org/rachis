@@ -147,8 +147,11 @@ def test_projected_coverage(rule):
     assert next(aligned) == (Coord(student='s1', assignment='a1'),
                              {'offset': 0, 'scores': 4})
     if rule == 'required':
-        with pytest.raises(ValueError, match="Required inputs.*offset.*s2"):
+        with pytest.raises(ValueError) as error:
             next(aligned)
+        assert str(error.value) == (
+            "Required inputs lack coordinates: {'offset': Coord(sample='s2')}"
+        )
     elif rule == 'optional':
         assert list(aligned) == [(Coord(student='s2', assignment='a1'),
                                   {'offset': None, 'scores': 5})]
@@ -245,6 +248,8 @@ def test_registered_axis_and_coordinate_views():
     assert data.axes() == [('sample',)]
     assert list(data.coords('sample')) == [Coord(sample='s1'),
                                             Coord(sample='s2')]
+    with pytest.raises(ValueError, match='has no axis'):
+        data.coords('mag')
     assert data.view(str, sample='s2') == '-5'
     with pytest.raises(ValueError, match='has no axis'):
         data.view(str, sample='s2', mag='extra')
