@@ -465,7 +465,7 @@ class Artifact(Result):
                 rachis.sdk.PluginManager().get_axes(self.type)]
 
     def coords(self, *axes):
-        """Validate an axis path and return an iterator over its coordinates."""
+        """Validate the axis path and return a coordinate iterator."""
         axis_scope = self._axis(ForEach[axes])
 
         def coordinates():
