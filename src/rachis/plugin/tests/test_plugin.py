@@ -8,6 +8,7 @@
 
 import types
 import unittest
+from unittest.mock import patch
 
 import rachis.plugin
 import rachis.sdk
@@ -15,10 +16,13 @@ import rachis.util
 
 from rachis.core.testing.type import (IntSequence1, IntSequence2, Mapping,
                                       FourInts, Kennel, Dog, Cat, SingleInt)
-from rachis.core.testing.format import (IntSequenceDirectoryFormat,
-                                        IntSequenceV2DirectoryFormat)
+from rachis.core.testing.format import (FourIntsDirectoryFormat,
+                                        IntSequenceDirectoryFormat,
+                                        IntSequenceV2DirectoryFormat,
+                                        SingleIntFormat)
 from rachis.core.testing.util import get_dummy_plugin
 from rachis.core.testing.plugin import is1_use, is2_use
+from rachis.plugin import model
 from rachis.plugin.testing import assert_no_nans_in_tables
 
 
@@ -485,6 +489,69 @@ class TestPlugin(unittest.TestCase):
                 description='Output is registered as returning a List which is'
                             ' bad.'
             )
+
+    def test_register_format_validates_compression(self):
+        for level in (None, 0, 1, 9):
+            with self.subTest(level=level):
+                plugin = rachis.plugin.Plugin(
+                    name='compression-test', version='0.0.0',
+                    website='https://example.com')
+                with patch.object(SingleIntFormat, 'COMPRESSION', level):
+                    plugin.register_formats(SingleIntFormat)
+
+        for level in (-1, 10, True, 1.5, '2'):
+            with self.subTest(level=level):
+                plugin = rachis.plugin.Plugin(
+                    name='compression-test', version='0.0.0',
+                    website='https://example.com')
+                with patch.object(SingleIntFormat, 'COMPRESSION', level):
+                    with self.assertRaisesRegex(
+                            ValueError, 'COMPRESSION must be an integer '
+                                        'from 0 to 9'):
+                        plugin.register_formats(SingleIntFormat)
+
+    def test_register_directory_rejects_invalid_member_compression(self):
+        class BadIntFormat(SingleIntFormat):
+            COMPRESSION = 10
+
+        directory_format = model.SingleFileDirectoryFormat(
+            'BadIntDirectoryFormat', 'bad_int.txt', BadIntFormat)
+        plugin = rachis.plugin.Plugin(
+            name='compression-test', version='0.0.0',
+            website='https://example.com')
+
+        with self.assertRaisesRegex(
+                ValueError, r'BadIntFormat\.COMPRESSION.*not 10'):
+            plugin.register_formats(directory_format)
+
+        self.assertNotIn('BadIntDirectoryFormat', plugin.views)
+        self.assertNotIn('BadIntDirectoryFormat', plugin.formats)
+
+    def test_register_views_validates_inherited_file_collection(self):
+        class InheritedDirectoryFormat(FourIntsDirectoryFormat):
+            pass
+
+        plugin = rachis.plugin.Plugin(
+            name='compression-test', version='0.0.0',
+            website='https://example.com')
+        with patch.object(SingleIntFormat, 'COMPRESSION', 10):
+            with self.assertRaisesRegex(
+                    ValueError, r'SingleIntFormat\.COMPRESSION.*not 10'):
+                plugin.register_views(InheritedDirectoryFormat)
+
+    def test_register_directory_format_accepts_valid_member_compression(self):
+        directory_format = model.SingleFileDirectoryFormat(
+            'IntDirectoryFormat', 'int.txt', SingleIntFormat)
+        for level in (None, 0, 9):
+            with self.subTest(level=level):
+                plugin = rachis.plugin.Plugin(
+                    name='compression-test', version='0.0.0',
+                    website='https://example.com')
+                with patch.object(SingleIntFormat, 'COMPRESSION', level):
+                    plugin.register_formats(directory_format)
+
+                self.assertEqual(plugin.views.keys(), {'IntDirectoryFormat'})
+                self.assertEqual(plugin.formats.keys(), {'IntDirectoryFormat'})
 
 
 if __name__ == '__main__':

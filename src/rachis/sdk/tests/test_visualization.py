@@ -416,6 +416,13 @@ class TestMakeReport(unittest.TestCase):
     def tearDown(self):
         self.test_dir.cleanup()
 
+    def test_save_report(self):
+        report = Visualization.make_report(self.template, {'first': self.viz1})
+        filepath = report.save(pathlib.Path(self.test_dir.name) / 'report.qzv')
+
+        loaded = Visualization.load(filepath)
+        self.assertIs(loaded.format, report.format)
+
     def test_make_report_simple(self):
         template_index = None
 
