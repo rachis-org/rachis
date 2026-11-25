@@ -11,6 +11,7 @@ from .model import (TextFileFormat, BinaryFileFormat, DirectoryFormat,
 from .plugin import Plugin
 from .util import get_available_cores, NP_RNG_BITS, get_np_random_seed
 from rachis.core.cite import Citations, CitationRecord
+from rachis.core.axis import Coord, ForEach
 from rachis.core.type import (SemanticType, Int, Str, Float, Metadata,
                               MetadataColumn, Categorical, Numeric, Properties,
                               Range, Start, End, Choices, Bool, Set, List,
@@ -26,7 +27,7 @@ __all__ = ['TextFileFormat', 'BinaryFileFormat', 'DirectoryFormat', 'Plugin',
            'Jobs', 'Threads', 'TypeMap', 'TypeMatch', 'ValidationError',
            'Citations', 'CitationRecord', 'get_available_cores',
            'NP_RNG_BITS', 'get_np_random_seed', 'SingleFileDirectoryFormat',
-           'CaptureHolder', 'IContext']
+           'CaptureHolder', 'IContext', 'Coord', 'ForEach']
 
 # IMPORTANT:
 # Autodoc cannot find a docstring unless it is defined in the same module that

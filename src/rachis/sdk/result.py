@@ -15,9 +15,11 @@ import collections
 import distutils.dir_util
 import pathlib
 import json
+from contextlib import contextmanager
 from typing import Union, get_args, get_origin
 
-from rachis.core.format import report
+from rachis.core.format import FormatBase, report
+from rachis.core.axis import Coord, ForEach
 import rachis.plugin
 import rachis.sdk
 import rachis.core.type
@@ -458,7 +460,47 @@ class Artifact(Result):
 
         return artifact
 
-    def view(self, view_type):
+    def axes(self):
+        return [pattern.axes for pattern in
+                rachis.sdk.PluginManager().get_axes(self.type)]
+
+    def coords(self, *axes):
+        """Validate the axis path and return a coordinate iterator."""
+        axis_scope = self._axis(ForEach[axes])
+
+        def coordinates():
+            with axis_scope as (axis, _):
+                yield from axis
+
+        return coordinates()
+
+    def _axis(self, pattern):
+        """Open an axis while retaining its backing directory path."""
+        record = rachis.sdk.PluginManager().get_axis(self.type, pattern)
+
+        @contextmanager
+        def open_axis():
+            directory = self._archiver.data_dir
+            if self.format is not record.directory_format:
+                directory = self._view(record.directory_format).path
+            yield record.axis(directory, mode='r'), directory
+
+        return open_axis()
+
+    def view(self, view_type, **coordinate):
+        """View the artifact or a cell at a registered coordinate.
+
+        Coordinate names must match a registered axis path in order.
+        """
+        if coordinate:
+            with self._axis(ForEach[tuple(coordinate)]) as (axis, directory):
+                cell = axis[Coord(**coordinate)]
+                source = transform.ModelType.from_view_type(type(cell))
+                target = transform.ModelType.from_view_type(view_type)
+                result = source.make_transformation(target)(cell)
+                if isinstance(result, FormatBase):
+                    result._axis_data_dir = directory
+                return result
         return self._view(view_type)
 
     def _view(self, view_type, recorder=None):

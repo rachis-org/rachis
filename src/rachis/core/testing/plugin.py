@@ -8,6 +8,7 @@
 
 from importlib import import_module
 
+from rachis.core.axis import ForEach
 from rachis.plugin import (Plugin, Bool, Int, Str, Choices, Range, List, Set,
                            Collection, Visualization, Metadata, MetadataColumn,
                            Categorical, Numeric, TypeMatch, Properties)
@@ -21,6 +22,7 @@ from .format import (
     IntSequenceDirectoryFormat,
     IntSequenceV2DirectoryFormat,
     MappingDirectoryFormat,
+    OldMappingDirFmt,
     FourIntsDirectoryFormat,
     RedundantSingleIntDirectoryFormat,
     UnimportableFormat,
@@ -32,10 +34,14 @@ from .format import (
     ImportableOnlyFormat,
     ExportableOnlyFormat
 )
+from .mapped_axis import (
+    SampleMappingAxis, AssignmentScoreAxis, StudentScoresAxis,
+)
 
 from .type import (IntSequence1, IntSequence2, IntSequence3, Mapping, FourInts,
                    SingleInt, Kennel, Dog, Cat, C1, C2, C3, Foo, Bar, Baz,
-                   AscIntSequence, Squid, Octopus, Cuttlefish)
+                   AscIntSequence, Squid, Octopus, Cuttlefish,
+                   AssignmentScores)
 from .method import (concatenate_ints, split_ints, merge_mappings,
                      identity_with_metadata, identity_with_metadata_column,
                      identity_with_categorical_metadata_column,
@@ -113,12 +119,13 @@ dummy_plugin.register_semantic_types(IntSequence1, IntSequence2, IntSequence3,
                                      Mapping, FourInts, Kennel, Dog, Cat,
                                      SingleInt, C1, C2, C3, Foo, Bar, Baz,
                                      AscIntSequence, Squid, Octopus,
-                                     Cuttlefish)
+                                     Cuttlefish, AssignmentScores)
 
 # Register formats
 dummy_plugin.register_formats(
     IntSequenceFormatV2, MappingFormat, IntSequenceV2DirectoryFormat,
     IntSequenceMultiFileDirectoryFormat, MappingDirectoryFormat,
+    OldMappingDirFmt,
     EchoDirectoryFormat, EchoFormat, Cephalapod, CephalapodDirectoryFormat,
     ImportableOnlyFormat, ExportableOnlyFormat)
 
@@ -186,9 +193,18 @@ dummy_plugin.register_semantic_type_to_format(
     IntSequence3,
     directory_format=IntSequenceMultiFileDirectoryFormat
 )
-dummy_plugin.register_semantic_type_to_format(
+dummy_plugin.register_artifact_class(
     Mapping,
-    directory_format=MappingDirectoryFormat
+    directory_format=MappingDirectoryFormat,
+    axes={ForEach['sample']: SampleMappingAxis},
+)
+dummy_plugin.register_artifact_class(
+    AssignmentScores,
+    directory_format=MappingDirectoryFormat,
+    axes={
+        ForEach['student']: StudentScoresAxis,
+        ForEach['student', 'assignment']: AssignmentScoreAxis,
+    },
 )
 dummy_plugin.register_semantic_type_to_format(
     FourInts,

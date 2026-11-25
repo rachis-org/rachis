@@ -63,6 +63,7 @@ import types
 from typing import Any, Optional, Union
 
 from rachis.core.cite import Citations, CitationRecord
+from rachis.core.axis import ForEach, validate_axis_protocol
 import rachis.sdk
 import rachis.core.type.grammar as grammar
 from rachis.core.validate import ValidationObject
@@ -88,6 +89,9 @@ ViewRecord = collections.namedtuple(
 ArtifactClassRecord = collections.namedtuple(
     'ArtifactClassRecord', ['semantic_type', 'format', 'plugin', 'description',
                             'examples', 'type_expression'])
+AxisRecord = collections.namedtuple(
+    'AxisRecord', ['semantic_type', 'pattern', 'axis', 'view_type',
+                   'directory_format', 'plugin'])
 ValidatorRecord = collections.namedtuple(
     'ValidatorRecord', ['validator', 'view', 'plugin', 'context'])
 
@@ -188,6 +192,7 @@ class Plugin:
         self.type_fragments = {}
         self.transformers = {}
         self.artifact_classes = {}
+        self.axes = {}
         self.validators = {}
 
     def freeze(self):
@@ -556,7 +561,7 @@ class Plugin:
                                       examples=None)
 
     def register_artifact_class(self, semantic_type, directory_format,
-                                description=None, examples=None):
+                                description=None, examples=None, *, axes=None):
         """Register an artifact class which defines an Artifact
 
         Parameters
@@ -573,6 +578,13 @@ class Plugin:
           A dict of example name to usage example functions which take a
           single argument (the usage driver, a.k.a. ``use``). Each function
           which will demonstrate importing this data when executed.
+        axes : dict[ForEach, type]
+          Ordered coordinate patterns and their axis implementations.
+          An implementation accepts a ``DirectoryFormat``'s path and
+          ``mode='r'``, iterates over coordinates, and returns a native view
+          when indexed by a coordinate. Its ``write(chunks)`` class method
+          accepts ``(Coord, view)`` pairs and returns the directory format the
+          implementation reads.
 
         Returns
         -------
@@ -594,8 +606,35 @@ class Plugin:
             raise TypeError("Only a single type can be registered at a time "
                             "with register_artifact_class. Registration "
                             "attempted for %s." % str(semantic_type))
+        registrations = (self._axis_registrations(semantic_type, axes)
+                         if axes is not None else {})
         self._register_artifact_class(
             semantic_type, directory_format, description, examples)
+        self.axes.update(registrations)
+
+    def register_axes(self, semantic_type, axes):
+        """Register coordinate patterns for a type, including another plugin's.
+
+        See `register_artifact_class` for the axis contract.
+        """
+        self.axes.update(self._axis_registrations(semantic_type, axes))
+
+    def _axis_registrations(self, semantic_type, axes):
+        if (not is_semantic_type(semantic_type)
+                or not semantic_type.is_concrete()):
+            raise TypeError('Axes require a concrete semantic type')
+        registrations = {}
+        for pattern, axis in axes.items():
+            if (not isinstance(pattern, ForEach)
+                    or pattern != pattern.as_unbound()):
+                raise TypeError('Axis registration requires plain axis names')
+            view_type, directory_format = validate_axis_protocol(axis)
+            key = (semantic_type, pattern)
+            if key in self.axes:
+                raise ValueError(f'Axis {pattern.axes!r} already registered')
+            registrations[key] = AxisRecord(semantic_type, pattern, axis,
+                                            view_type, directory_format, self)
+        return registrations
 
 
 class PluginActions(dict):
