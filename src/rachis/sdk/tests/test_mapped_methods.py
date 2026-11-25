@@ -36,7 +36,7 @@ from rachis.sdk.action import FramePhase
 from rachis.sdk.context import Context, ParallelContext
 from rachis.sdk.context.parallel import _submit_batch
 from rachis.sdk.futures import after_all, as_future
-from rachis.sdk.mapped import commit_attempt, read_commit
+from rachis.sdk.mapped import commit_attempt, coordinate_index, read_commit
 from rachis.sdk.parallel_config import ParallelConfig
 from rachis.sdk.proxy import ProxyArtifact
 
@@ -666,6 +666,136 @@ def test_pending_optional_broadcast_streams_before_producer_batch_finishes():
     assert result.view(dict) == {'s1/a1': '14', 's1/a2': '15', 's2/a1': '6'}
 
 
+@pytest.mark.parametrize('through_pipeline', [False, True])
+def test_nested_axis_prefix_streams_after_its_own_cells(
+    through_pipeline, tmp_path,
+):
+    producer_can_finish = Event()
+    commits = {}
+    inner_apply = MappedMethod._inner_apply
+    plugin = get_dummy_plugin()
+    data = Artifact.import_data('AssignmentScores', {
+        's1/a1': '4', 's1/a2': '5', 's2/a1': '7',
+    })
+
+    def copy_scores(
+        data: Annotated[str, ForEach['student', 'assignment']],
+    ) -> Annotated[str, ForEach['student', 'assignment']]:
+        return data
+
+    def copy_scores_pipeline(ctx, data):
+        return ctx.get_action('dummy_plugin', 'copy_scores')(data).output
+
+    def batches(ctx, cells):
+        if ctx.action_obj.id == 'copy_scores':
+            commits.update((frame.coordinate, frame.path)
+                           for frame in cells.values())
+            yield tuple(cells)
+        else:
+            yield from ((coord,) for coord in cells)
+
+    def observe_cell(self, frame):
+        if self.id == 'copy_scores' and frame.coordinate.student == 's2':
+            assert producer_can_finish.wait(timeout=10)
+        if self.id == 'sum_scores':
+            assert frame.output_coordinates['totals'] == Coord(
+                sample=frame.coordinate.student)
+        return inner_apply(self, frame)
+
+    config = Config(
+        executors=[SerializingExecutor(label='default', max_threads=3)],
+        run_dir=str(tmp_path),
+    )
+    with patch.dict(plugin.methods), patch.dict(plugin.pipelines):
+        plugin.methods.register_function(
+            copy_scores, inputs={'data': AssignmentScores}, parameters={},
+            outputs={'output': AssignmentScores}, name='Copy scores',
+            description='',
+        )
+        plugin.pipelines.register_function(
+            copy_scores_pipeline, inputs={'data': AssignmentScores},
+            parameters={}, outputs={'output': AssignmentScores},
+            name='Copy scores in a pipeline', description='',
+        )
+        with (patch.object(ParallelContext, '_batches', batches),
+              patch.object(MappedMethod, '_inner_apply', observe_cell),
+              ParallelConfig(config), ParallelContext(None) as ctx):
+            name = ('copy_scores_pipeline' if through_pipeline
+                    else 'copy_scores')
+            scores = ctx.get_action('dummy_plugin', name)(data).output
+            try:
+                totals = ctx.get_action('dummy_plugin', 'sum_scores')(scores)
+                output = ctx.get_action('dummy_plugin', 'increment_samples')(
+                    totals.totals, 1).output
+                _, index, _ = output._coordinate_index.result(timeout=5)
+                cell = index[Coord(sample='s1')].future.result(timeout=5)
+                with cell.open() as value:
+                    assert value == '10'
+                assert all(path.is_file() == (coord.student == 's1')
+                           for coord, path in commits.items())
+                assert not scores._future_.done()
+            finally:
+                producer_can_finish.set()
+
+    assert output.view(dict) == {'s1': '10', 's2': '8'}
+    assert totals.totals._archiver.provenance_dir.joinpath(
+        'artifacts', str(scores.uuid)).is_dir()
+    assert all(not path.parent.exists() for path in commits.values())
+
+
+def test_filterable_prefix_uses_realized_range_before_artifact(tmp_path):
+    producer_exit = Future()
+
+    def hold_score_batches(cells, executor):
+        cells = tuple(cells)
+        job = _submit_batch(cells, executor)
+        if cells[0].action.id == 'filter_scores':
+            return after_all((job, producer_exit), lambda _: None)
+        return job
+
+    data = Artifact.import_data('AssignmentScores', {
+        's1/a1': '4', 's1/a2': '-1', 's2/a1': '-5',
+    })
+    config = Config(
+        executors=[ThreadPoolExecutor(label='default', max_threads=2)],
+        run_dir=str(tmp_path),
+    )
+    with (patch('rachis.sdk.context.parallel._submit_batch',
+                hold_score_batches),
+          ParallelConfig(config), ParallelContext(None) as ctx):
+        scores = ctx.get_action('dummy_plugin', 'filter_scores')(data).retained
+        try:
+            sum_scores = ctx.get_action('dummy_plugin', 'sum_scores')
+            totals = sum_scores(scores).totals
+            _, index, _ = totals._coordinate_index.result(timeout=5)
+            assert tuple(index) == (Coord(sample='s1'),)
+            cell = index[Coord(sample='s1')].future.result(timeout=5)
+            with cell.open() as value:
+                assert value == '4'
+            assert not scores._future_.done()
+            assert not totals._future_.done()
+        finally:
+            producer_exit.set_result(None)
+
+    assert totals.view(dict) == {'s1': '4'}
+
+
+def test_incompatible_axis_path_waits_for_artifact():
+    artifact = Artifact.import_data('AssignmentScores', {'s1/a1': '4'})
+    published = Future()
+    index = as_future(lambda: (ForEach['assignment', 'student'], {}, False))
+    proxy = ProxyArtifact(
+        published, None, AssignmentScores, coordinate_index=index)
+
+    ready = coordinate_index(proxy, ForEach['student'], ctx=Context())
+    assert not ready.done()
+    published.set_result(artifact)
+    cells = ready.result(timeout=5).cells
+    assert tuple(cells) == (Coord(student='s1'),)
+    with cells[Coord(student='s1')].open() as view:
+        assert view == {'a1': '4'}
+
+
 @pytest.mark.parametrize('coverage', ['optional', 'required'])
 def test_optional_broadcast_does_not_restore_filtered_composite_cells(
     coverage, tmp_path,
@@ -821,7 +951,8 @@ def test_range_alignment_excludes_failed_cells_before_dispatch(tmp_path):
         data = Artifact.import_data(
             'Mapping', {'s1': '4', 's2': '-5', 's3': 'invalid'})
         roster = Artifact.import_data('Mapping', {'s1': 'yes', 's2': 'yes'})
-        with (pytest.raises(RuntimeError, match='Mapped cell.*s3.*failed'),
+        failure = 'Mapped cell.*s3.*failed'
+        with (pytest.raises(RuntimeError, match=failure),
               ParallelContext(None) as ctx):
             filter_samples = ctx.get_action('dummy_plugin', 'filter_samples')
             producer = filter_samples(data).retained
@@ -833,8 +964,18 @@ def test_range_alignment_excludes_failed_cells_before_dispatch(tmp_path):
             with cell.open() as value:
                 assert value == '4'
 
-        for output in (producer, consumer):
-            with pytest.raises(RuntimeError, match='Mapped cell.*s3.*failed'):
+            with pytest.raises(RuntimeError, match=failure):
+                consumer._future_.result(timeout=5)
+            increment = ctx.get_action('dummy_plugin', 'increment_samples')
+            final = increment(consumer, 1).output
+            _, index, _ = final._coordinate_index.result(timeout=5)
+            assert tuple(index) == (Coord(sample='s1'),)
+            cell = index[Coord(sample='s1')].future.result(timeout=5)
+            with cell.open() as value:
+                assert value == '5'
+
+        for output in (producer, consumer, final):
+            with pytest.raises(RuntimeError, match=failure):
                 output.result()
     assert observed == [('4', 'yes')]
 

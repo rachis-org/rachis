@@ -6,7 +6,12 @@
 # The full license is in the file LICENSE, distributed with this software.
 # ----------------------------------------------------------------------------
 
-"""Bind coordinate calls and assemble their committed cells locally."""
+"""Bind coordinate calls before dispatch and assemble their outputs locally.
+
+Each worker enters the ordinary callable runner and commits a value, absence,
+or failure after the evaluation wrappers unwind. Downstream binding can use
+the cell futures while artifact assembly waits for publication prerequisites.
+"""
 
 import copy
 import csv
@@ -155,9 +160,62 @@ def _realized_index(cells, *, into):
 
 
 def _index_for_path(semantic_type, source, target, cells):
+    """Use the same path or group its cells by a registered prefix.
+
+    Writing just the surviving descendants must give the same prefix view
+    and presence as writing the complete artifact.
+    """
     if source.axes == target.axes:
         return cells
-    return None
+    length = len(target.axes)
+    if source.axes[:length] != target.axes:
+        return None
+    axes = PluginManager().get_axes(semantic_type)
+    reader = axes.get(target.as_unbound())
+    if reader is None:
+        return None
+    writer = axes[source.as_unbound()].axis
+    groups = {}
+    for coord, cell in cells.items():
+        prefix = coord.project(target.axes)
+        groups.setdefault(prefix, []).append((coord, cell))
+
+    return {
+        coord: _prefix_cell(coord, writer, reader.axis,
+                            reader.directory_format, members)
+        for coord, members in groups.items()
+    }
+
+
+def _prefix_cell(coordinate, writer, reader, reader_format, members):
+    def collect(views):
+        pairs = zip(members, views, strict=True)
+        chunks = tuple((coord, view) for (coord, _), view in pairs
+                       if view is not None)
+        if chunks:
+            return CellView(partial(
+                _open_prefix, coordinate, writer, reader, reader_format, chunks
+            ))
+        return None
+
+    return ProxyCell(after_all((cell.future for _, cell in members), collect))
+
+
+@contextmanager
+def _open_prefix(coordinate, writer, reader, reader_format, chunks,
+                 recorder=None):
+    with ExitStack() as resources:
+        directory = writer.write(
+            (coord, resources.enter_context(view.open(recorder)))
+            for coord, view in chunks
+        )
+        readable = directory
+        if type(directory) is not reader_format:
+            source = transform.ModelType.from_view_type(type(directory))
+            target = transform.ModelType.from_view_type(reader_format)
+            readable = source.make_transformation(
+                target, recorder=recorder)(directory)
+        yield reader(readable.path, mode='r')[coordinate]
 
 
 def coordinate_index(value, pattern, *, ctx, need_presence=True):
