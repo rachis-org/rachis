@@ -210,8 +210,8 @@ class _MetadataBase:
     def save(self, filepath, ext=None):
         """Save a TSV metadata file.
 
-        The TSV metadata file format is described at https://docs.qiime2.org in
-        the Metadata Tutorial.
+        The TSV metadata file format is described at
+        https://use.rachis.org/en/stable/references/metadata/.
 
         The file will always include the ``#q2:types`` directive in order to
         make the file roundtrippable without relying on column type inference.
@@ -268,7 +268,7 @@ class Metadata(_MetadataBase):
     feature IDs) to columns of metadata associated with each ID.
 
     For more details about metadata in QIIME 2, including the TSV metadata file
-    format, see the Metadata Tutorial at https://docs.qiime2.org.
+    format, see https://use.rachis.org/en/stable/references/metadata/.
 
     The following text focuses on design and considerations when working with
     ``Metadata`` objects at the API level.
@@ -282,7 +282,8 @@ class Metadata(_MetadataBase):
     respectively.
 
     A ``Metadata`` object is closely linked to its corresponding TSV metadata
-    file format described at https://docs.qiime2.org. Therefore, certain
+    file format described at
+    https://use.rachis.org/en/stable/references/metadata/. Therefore, certain
     requirements present in the file format are also enforced on the in-memory
     object in order to make serialized ``Metadata`` objects roundtrippable when
     loaded from disk again. For example, IDs cannot begin with a pound
@@ -354,8 +355,8 @@ class Metadata(_MetadataBase):
              default_missing_scheme=DEFAULT_MISSING):
         """Load a TSV metadata file.
 
-        The TSV metadata file format is described at https://docs.qiime2.org in
-        the Metadata Tutorial.
+        The TSV metadata file format is described at
+        https://use.rachis.org/en/stable/references/metadata/.
 
         Parameters
         ----------
