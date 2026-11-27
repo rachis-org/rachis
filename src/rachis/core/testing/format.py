@@ -171,3 +171,28 @@ class ExportableOnlyFormat(TextFileFormat):
     """
     A format that can only be transformed to.
     """
+
+class FirstStepFormat(model.DirectoryFormat):
+    """
+    A format for testing transitive transformers
+    """
+
+class SecondStepFormat(model.DirectoryFormat):
+    """
+    A format for testing transitive transformers
+    """
+
+class ThirdStepFormat(model.DirectoryFormat):
+    """
+    A format for testing transitive transformers
+    """
+
+class FourthStepFormat(model.DirectoryFormat):
+    """
+    A format for testing transitive transformers
+    """
+
+class FifthStepFormat(model.DirectoryFormat):
+    """
+    A format for testing transitive transformers
+    """

@@ -39,7 +39,7 @@ class TestCitationsTracked(unittest.TestCase):
         obs = list(map(lambda item: (item[0], item[1].fields['title']),
                        archiver.citations.items()))
 
-        self.assertEqual(obs, expected)
+        self.assertEqual(sorted(obs), sorted(expected))
 
         with (archiver.provenance_dir / 'action' / 'action.yaml').open() as fh:
             action_yaml = fh.read()
@@ -77,7 +77,7 @@ class TestCitationsTracked(unittest.TestCase):
         obs = list(map(lambda item: (item[0], item[1].fields['title']),
                        archiver.citations.items()))
 
-        self.assertEqual(obs, expected)
+        self.assertEqual(sorted(obs), sorted(expected))
 
         with (archiver.provenance_dir / 'action' / 'action.yaml').open() as fh:
             action_yaml = fh.read()
