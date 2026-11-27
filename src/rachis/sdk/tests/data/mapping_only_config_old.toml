@@ -1,4 +1,4 @@
 [parsl]
 
 [parsl.executor_mapping]
-list_of_ints = "test"
+list_of_ints = "tpool"
